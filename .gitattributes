@@ -1,0 +1,13 @@
+# Normalisation des fins de ligne
+* text=auto eol=lf
+
+# Windows
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Fichiers binaires
+*.db binary
+*.sqlite binary
+*.png binary
+*.jpg binary
+*.ico binary
