@@ -1,6 +1,6 @@
 """Tests du stockage : round-trip et séparation des tables (§29, §34)."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -17,7 +17,7 @@ from network_monitor.app.models import (
 )
 from network_monitor.storage.repository import SqlAlchemyRepository
 
-T0 = datetime(2026, 8, 1, 18, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 8, 1, 18, 0, tzinfo=UTC)
 
 
 @pytest.fixture

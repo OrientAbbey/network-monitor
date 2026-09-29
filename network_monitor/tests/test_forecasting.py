@@ -1,6 +1,6 @@
 """Tests unitaires du forecasting (§10-§13)."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -12,7 +12,7 @@ from network_monitor.analysis.forecasting import (
 )
 from network_monitor.app.models import ForecastModelName, ForecastResult, TrafficSample
 
-T0 = datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 8, 1, 0, 0, tzinfo=UTC)
 
 
 def _flat_history(days: int, level: float = 100.0, interval=timedelta(minutes=5)) -> list[TrafficSample]:

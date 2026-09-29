@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from network_monitor.app.config import AppConfig
@@ -29,7 +29,7 @@ from network_monitor.evaluation.metrics import (
 )
 from network_monitor.storage.repository import SqlAlchemyRepository
 
-DEFAULT_EVAL_START = datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc)
+DEFAULT_EVAL_START = datetime(2026, 9, 1, 0, 0, tzinfo=UTC)
 
 # Durée de chaque type de scénario dans la suite par défaut.
 _DURATIONS = {

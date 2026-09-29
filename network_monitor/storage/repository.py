@@ -10,7 +10,8 @@ sérialisation des `evidence` utilise JSON via Pydantic, jamais `pickle`.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import JSON, Column, DateTime, Float, Index, Integer, String, create_engine, func, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -33,14 +34,14 @@ def _to_utc(dt: datetime | None) -> datetime | None:
     """Normalise en UTC avant écriture (SQLite ne conserve pas le fuseau horaire)."""
     if dt is None:
         return None
-    return dt.astimezone(timezone.utc)
+    return dt.astimezone(UTC)
 
 
 def _as_utc(dt: datetime | None) -> datetime | None:
     """Ré-attache le fuseau UTC à la lecture (perdu par le driver SQLite, §3 exige timezone-aware)."""
     if dt is None:
         return None
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 class RawMeasurementRow(Base):
@@ -438,7 +439,7 @@ class SqlAlchemyRepository(Repository):
             ]
 
     def list_incidents_overlapping(self, start: datetime, end: datetime) -> list[Incident]:
-        first_seen = func.coalesce(IncidentRow.suspected_at, IncidentRow.opened_at, IncidentRow.last_seen_at)
+        first_seen: Any = func.coalesce(IncidentRow.suspected_at, IncidentRow.opened_at, IncidentRow.last_seen_at)
         with self._session() as session:
             rows = (
                 session.query(IncidentRow)

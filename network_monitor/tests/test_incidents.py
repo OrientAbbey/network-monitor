@@ -1,12 +1,12 @@
 """Tests du moteur d'incidents : hystérésis, persistance, trous de données (§34)."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from network_monitor.app.config import IncidentConfig
 from network_monitor.app.models import AnomalyResult, IncidentStatus
 from network_monitor.incidents.manager import IncidentManager
 
-T0 = datetime(2026, 8, 1, 18, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 8, 1, 18, 0, tzinfo=UTC)
 
 
 def _result(minute, score, dg=False, output_id="OUT_017"):

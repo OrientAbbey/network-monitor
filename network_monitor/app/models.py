@@ -15,10 +15,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -140,7 +138,7 @@ class ValidatedSample(BaseModel):
 
     output_id: str
     timestamp: datetime
-    sample: Optional[TrafficSample] = None
+    sample: TrafficSample | None = None
     quality_flags: list[DataQualityFlag] = Field(default_factory=list)
 
     # Drapeaux qui rendent la mesure inutilisable pour le forecasting et
@@ -180,7 +178,7 @@ class ForecastResult(BaseModel):
     model_name: ForecastModelName
 
     @model_validator(mode="after")
-    def bounds_are_consistent(self) -> "ForecastResult":
+    def bounds_are_consistent(self) -> ForecastResult:
         if not (self.lower_bound_mbps <= self.predicted_traffic_mbps <= self.upper_bound_mbps):
             raise ValueError(
                 "l'intervalle prédictif doit vérifier "
@@ -218,8 +216,8 @@ class AnomalyResult(BaseModel):
     persistence_score: float = Field(ge=0, le=1, default=0.0)
     joint_anomaly_score: float = Field(ge=0, le=1)
 
-    traffic_deviation_percent: Optional[float] = None
-    loss_deviation_points: Optional[float] = None
+    traffic_deviation_percent: float | None = None
+    loss_deviation_points: float | None = None
     traffic_out_of_interval: bool = False
 
     data_gap: bool = False
@@ -243,12 +241,12 @@ class IncidentEvidence(BaseModel):
 
     timestamp: datetime
 
-    traffic_mbps: Optional[float] = None
-    expected_traffic_mbps: Optional[float] = None
-    traffic_deviation_percent: Optional[float] = None
+    traffic_mbps: float | None = None
+    expected_traffic_mbps: float | None = None
+    traffic_deviation_percent: float | None = None
 
-    loss_percent: Optional[float] = None
-    expected_loss_percent: Optional[float] = None
+    loss_percent: float | None = None
+    expected_loss_percent: float | None = None
 
     traffic_anomaly_score: float = Field(ge=0, le=1)
     loss_anomaly_score: float = Field(ge=0, le=1)
@@ -276,16 +274,16 @@ class Incident(BaseModel):
     severity: Severity
     incident_type: IncidentType
 
-    suspected_at: Optional[datetime] = None
-    opened_at: Optional[datetime] = None
+    suspected_at: datetime | None = None
+    opened_at: datetime | None = None
     last_seen_at: datetime
-    closed_at: Optional[datetime] = None
+    closed_at: datetime | None = None
 
     score: float = Field(ge=0, le=1)
     """PIC du score joint depuis l'ouverture de l'incident : ne redescend jamais
     tant que l'incident est actif. À ne pas confondre avec `current_score`."""
 
-    current_score: Optional[float] = Field(default=None, ge=0, le=1)
+    current_score: float | None = Field(default=None, ge=0, le=1)
     """Score joint du DERNIER pas de temps traité. `severity` est recalculée à
     partir de cette valeur (elle peut donc redescendre), alors que `score` est un
     pic : afficher les deux évite l'apparente contradiction « score 0.90 mais
@@ -299,7 +297,7 @@ class Incident(BaseModel):
     evidence: list[IncidentEvidence] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def timestamps_are_ordered(self) -> "Incident":
+    def timestamps_are_ordered(self) -> Incident:
         if self.opened_at is not None and self.suspected_at is not None:
             if self.opened_at < self.suspected_at:
                 raise ValueError("opened_at ne peut pas précéder suspected_at")
@@ -309,7 +307,7 @@ class Incident(BaseModel):
         return self
 
     @property
-    def duration_seconds(self) -> Optional[float]:
+    def duration_seconds(self) -> float | None:
         """Durée depuis l'ouverture effective (opened_at), pas depuis SUSPECT."""
         if self.opened_at is None:
             return None

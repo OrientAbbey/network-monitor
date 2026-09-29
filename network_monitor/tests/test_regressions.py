@@ -4,7 +4,7 @@ Chacun échouait avant le correctif correspondant.
 """
 
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -28,7 +28,7 @@ from network_monitor.data.mock import MockDataSource
 from network_monitor.data.source import DataValidator
 from network_monitor.storage.repository import SqlAlchemyRepository
 
-NOW = datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 1, 0, 0, tzinfo=UTC)
 IV = timedelta(minutes=5)
 
 

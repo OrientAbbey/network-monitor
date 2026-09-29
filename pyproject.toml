@@ -17,10 +17,39 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "httpx>=0.27"]
+dev = ["pytest>=8.0", "httpx>=0.27", "ruff>=0.6", "mypy>=1.10", "types-PyYAML"]
 
 [tool.setuptools.packages.find]
 include = ["network_monitor*"]
 
 [tool.pytest.ini_options]
 testpaths = ["network_monitor/tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["frontend", "node_modules"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",  # longueur de ligne : les docstrings/commentaires en français dépassent volontairement
+    "B008",  # Query(...) / Depends(...) comme valeur par défaut : idiome FastAPI
+    "UP042",  # (str, Enum) -> StrEnum : changerait str()/format() des membres, ce qui est visible dans les messages et le JSON
+]
+
+[tool.ruff.lint.per-file-ignores]
+"network_monitor/tests/*" = ["B017"]
+
+[tool.mypy]
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# SQLAlchemy 2 avec des colonnes déclarées à l'ancienne (`Column(...)`, pas `Mapped[...]`) :
+# mypy y voit des `Column[...]` là où l'ORM renvoie des valeurs Python. Migrer vers
+# `Mapped[...]` supprimerait ces exceptions ; d'ici là, elles sont limitées à ce module.
+module = "network_monitor.storage.repository"
+disable_error_code = ["arg-type", "attr-defined", "assignment", "misc"]

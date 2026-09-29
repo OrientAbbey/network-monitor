@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from network_monitor.app.config import IncidentConfig
 from network_monitor.app.models import (

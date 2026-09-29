@@ -1,6 +1,6 @@
 """Recalibration périodique (§32), rétention, alertes persistées, incident.current_score."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -16,7 +16,7 @@ from network_monitor.app.models import (
 from network_monitor.data.mock import AnomalyScenario, MockDataSource, ScenarioType
 from network_monitor.storage.repository import SqlAlchemyRepository
 
-NOW = datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 1, 0, 0, tzinfo=UTC)
 IV = timedelta(minutes=5)
 
 
@@ -72,7 +72,12 @@ def test_recalibration_triggers_on_schedule_and_is_configurable(tmp_path):
         assert loop._last_calibrated_at == NOW
         calls = []
         original = loop.calibrate
-        loop.calibrate = lambda now, exclude_windows=None: (calls.append(now), original(now, exclude_windows))
+
+        def recording(now, exclude_windows=None):
+            calls.append(now)
+            return original(now, exclude_windows)
+
+        loop.calibrate = recording
         for k in range(1, 16):
             loop.run_tick(NOW + k * IV)
         assert calls == [NOW + 6 * IV, NOW + 12 * IV]  # toutes les 30 min = 6 pas

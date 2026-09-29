@@ -6,7 +6,7 @@ transmettre la vérité terrain du Mock au détecteur.
 """
 
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -16,7 +16,7 @@ from network_monitor.app.models import Severity
 from network_monitor.data.mock import AnomalyScenario, MockDataSource, ScenarioType
 from network_monitor.storage.repository import IncidentRow, SqlAlchemyRepository
 
-NOW = datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 1, 0, 0, tzinfo=UTC)
 OUTPUT = "OUT_001"
 
 

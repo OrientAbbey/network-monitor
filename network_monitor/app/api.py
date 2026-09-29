@@ -18,7 +18,7 @@ import logging
 import os
 import threading
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -65,7 +65,7 @@ class MonitoringState:
         self.storage: Repository = SqlAlchemyRepository(db_url)
         self.source = MockDataSource(interval=self.config.monitoring.interval)
         self.loop = MonitoringLoop(self.source, self.storage, self.config)
-        self.now = datetime.now(timezone.utc)
+        self.now = datetime.now(UTC)
         self.seconds_per_tick = 2.0
         self.calibrated = False
         self.running = False
@@ -215,7 +215,7 @@ MAX_WINDOW_SPAN = timedelta(days=31)
 
 def _as_aware(dt: datetime) -> datetime:
     """Un datetime naïf est interprété comme UTC (au lieu d'une comparaison qui lèverait un TypeError → 500)."""
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 def _parse_window(since: datetime | None, until: datetime | None, default_span: timedelta) -> tuple[datetime, datetime]:

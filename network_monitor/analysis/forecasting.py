@@ -13,6 +13,7 @@ import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
 import numpy as np
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
@@ -180,7 +181,7 @@ class HoltWintersModel(ForecastModel):
 
     def __init__(self, output_id: str) -> None:
         self.output_id = output_id
-        self._fit_result = None
+        self._fit_result: Any = None
         self._interval: timedelta | None = None
         self._residual_std_log: float = 0.0
         self._last_level: float = 0.0
@@ -223,7 +224,7 @@ class HoltWintersModel(ForecastModel):
         self._residual_std_log = float(np.std(residuals))
 
     def predict(self, from_time: datetime, horizon: timedelta, interval: timedelta) -> list[ForecastResult]:
-        if self._fit_result is None:
+        if self._fit_result is None or self._last_timestamp is None:
             raise RuntimeError("Modèle non calibré : appeler fit() avant predict()")
 
         n_steps = max(1, int(horizon / interval))

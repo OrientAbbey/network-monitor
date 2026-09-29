@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from network_monitor.app.models import AnomalyResult, ForecastResult, TrafficSample
 from network_monitor.analysis.forecasting import compute_residual
+from network_monitor.app.models import AnomalyResult, ForecastResult, TrafficSample
 
 # Même quantile que l'intervalle de prévision (§13) : une bande "normale"
 # à ~80% de couverture, pas un seuil à 1 dispersion (trop sensible au bruit).
@@ -39,7 +39,7 @@ class LossBaseline:
     dispersion: float  # déjà bornée par loss_std_floor
 
     @classmethod
-    def from_history(cls, history: list[TrafficSample], loss_std_floor: float) -> "LossBaseline":
+    def from_history(cls, history: list[TrafficSample], loss_std_floor: float) -> LossBaseline:
         if not history:
             raise ValueError("Historique vide : impossible de calibrer la baseline des pertes")
         values = np.array([s.loss_percent for s in history])

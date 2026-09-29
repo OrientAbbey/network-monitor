@@ -2,7 +2,7 @@
 
 import json
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -26,7 +26,7 @@ from network_monitor.evaluation import (
 )
 from network_monitor.evaluation.__main__ import main as cli_main
 
-T0 = datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 9, 1, 0, 0, tzinfo=UTC)
 IV = timedelta(minutes=5)
 
 
@@ -182,7 +182,7 @@ def test_default_scenarios_cover_all_types_after_eval_start_without_overlap_per_
     assert all(s.start_time >= T0 + timedelta(hours=3) for s in scenarios)
     for out in {s.output_id for s in scenarios}:
         mine = sorted((s for s in scenarios if s.output_id == out), key=lambda s: s.start_time)
-        assert all(a.end_time <= b.start_time for a, b in zip(mine, mine[1:]))
+        assert all(a.end_time <= b.start_time for a, b in zip(mine, mine[1:], strict=False))
 
 
 def test_run_evaluation_rejects_scenarios_overlapping_calibration_period():

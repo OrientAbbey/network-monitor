@@ -14,8 +14,8 @@ Ligne de commande : `python -m network_monitor.evaluation --help`.
 
 from network_monitor.evaluation.harness import EvaluationReport, default_scenarios, run_evaluation
 from network_monitor.evaluation.metrics import (
-    forecast_metrics,
     false_positive_rate,
+    forecast_metrics,
     match_incidents,
     summarize_delays,
 )

@@ -1,12 +1,13 @@
 """Vérifications rapides des contraintes définies sur les modèles (§3, §13, §16, §19-24)."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
 
 from network_monitor.app.models import (
     AnomalyResult,
+    DataQualityFlag,
     ForecastModelName,
     ForecastResult,
     Incident,
@@ -16,10 +17,9 @@ from network_monitor.app.models import (
     Severity,
     TrafficSample,
     ValidatedSample,
-    DataQualityFlag,
 )
 
-NOW = datetime(2026, 8, 1, 18, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 1, 18, 0, 0, tzinfo=UTC)
 
 
 # --- TrafficSample -----------------------------------------------------

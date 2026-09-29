@@ -1,6 +1,6 @@
 """Tests unitaires de la détection (§14-§16)."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from network_monitor.analysis.detection import (
     LossBaseline,
@@ -12,7 +12,7 @@ from network_monitor.analysis.detection import (
 )
 from network_monitor.app.models import ForecastModelName, ForecastResult, TrafficSample
 
-T0 = datetime(2026, 8, 1, 18, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 8, 1, 18, 0, tzinfo=UTC)
 
 
 def _forecast(predicted=100.0, lower=90.0, upper=110.0):

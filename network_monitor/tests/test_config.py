@@ -1,6 +1,6 @@
 """Tests de la configuration (§35) : chaque option est soit effective, soit explicitement refusée."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -9,10 +9,10 @@ from network_monitor.analysis.detection import LossBaseline, PersistenceTracker,
 from network_monitor.analysis.forecasting import HoltWintersModel, SeasonalBaselineModel, select_model
 from network_monitor.app.config import AppConfig
 from network_monitor.app.models import AnomalyResult, ForecastModelName, ForecastResult, TrafficSample
-from network_monitor.incidents.manager import IncidentManager
 from network_monitor.data.mock import MockDataSource
+from network_monitor.incidents.manager import IncidentManager
 
-T0 = datetime(2026, 9, 1, tzinfo=timezone.utc)
+T0 = datetime(2026, 9, 1, tzinfo=UTC)
 
 
 def _forecast(pred=100.0):
@@ -66,7 +66,7 @@ def test_unknown_forecast_model_is_refused():
 
 def test_select_model_honours_allowed_models():
     src = MockDataSource(seed=1)
-    now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 1, tzinfo=UTC)
     hist = [s for s in src.load_history(now - timedelta(days=50), now) if s.output_id == "OUT_001"]
     only_baseline = select_model("OUT_001", hist, timedelta(days=45), timedelta(days=7),
                                  allowed_models=["seasonal_baseline"])
@@ -89,6 +89,7 @@ def test_alerts_disabled_produces_no_alerts_but_incidents_still_evolve():
         events_on += len(a_on)
         events_off += len(a_off)
     assert events_on > 0 and events_off == 0
+    assert inc_on is not None and inc_off is not None
     assert inc_on.status == inc_off.status  # le cycle de vie n'est pas affecté
 
 

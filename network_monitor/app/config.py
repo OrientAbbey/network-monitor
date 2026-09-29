@@ -256,7 +256,7 @@ class AppConfig(BaseModel):
     alerts: AlertsConfig = AlertsConfig()
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "AppConfig":
+    def from_yaml(cls, path: str | Path) -> AppConfig:
         """
         Charge la configuration depuis un fichier YAML avec `safe_load`
         (jamais `yaml.load`, pour ne pas permettre l'exécution de code
@@ -266,5 +266,5 @@ class AppConfig(BaseModel):
         return cls.model_validate(raw)
 
     @classmethod
-    def defaults(cls) -> "AppConfig":
+    def defaults(cls) -> AppConfig:
         return cls()

@@ -18,7 +18,6 @@ from pydantic import BaseModel, Field
 from network_monitor.app.models import Severity, TrafficSample
 from network_monitor.data.source import DataSource
 
-
 # ---------------------------------------------------------------------------
 # Profils de sortie
 # ---------------------------------------------------------------------------
@@ -277,7 +276,7 @@ class MockDataSource(DataSource):
         all_samples: list[TrafficSample] = []
         for profile in self._profiles.values():
             traffic, loss = self._simulate_output(profile, timestamps)
-            for ts, tr, lo in zip(timestamps, traffic, loss):
+            for ts, tr, lo in zip(timestamps, traffic, loss, strict=True):
                 all_samples.append(
                     TrafficSample(
                         timestamp=ts,
