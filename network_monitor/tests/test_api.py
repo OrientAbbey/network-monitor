@@ -12,6 +12,22 @@ from network_monitor.app.models import Severity
 from network_monitor.data.mock import AnomalyScenario, ScenarioType
 
 
+def _wait_until(predicate, timeout: float = 30.0, interval: float = 0.05):
+    """
+    Attente active sur une condition observable, au lieu d'un `time.sleep()` de
+    durée fixe : indépendante de la vitesse du disque/de la machine (un
+    sleep court était insuffisant quand un tick prenait ~1,5 s, REVUE.md
+    P0-3 cause 2) et ne ralentit pas la suite quand la condition est
+    remplie rapidement. Renvoie la dernière valeur de `predicate`.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        value = predicate()
+        if value or time.monotonic() >= deadline:
+            return value
+        time.sleep(interval)
+
+
 @pytest.fixture
 def client(tmp_path):
     db_url = f"sqlite:///{tmp_path / 'test.db'}"
@@ -24,6 +40,12 @@ def client(tmp_path):
     with TestClient(api_module.app) as c:
         yield c
     state.stop()
+    state.storage.dispose()
+
+
+def state_running_and_calibrated(client) -> bool:
+    body = client.get("/monitoring/status").json()
+    return bool(body["running"] and body["calibrated"])
 
 
 def test_health(client):
@@ -41,7 +63,8 @@ def test_monitoring_starts_automatically_via_lifespan(client):
 
 
 def test_outputs_listing_reflects_live_data(client):
-    time.sleep(1.0)  # laisser tourner quelques ticks
+    # attendre que chaque sortie ait reçu au moins une mesure
+    _wait_until(lambda: all(o["latest_sample"] is not None for o in client.get("/outputs").json()))
     r = client.get("/outputs")
     assert r.status_code == 200
     body = r.json()
@@ -61,7 +84,8 @@ def test_history_window_validation(client):
 
 
 def test_history_and_anomalies_grow_over_time(client):
-    time.sleep(1.0)
+    _wait_until(lambda: client.get("/outputs/OUT_001/history").json()
+                and client.get("/outputs/OUT_001/anomalies").json())
     hist = client.get("/outputs/OUT_001/history").json()
     anomalies = client.get("/outputs/OUT_001/anomalies").json()
     assert len(hist) > 0
@@ -111,10 +135,15 @@ def test_scripted_incident_is_visible_end_to_end(client):
             loss_offset_points=10.0,
         )
     )
-    time.sleep(2.5)
 
-    incidents = client.get("/incidents", params={"limit": 200}).json()
-    matches = [i for i in incidents if i["output_id"] == "OUT_001" and i["incident_type"] == "traffic_drop_with_high_loss"]
+    def _matches():
+        incidents = client.get("/incidents", params={"limit": 200}).json()
+        return [
+            i for i in incidents
+            if i["output_id"] == "OUT_001" and i["incident_type"] == "traffic_drop_with_high_loss"
+        ]
+
+    matches = _wait_until(_matches)
     assert matches, "le scénario scripté aurait dû produire au moins un incident traffic_drop_with_high_loss"
 
     detail = client.get(f"/incidents/{matches[0]['id']}").json()
@@ -127,7 +156,7 @@ def test_unknown_incident_returns_404(client):
 
 
 def test_forecast_ahead_returns_points_beyond_now(client):
-    time.sleep(0.5)
+    _wait_until(lambda: state_running_and_calibrated(client))
     r = client.get("/outputs/OUT_001/forecast/ahead", params={"horizon_minutes": 30})
     assert r.status_code == 200
     points = r.json()
@@ -137,3 +166,60 @@ def test_forecast_ahead_returns_points_beyond_now(client):
 
 def test_forecast_ahead_unknown_output_returns_404(client):
     assert client.get("/outputs/UNKNOWN/forecast/ahead").status_code == 404
+
+
+# --- Sécurité et robustesse des entrées (PLAN_CORRECTION.md, Lot 1) ---------
+
+
+def test_cors_allows_local_frontend_origin(client):
+    r = client.get("/health", headers={"Origin": "http://localhost:5173"})
+    assert r.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+
+def test_cors_rejects_foreign_origin(client):
+    r = client.get("/health", headers={"Origin": "https://evil.example.com"})
+    assert "access-control-allow-origin" not in r.headers
+
+
+def test_cors_preflight_refused_for_foreign_origin(client):
+    r = client.options(
+        "/config",
+        headers={
+            "Origin": "https://evil.example.com",
+            "Access-Control-Request-Method": "PUT",
+        },
+    )
+    assert "access-control-allow-origin" not in r.headers
+
+
+def test_history_window_too_wide_is_rejected(client):
+    r = client.get(
+        "/outputs/OUT_001/history",
+        params={"since": "2020-01-01T00:00:00Z", "until": "2026-01-01T00:00:00Z"},
+    )
+    assert r.status_code == 400
+
+
+def test_history_accepts_naive_datetimes_without_server_error(client):
+    r = client.get(
+        "/outputs/OUT_001/history",
+        params={"since": "2026-01-01T00:00:00", "until": "2026-01-02T00:00:00"},
+    )
+    assert r.status_code == 200
+
+
+def test_config_rejects_warning_score_above_open_score(client):
+    r = client.put("/config", json={"warning_score": 0.9})
+    assert r.status_code == 422
+    assert client.get("/config").json()["incident"]["warning_score"] == 0.5
+
+
+def test_stop_then_start_never_runs_two_loop_threads(client):
+    import threading
+
+    for _ in range(3):
+        client.post("/monitoring/stop")
+        client.post("/monitoring/start")
+    loops = [t for t in threading.enumerate() if t.name.startswith("Thread") and t.is_alive()
+             and getattr(t, "_target", None) == api_module.state._run]
+    assert len(loops) <= 1

@@ -1,7 +1,5 @@
 """Tests du stockage : round-trip et séparation des tables (§29, §34)."""
 
-import os
-import tempfile
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -23,11 +21,17 @@ T0 = datetime(2026, 8, 1, 18, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture
-def repo():
-    path = tempfile.mktemp(suffix=".db")
+def repo(tmp_path):
+    # `tmp_path` (plutôt que `tempfile.mktemp`, déprécié et sujet à une
+    # course sur le nom de fichier, REVUE.md S-10) : un répertoire dédié à
+    # ce test, nettoyé par pytest lui-même. `dispose()` libère le pool de
+    # connexions avant que pytest ne tente de supprimer le répertoire —
+    # sans ça, le fichier reste verrouillé au teardown sous Windows
+    # (REVUE.md P0-3, cause 1).
+    path = tmp_path / "test.db"
     r = SqlAlchemyRepository(f"sqlite:///{path}")
     yield r
-    os.remove(path)
+    r.dispose()
 
 
 def test_samples_round_trip_preserves_timezone(repo):
