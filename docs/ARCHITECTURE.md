@@ -141,7 +141,7 @@ réellement passée par la boucle de monitoring l'est.
 
 ## 5. Vérifications effectuées
 
-- Suite de tests complète (66 tests) exécutée depuis la structure finale
+- Suite de tests complète (98 tests) exécutée depuis la structure finale
   du projet (imports vérifiés depuis la racine).
 - `npm run build` du frontend depuis la structure finale.
 - Backend démarré en conditions réelles (`uvicorn`, pas seulement

@@ -5,17 +5,27 @@ Système de détection d'anomalies réseau non supervisée : backend Python
 Aucune simulation côté client — toutes les données affichées viennent du
 backend, qui les génère (source Mock), les analyse et les stocke.
 
-## ⚠️ État du projet
+## État du projet
 
-Ce dépôt est publié à l'état de développement, **sans garantie de fonctionnement**.
-Une revue complète a été réalisée : voir **[`REVUE.md`](REVUE.md)**.
+Ce dépôt est un projet en développement. Une revue complète figure dans
+**[`REVUE.md`](REVUE.md)** ; le plan de correction et son avancement dans
+**[`PLAN_CORRECTION.md`](PLAN_CORRECTION.md)**.
 
-Points bloquants identifiés (détails, correctifs et priorisation dans `REVUE.md`) :
+Corrigé depuis la revue (Lots 0 et 1 du plan) : installation du frontend à
+froid, suite de tests verte et indépendante de la vitesse du disque (98 tests),
+SQLite en mode WAL avec une transaction par tick, CORS restreint aux origines
+locales du frontend, bornes sur les fenêtres temporelles, validation complète
+des seuils d'incident, détection de trous de données (§31) qui ne génère plus
+de faux positifs, et prévision Holt-Winters qui respecte l'horodatage demandé.
 
-- `npm install` / `npm ci` **échouent** (`@vitejs/plugin-react` incompatible avec `vite@8`) — le frontend n'est pas installable à froid. Contournement : `npm install --legacy-peer-deps`.
-- La suite de tests n'est **pas verte** : sur 66 tests, 54 passent, 12 échouent et 5 erreurient (descripteur SQLite non libéré au teardown).
-- L'API n'a **aucune authentification** et autorise CORS sur toutes les origines : ne l'exposez pas sur un réseau autre que `localhost`.
-- Un tick de monitoring prend ~1,5 s, à cause de `fsync` SQLite (corrigeable par `PRAGMA journal_mode=WAL` + `synchronous=NORMAL`, gain mesuré 23×).
+**Limites connues** (restent à traiter, voir le plan) :
+
+- L'API n'a **aucune authentification** : ne l'exposez pas au-delà de `localhost`.
+- Pas de recalibration périodique du modèle (§32) ni de module d'évaluation
+  quantitative (§33) ; les alertes générées par le gestionnaire d'incidents ne
+  sont pas encore exposées par l'API (§27).
+- Rétention des mesures non bornée, lint/typage (`ruff`, `mypy`) et CI absents,
+  améliorations d'accessibilité du frontend en attente.
 
 ## Structure
 
@@ -30,7 +40,7 @@ network_monitor/        Backend Python (le paquet importable)
   analysis/              Forecasting + détection d'anomalies
   incidents/             Moteur d'incidents (machine à états, hystérésis)
   storage/               Persistance SQLite/SQLAlchemy
-  tests/                 66 tests (unitaires, scénarios, API)
+  tests/                 98 tests (unitaires, scénarios, API, non-régression)
 
 frontend/                Dashboard React (Vite), branché sur l'API
   src/
