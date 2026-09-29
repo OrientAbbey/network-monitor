@@ -10,20 +10,43 @@ from datetime import timedelta
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def _parse_duration(value: str | int | float) -> timedelta:
-    """Convertit '5m', '30d', '10min' etc. en timedelta. Accepte aussi un nombre de secondes."""
+    """
+    Convertit '5m', '30d', '10min' etc. en timedelta. Accepte aussi un nombre
+    de secondes (ou la chaîne '0'). Une durée négative est rejetée : une
+    `minimum_duration` négative rendrait la condition d'ouverture vraie dès le
+    premier tick et contournerait l'hystérésis du §21.
+    """
+    if isinstance(value, bool):  # bool est un int en Python : `True` ne doit pas devenir 1 s
+        raise ValueError(f"Durée non reconnue : {value!r}")
     if isinstance(value, (int, float)):
-        return timedelta(seconds=float(value))
-    text = str(value).strip().lower()
-    units = {"s": "seconds", "m": "minutes", "min": "minutes", "h": "hours", "d": "days"}
-    for suffix, unit in sorted(units.items(), key=lambda kv: -len(kv[0])):
-        if text.endswith(suffix):
-            number = text[: -len(suffix)]
-            return timedelta(**{unit: float(number)})
-    raise ValueError(f"Durée non reconnue : {value!r}")
+        result = timedelta(seconds=float(value))
+    else:
+        text = str(value).strip().lower()
+        if text in {"0", "0.0"}:
+            result = timedelta(0)
+        else:
+            units = {"s": "seconds", "m": "minutes", "min": "minutes", "h": "hours", "d": "days"}
+            for suffix, unit in sorted(units.items(), key=lambda kv: -len(kv[0])):
+                if text.endswith(suffix):
+                    result = timedelta(**{unit: float(text[: -len(suffix)])})
+                    break
+            else:
+                raise ValueError(f"Durée non reconnue : {value!r}")
+    if result < timedelta(0):
+        raise ValueError(f"Durée négative refusée : {value!r}")
+    return result
+
+
+def _coerce_duration(v):
+    """Point d'entrée commun des validateurs : parse les chaînes/nombres et vérifie aussi les `timedelta` déjà construits."""
+    result = v if isinstance(v, timedelta) else _parse_duration(v)
+    if result < timedelta(0):
+        raise ValueError(f"Durée négative refusée : {v!r}")
+    return result
 
 
 class ModelSelectionConfig(BaseModel):
@@ -33,7 +56,7 @@ class ModelSelectionConfig(BaseModel):
     @field_validator("minimum_history", "validation_window", mode="before")
     @classmethod
     def _parse(cls, v):
-        return _parse_duration(v) if not isinstance(v, timedelta) else v
+        return _coerce_duration(v)
 
 
 class LossDetectionConfig(BaseModel):
@@ -76,7 +99,7 @@ class IncidentConfig(BaseModel):
     @field_validator("minimum_duration", "recovery_duration", "stale_after", mode="before")
     @classmethod
     def _parse(cls, v):
-        return _parse_duration(v) if not isinstance(v, timedelta) else v
+        return _coerce_duration(v)
 
     @field_validator("close_score")
     @classmethod
@@ -85,6 +108,18 @@ class IncidentConfig(BaseModel):
         if open_score is not None and v >= open_score:
             raise ValueError("close_score doit être strictement inférieur à open_score (§21)")
         return v
+
+    @model_validator(mode="after")
+    def _thresholds_are_ordered(self):
+        # §21 : close_score < warning_score < open_score. Sans cette vérification
+        # d'ensemble, un warning_score au-dessus de open_score créait une zone
+        # morte de scores qui ne déclenchait aucun état (PLAN_CORRECTION.md §3.2).
+        if not (self.close_score < self.warning_score < self.open_score):
+            raise ValueError(
+                "les seuils doivent respecter close_score < warning_score < open_score (§21) : "
+                f"reçu close={self.close_score}, warning={self.warning_score}, open={self.open_score}"
+            )
+        return self
 
     def minimum_duration_for(self, output_id: str) -> timedelta:
         override = self.per_output_overrides.get(output_id)
@@ -112,7 +147,7 @@ class ForecastConfig(BaseModel):
     @field_validator("horizon", mode="before")
     @classmethod
     def _parse(cls, v):
-        return _parse_duration(v) if not isinstance(v, timedelta) else v
+        return _coerce_duration(v)
 
 
 class HistoryConfig(BaseModel):
@@ -122,7 +157,7 @@ class HistoryConfig(BaseModel):
     @field_validator("minimum", "preferred", mode="before")
     @classmethod
     def _parse(cls, v):
-        return _parse_duration(v) if not isinstance(v, timedelta) else v
+        return _coerce_duration(v)
 
 
 class MonitoringConfig(BaseModel):
@@ -131,7 +166,7 @@ class MonitoringConfig(BaseModel):
     @field_validator("interval", mode="before")
     @classmethod
     def _parse(cls, v):
-        return _parse_duration(v) if not isinstance(v, timedelta) else v
+        return _coerce_duration(v)
 
 
 class AppConfig(BaseModel):

@@ -8,6 +8,7 @@ terrain interne, jamais transmise au détecteur.
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timedelta
 from enum import Enum
 
@@ -209,6 +210,12 @@ class MockDataSource(DataSource):
         self._interval = interval
         self._rng = np.random.default_rng(seed)
         self._scenarios: list[AnomalyScenario] = []
+        # L'API ajoute des scénarios depuis un thread HTTP pendant que la
+        # boucle de monitoring lit/génère depuis un autre thread : le verrou
+        # (réentrant, get_latest() appelle _generate_range()) garantit que
+        # chaque génération voit une liste de scénarios cohérente
+        # (REVUE.md, Conc-3).
+        self._lock = threading.RLock()
         self._clock: datetime | None = None
 
     # -- Contrat DataSource ------------------------------------------------
@@ -220,28 +227,32 @@ class MockDataSource(DataSource):
         return self._interval
 
     def load_history(self, start: datetime, end: datetime) -> list[TrafficSample]:
-        return self._generate_range(start, end)
+        with self._lock:
+            return self._generate_range(start, end)
 
     def start_realtime(self, now: datetime) -> None:
         """Initialise le curseur temps réel utilisé par `get_latest`."""
-        self._clock = now
+        with self._lock:
+            self._clock = now
 
     def get_latest(self) -> list[TrafficSample]:
-        if self._clock is None:
-            raise RuntimeError(
-                "Curseur temps réel non initialisé : appeler start_realtime(now) au préalable."
-            )
-        window_start = self._clock
-        window_end = self._clock + self._interval
-        self._clock = window_end
-        return self._generate_range(window_start, window_end)
+        with self._lock:
+            if self._clock is None:
+                raise RuntimeError(
+                    "Curseur temps réel non initialisé : appeler start_realtime(now) au préalable."
+                )
+            window_start = self._clock
+            window_end = self._clock + self._interval
+            self._clock = window_end
+            return self._generate_range(window_start, window_end)
 
     # -- Scénarios -----------------------------------------------------------
 
     def add_scenario(self, scenario: AnomalyScenario) -> None:
         if scenario.output_id not in self._profiles:
             raise ValueError(f"Sortie inconnue pour le scénario : {scenario.output_id}")
-        self._scenarios.append(scenario)
+        with self._lock:
+            self._scenarios.append(scenario)
 
     def ground_truth(self) -> list[AnomalyScenario]:
         """
@@ -249,7 +260,8 @@ class MockDataSource(DataSource):
         (§33) — ne doit jamais être transmise au détecteur pendant son
         fonctionnement normal.
         """
-        return list(self._scenarios)
+        with self._lock:
+            return list(self._scenarios)
 
     # -- Génération interne ---------------------------------------------------
 

@@ -8,6 +8,7 @@ interne via log1p (§9.3) — jamais exposé tel quel en dehors de ce module.
 
 from __future__ import annotations
 
+import logging
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -17,6 +18,8 @@ import numpy as np
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
 from network_monitor.app.models import ForecastModelName, ForecastResult, TrafficSample
+
+logger = logging.getLogger(__name__)
 
 # Quantile normal à 80% bilatéral, utilisé pour dimensionner l'intervalle
 # prédictif (§13). Valeur fixe et documentée plutôt qu'un choix implicite.
@@ -181,9 +184,15 @@ class HoltWintersModel(ForecastModel):
         self._interval: timedelta | None = None
         self._residual_std_log: float = 0.0
         self._last_level: float = 0.0
+        self._last_timestamp: datetime | None = None
+        # False si l'optimiseur de statsmodels n'a pas convergé : le modèle reste
+        # utilisable (l'ajustement retenu donne des prévisions saisonnières
+        # plausibles), mais l'information est conservée et journalisée.
+        self.converged: bool = True
 
     def fit(self, history: list[TrafficSample]) -> None:
         history = sorted(history, key=lambda s: s.timestamp)
+        self._last_timestamp = history[-1].timestamp
         self._interval = _infer_interval(history)
         seasonal_periods = _slots_per_day(self._interval)
 
@@ -202,6 +211,13 @@ class HoltWintersModel(ForecastModel):
             seasonal_periods=seasonal_periods,
         )
         self._fit_result = model.fit(optimized=True)
+        retvals = getattr(self._fit_result, "mle_retvals", None)
+        self.converged = bool(getattr(retvals, "success", True)) if retvals is not None else True
+        if not self.converged:
+            logger.warning(
+                "Holt-Winters : l'optimisation n'a pas convergé pour %s (ajustement conservé, "
+                "la sélection de modèle s'appuie sur le backtest)", self.output_id
+            )
 
         residuals = series - self._fit_result.fittedvalues
         self._residual_std_log = float(np.std(residuals))
@@ -211,13 +227,28 @@ class HoltWintersModel(ForecastModel):
             raise RuntimeError("Modèle non calibré : appeler fit() avant predict()")
 
         n_steps = max(1, int(horizon / interval))
-        forecast_log = self._fit_result.forecast(n_steps)
+
+        # statsmodels prévoit toujours à partir de la FIN de la série
+        # d'entraînement : il faut donc convertir chaque horodatage demandé en
+        # nombre de pas depuis cette fin. Sans ce décalage, chaque appel à
+        # 1 pas renvoyait la même valeur quelle que soit l'heure demandée —
+        # aucune saisonnalité en usage réel (PLAN_CORRECTION.md §3.5).
+        first_step = round((from_time + interval - self._last_timestamp) / interval)
+        if first_step < 1:
+            raise ValueError(
+                f"from_time ({from_time}) antérieur à la fin de l'historique d'entraînement "
+                f"({self._last_timestamp}) : Holt-Winters ne prévoit qu'au-delà de sa série d'entraînement"
+            )
+        last_step = first_step + n_steps - 1
+        forecast_log = self._fit_result.forecast(last_step)[first_step - 1 :]
 
         results = []
         for i, log_pred in enumerate(forecast_log, start=1):
             ts = from_time + i * interval
-            # L'incertitude croît avec l'horizon (racine du nombre de pas).
-            spread = _Z_80 * self._residual_std_log * math.sqrt(i)
+            steps_from_fit_end = first_step + i - 1
+            # L'incertitude croît avec la distance à la dernière observation
+            # d'entraînement (racine du nombre de pas).
+            spread = _Z_80 * self._residual_std_log * math.sqrt(steps_from_fit_end)
             predicted = float(np.expm1(log_pred))
             lower = float(np.expm1(log_pred - spread))
             upper = float(np.expm1(log_pred + spread))

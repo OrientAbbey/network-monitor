@@ -5,16 +5,18 @@ Couche fine au-dessus de MonitoringLoop / Repository / IncidentManager —
 aucune logique métier propre ici, uniquement sérialisation et orchestration
 du cycle de vie (démarrage/arrêt de la boucle en tâche de fond).
 
-Sécurité : CORS ouvert par défaut (`*`) pour faciliter le développement du
-frontend ; à restreindre à l'origine réelle avant tout déploiement au-delà
-d'un poste de développement local.
+Sécurité : CORS restreint par défaut aux origines de développement locales
+du frontend Vite ; à étendre via NETWORK_MONITOR_CORS_ORIGINS (liste séparée
+par des virgules) pour un autre hôte. Cette API ne comporte AUCUNE
+authentification : ne pas l'exposer au-delà de localhost sans ajouter une
+couche d'authentification devant (REVUE.md, S-1/S-2).
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import threading
-import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -91,6 +93,14 @@ class MonitoringState:
 
     def stop(self) -> None:
         self._stop.set()
+        thread = self._thread
+        # join() : sans lui, un start() immédiat après stop() pouvait lancer un
+        # second thread pendant que le premier finissait encore son tick
+        # (deux threads sur le même MockDataSource, REVUE.md Conc-2). Le
+        # timeout évite de bloquer indéfiniment si un tick est très long.
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=10.0)
+        self._thread = None
         self.running = False
 
     def _run(self) -> None:
@@ -101,7 +111,8 @@ class MonitoringState:
                 self.loop.run_tick(self.now)
             except Exception:  # ne jamais laisser une erreur ponctuelle tuer la boucle
                 logger.exception("Erreur pendant run_tick à %s", self.now)
-            time.sleep(self.seconds_per_tick)
+            # wait() (et non sleep) : réveille immédiatement le thread dès que stop() est appelé.
+            self._stop.wait(self.seconds_per_tick)
 
 
 state = MonitoringState()
@@ -113,6 +124,7 @@ async def lifespan(app: FastAPI):
     state.start()
     yield
     state.stop()
+    state.storage.dispose()
 
 
 app = FastAPI(
@@ -121,11 +133,17 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+_DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
+_cors_origins = [
+    o.strip()
+    for o in os.environ.get("NETWORK_MONITOR_CORS_ORIGINS", _DEFAULT_CORS_ORIGINS).split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins,
+    allow_methods=["GET", "POST", "PUT"],
+    allow_headers=["Content-Type"],
 )
 
 
@@ -190,11 +208,26 @@ def list_outputs() -> list[OutputSummary]:
     return summaries
 
 
+# Borne maximale d'une fenêtre demandée : sans elle, une requête sur plusieurs
+# années chargerait l'intégralité de la table en mémoire (REVUE.md, S-5).
+MAX_WINDOW_SPAN = timedelta(days=31)
+
+
+def _as_aware(dt: datetime) -> datetime:
+    """Un datetime naïf est interprété comme UTC (au lieu d'une comparaison qui lèverait un TypeError → 500)."""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 def _parse_window(since: datetime | None, until: datetime | None, default_span: timedelta) -> tuple[datetime, datetime]:
-    end = until or state.now
-    start = since or (end - default_span)
+    end = _as_aware(until) if until else state.now
+    start = _as_aware(since) if since else (end - default_span)
     if start >= end:
         raise HTTPException(status_code=400, detail="`since` doit être antérieur à `until`")
+    if end - start > MAX_WINDOW_SPAN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Fenêtre trop large (maximum {MAX_WINDOW_SPAN.days} jours)",
+        )
     return start, end
 
 

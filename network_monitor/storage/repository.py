@@ -12,7 +12,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Column, DateTime, Float, String, create_engine
+from sqlalchemy import JSON, Column, DateTime, Float, Index, String, create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from network_monitor.app.models import (
@@ -92,6 +92,68 @@ class IncidentRow(Base):
     # un volume par incident qui reste faible.
     evidence = Column(JSON, nullable=False)
 
+    # GET /outputs et GET /incidents filtrent/trient sur ces deux colonnes à
+    # chaque appel (toutes les 4 s côté dashboard) : sans index, c'est un
+    # SCAN complet de la table sur une table qui grossit en continu
+    # (REVUE.md, Perf-7).
+    __table_args__ = (
+        Index("ix_incidents_status", "status"),
+        Index("ix_incidents_last_seen", "last_seen_at"),
+    )
+
+
+def _sample_row(s: TrafficSample) -> RawMeasurementRow:
+    return RawMeasurementRow(
+        output_id=s.output_id,
+        timestamp=_to_utc(s.timestamp),
+        traffic_mbps=s.traffic_mbps,
+        loss_percent=s.loss_percent,
+    )
+
+
+def _forecast_row(f: ForecastResult) -> ForecastRow:
+    return ForecastRow(
+        output_id=f.output_id,
+        timestamp=_to_utc(f.timestamp),
+        model_name=f.model_name.value,
+        predicted_traffic_mbps=f.predicted_traffic_mbps,
+        lower_bound_mbps=f.lower_bound_mbps,
+        upper_bound_mbps=f.upper_bound_mbps,
+        confidence=f.confidence,
+    )
+
+
+def _anomaly_row(a: AnomalyResult) -> AnomalyRow:
+    return AnomalyRow(
+        output_id=a.output_id,
+        timestamp=_to_utc(a.timestamp),
+        traffic_anomaly_score=a.traffic_anomaly_score,
+        loss_anomaly_score=a.loss_anomaly_score,
+        persistence_score=a.persistence_score,
+        joint_anomaly_score=a.joint_anomaly_score,
+        data_gap="1" if a.data_gap else "0",
+    )
+
+
+def _incident_row(incident: Incident) -> IncidentRow:
+    return IncidentRow(
+        id=incident.id,
+        output_id=incident.output_id,
+        status=incident.status.value,
+        severity=incident.severity.value,
+        incident_type=incident.incident_type.value,
+        suspected_at=_to_utc(incident.suspected_at),
+        opened_at=_to_utc(incident.opened_at),
+        last_seen_at=_to_utc(incident.last_seen_at),
+        closed_at=_to_utc(incident.closed_at),
+        score=incident.score,
+        peak_traffic_deviation_percent=incident.peak_traffic_deviation_percent,
+        peak_loss_percent=incident.peak_loss_percent,
+        description=incident.description,
+        # `mode="json"` produit des types déjà sérialisables (dates en ISO 8601).
+        evidence=[e.model_dump(mode="json") for e in incident.evidence],
+    )
+
 
 class Repository(ABC):
     """Abstraction de stockage (§29), non couplée au Mock ni aux algorithmes."""
@@ -107,6 +169,21 @@ class Repository(ABC):
 
     @abstractmethod
     def upsert_incident(self, incident: Incident) -> None: ...
+
+    @abstractmethod
+    def save_tick(
+        self,
+        samples: list[TrafficSample],
+        forecasts: list[ForecastResult],
+        anomalies: list[AnomalyResult],
+        incidents: list[Incident],
+    ) -> None:
+        """Équivalent transactionnel à un appel groupé de save_samples/save_forecasts/save_anomalies/upsert_incident."""
+        ...
+
+    def dispose(self) -> None:
+        """Libère les ressources de stockage. No-op par défaut (implémentations en mémoire, etc.)."""
+        return None
 
     @abstractmethod
     def get_history(self, output_id: str, start: datetime, end: datetime) -> list[TrafficSample]: ...
@@ -141,78 +218,85 @@ class SqlAlchemyRepository(Repository):
         # entre threads — seul l'engine (le pool de connexions) l'est.
         connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
         self._engine = create_engine(url, future=True, connect_args=connect_args)
+        if url.startswith("sqlite"):
+            # WAL supprime le verrou d'écriture global (meilleure concurrence
+            # lecture/écriture entre le thread de monitoring et les requêtes
+            # HTTP) et NORMAL n'fsync qu'aux points de contrôle du WAL plutôt
+            # qu'à chaque commit — gain mesuré ~23x sur le coût d'un tick
+            # (REVUE.md §4, Perf-1), sans perte de durabilité au-delà d'un
+            # crash du système d'exploitation lui-même (compromis acceptable
+            # pour des données de supervision, régénérables par le Mock).
+            with self._engine.connect() as conn:
+                conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+                conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
         Base.metadata.create_all(self._engine)
         self._session_factory = sessionmaker(bind=self._engine, future=True)
 
     def _session(self) -> Session:
         return self._session_factory()
 
+    def dispose(self) -> None:
+        """
+        Libère le pool de connexions de l'engine. Sans cet appel, le fichier
+        SQLite reste verrouillé après la dernière session fermée (le driver
+        garde des connexions ouvertes dans le pool) — inoffensif sous Linux
+        (un fichier ouvert peut être supprimé), mais provoque un
+        `PermissionError` au teardown des tests sous Windows (REVUE.md P0-3).
+        À appeler explicitement en fin de vie du repository : fixtures de
+        tests, et arrêt propre de l'application si un jour nécessaire.
+        """
+        self._engine.dispose()
+
     def save_samples(self, samples: list[TrafficSample]) -> None:
         with self._session() as session:
             for s in samples:
-                session.merge(
-                    RawMeasurementRow(
-                        output_id=s.output_id,
-                        timestamp=_to_utc(s.timestamp),
-                        traffic_mbps=s.traffic_mbps,
-                        loss_percent=s.loss_percent,
-                    )
-                )
+                session.merge(_sample_row(s))
             session.commit()
 
     def save_forecasts(self, forecasts: list[ForecastResult]) -> None:
         with self._session() as session:
             for f in forecasts:
-                session.merge(
-                    ForecastRow(
-                        output_id=f.output_id,
-                        timestamp=_to_utc(f.timestamp),
-                        model_name=f.model_name.value,
-                        predicted_traffic_mbps=f.predicted_traffic_mbps,
-                        lower_bound_mbps=f.lower_bound_mbps,
-                        upper_bound_mbps=f.upper_bound_mbps,
-                        confidence=f.confidence,
-                    )
-                )
+                session.merge(_forecast_row(f))
             session.commit()
 
     def save_anomalies(self, anomalies: list[AnomalyResult]) -> None:
         with self._session() as session:
             for a in anomalies:
-                session.merge(
-                    AnomalyRow(
-                        output_id=a.output_id,
-                        timestamp=_to_utc(a.timestamp),
-                        traffic_anomaly_score=a.traffic_anomaly_score,
-                        loss_anomaly_score=a.loss_anomaly_score,
-                        persistence_score=a.persistence_score,
-                        joint_anomaly_score=a.joint_anomaly_score,
-                        data_gap="1" if a.data_gap else "0",
-                    )
-                )
+                session.merge(_anomaly_row(a))
             session.commit()
 
     def upsert_incident(self, incident: Incident) -> None:
         with self._session() as session:
-            session.merge(
-                IncidentRow(
-                    id=incident.id,
-                    output_id=incident.output_id,
-                    status=incident.status.value,
-                    severity=incident.severity.value,
-                    incident_type=incident.incident_type.value,
-                    suspected_at=_to_utc(incident.suspected_at),
-                    opened_at=_to_utc(incident.opened_at),
-                    last_seen_at=_to_utc(incident.last_seen_at),
-                    closed_at=_to_utc(incident.closed_at),
-                    score=incident.score,
-                    peak_traffic_deviation_percent=incident.peak_traffic_deviation_percent,
-                    peak_loss_percent=incident.peak_loss_percent,
-                    description=incident.description,
-                    # `mode="json"` produit des types déjà sérialisables (dates en ISO 8601).
-                    evidence=[e.model_dump(mode="json") for e in incident.evidence],
-                )
-            )
+            session.merge(_incident_row(incident))
+            session.commit()
+
+    def save_tick(
+        self,
+        samples: list[TrafficSample],
+        forecasts: list[ForecastResult],
+        anomalies: list[AnomalyResult],
+        incidents: list[Incident],
+    ) -> None:
+        """
+        Persiste tout le résultat d'un tick (mesures, prévisions, anomalies,
+        incidents touchés) en une seule transaction, au lieu des 7 à 10
+        `commit()` séparés qu'impliquerait un appel individuel par sortie et
+        par type de résultat (REVUE.md, Perf-1 — complément à WAL : réduit
+        aussi le nombre de points de synchronisation, pas seulement leur
+        coût unitaire, et rend le tick atomique, ce qui est de toute façon
+        la sémantique attendue). `incidents` peut contenir des doublons
+        (plusieurs sorties touchant le même incident n'arrive pas en
+        pratique, mais `merge()` gère de toute façon l'idempotence par clé).
+        """
+        with self._session() as session:
+            for s in samples:
+                session.merge(_sample_row(s))
+            for f in forecasts:
+                session.merge(_forecast_row(f))
+            for a in anomalies:
+                session.merge(_anomaly_row(a))
+            for i in incidents:
+                session.merge(_incident_row(i))
             session.commit()
 
     def get_history(self, output_id: str, start: datetime, end: datetime) -> list[TrafficSample]:
