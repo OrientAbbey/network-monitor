@@ -202,7 +202,7 @@ class HoltWintersModel(ForecastModel):
                 f"{2 * seasonal_periods} requis (2 cycles quotidiens minimum)"
             )
 
-        series = np.log1p(np.array([s.traffic_mbps for s in history]))
+        series = np.log1p(_regular_series(history, self._interval))
         model = ExponentialSmoothing(
             series,
             trend="add",
@@ -276,12 +276,18 @@ def select_model(
     history: list[TrafficSample],
     minimum_history_for_selection: timedelta,
     validation_window: timedelta,
+    allowed_models: list[str] | None = None,
 ) -> ForecastModel:
     """
     Choisit le meilleur modèle par backtesting simple (erreur absolue sur
     la fenêtre de validation), avec repli automatique sur la baseline
     saisonnière si l'historique est trop court (§11).
+
+    `allowed_models` (config `forecast.models`, §35) restreint les candidats ;
+    `None` = tous. La baseline saisonnière reste le repli universel même si
+    elle n'est pas listée : sans modèle, le système ne peut pas fonctionner.
     """
+    allowed = set(allowed_models) if allowed_models is not None else {"seasonal_baseline", "holt_winters"}
     if not history:
         raise ValueError("Historique vide : impossible de sélectionner un modèle")
 
@@ -301,11 +307,14 @@ def select_model(
         return baseline
 
     interval = _infer_interval(history)
-    candidates: list[ForecastModel] = [SeasonalBaselineModel(output_id)]
-    try:
+    candidates: list[ForecastModel] = []
+    if "seasonal_baseline" in allowed:
+        candidates.append(SeasonalBaselineModel(output_id))
+    if "holt_winters" in allowed:
         candidates.append(HoltWintersModel(output_id))
-    except Exception:  # pragma: no cover - construction ne peut pas échouer ici
-        pass
+    if not candidates:
+        baseline.fit(history)
+        return baseline
 
     best_model: ForecastModel | None = None
     best_mae = math.inf
@@ -348,12 +357,41 @@ def _backtest_mae(
 
 
 def _infer_interval(history: list[TrafficSample]) -> timedelta:
-    """Déduit le pas d'échantillonnage à partir des deux premiers points distincts."""
-    for i in range(1, len(history)):
-        delta = history[i].timestamp - history[0].timestamp
-        if delta.total_seconds() > 0:
-            return delta
-    return timedelta(minutes=5)  # valeur par défaut (§3) si un seul point
+    """
+    Déduit le pas d'échantillonnage : médiane des écarts entre points
+    consécutifs (sur les 500 premiers), donc insensible à un trou isolé — un
+    historique dont on a retiré des périodes anormales (recalibration, §32)
+    ou qui comporte des lacunes ne fausse pas le pas.
+    """
+    deltas = sorted(
+        (history[i].timestamp - history[i - 1].timestamp).total_seconds()
+        for i in range(1, min(len(history), 501))
+        if history[i].timestamp > history[i - 1].timestamp
+    )
+    if not deltas:
+        return timedelta(minutes=5)  # valeur par défaut (§3) si un seul point
+    return timedelta(seconds=deltas[len(deltas) // 2])
+
+
+def _regular_series(history: list[TrafficSample], interval: timedelta) -> np.ndarray:
+    """
+    Série de trafic sur une grille STRICTEMENT régulière, du premier au dernier
+    point : les créneaux absents (lacune de collecte, période anormale retirée
+    pour la recalibration) sont interpolés linéairement. Holt-Winters exige une
+    série sans trou : sans cela, un seul créneau manquant décalerait toute la
+    saisonnalité qui suit.
+    """
+    t0 = history[0].timestamp
+    n = int(round((history[-1].timestamp - t0) / interval)) + 1
+    values = np.full(n, np.nan)
+    for sample in history:
+        idx = int(round((sample.timestamp - t0) / interval))
+        if 0 <= idx < n:
+            values[idx] = sample.traffic_mbps
+    missing = np.isnan(values)
+    if missing.any():
+        values[missing] = np.interp(np.flatnonzero(missing), np.flatnonzero(~missing), values[~missing])
+    return values
 
 
 def _slots_per_day(interval: timedelta) -> int:

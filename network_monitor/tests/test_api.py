@@ -150,6 +150,18 @@ def test_scripted_incident_is_visible_end_to_end(client):
     assert detail["id"] == matches[0]["id"]
     assert len(detail["evidence"]) > 0
 
+    # La chronologie des alertes (§27) doit être exposée : au moins SUSPECT puis OPENED.
+    alerts = _wait_until(lambda: client.get(f"/incidents/{matches[0]['id']}/alerts").json()
+                         and {"suspect", "opened"} <= {a["event"] for a in
+                                                       client.get(f"/incidents/{matches[0]['id']}/alerts").json()}
+                         and client.get(f"/incidents/{matches[0]['id']}/alerts").json())
+    events = [a["event"] for a in reversed(alerts)]  # ordre chronologique
+    assert events.index("suspect") < events.index("opened")
+    assert all(a["incident_id"] == matches[0]["id"] and a["output_id"] == "OUT_001" for a in alerts)
+
+    by_output = client.get("/outputs/OUT_001/alerts", params={"limit": 500}).json()
+    assert {a["incident_id"] for a in alerts} <= {a["incident_id"] for a in by_output}
+
 
 def test_unknown_incident_returns_404(client):
     assert client.get("/incidents/does-not-exist").status_code == 404
@@ -223,3 +235,9 @@ def test_stop_then_start_never_runs_two_loop_threads(client):
     loops = [t for t in threading.enumerate() if t.name.startswith("Thread") and t.is_alive()
              and getattr(t, "_target", None) == api_module.state._run]
     assert len(loops) <= 1
+
+
+def test_alerts_endpoints_404_and_empty(client):
+    assert client.get("/incidents/inconnu/alerts").status_code == 404
+    assert client.get("/outputs/NOPE/alerts").status_code == 404
+    assert client.get("/outputs/OUT_003/alerts").status_code == 200

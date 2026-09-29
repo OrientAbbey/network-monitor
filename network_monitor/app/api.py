@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 
 from network_monitor.app.config import AppConfig, IncidentConfig
 from network_monitor.app.main import MonitoringLoop
-from network_monitor.app.models import AnomalyResult, ForecastResult, Incident, TrafficSample
+from network_monitor.app.models import Alert, AnomalyResult, ForecastResult, Incident, TrafficSample
 from network_monitor.data.mock import MockDataSource
 from network_monitor.storage.repository import Repository, SqlAlchemyRepository
 
@@ -272,7 +272,7 @@ def output_forecast(
 @app.get("/outputs/{output_id}/forecast/ahead", response_model=list[ForecastResult])
 def output_forecast_ahead(
     output_id: str,
-    horizon_minutes: int = Query(default=35, ge=5, le=24 * 60),
+    horizon_minutes: int | None = Query(default=None, ge=5, le=24 * 60),
 ) -> list[ForecastResult]:
     """
     Prévision à la demande au-delà de l'instant simulé courant (§13) —
@@ -281,7 +281,7 @@ def output_forecast_ahead(
     """
     _ensure_known_output(output_id)
     try:
-        return state.loop.forecast_ahead(output_id, state.now, timedelta(minutes=horizon_minutes))
+        return state.loop.forecast_ahead(output_id, state.now, (timedelta(minutes=horizon_minutes) if horizon_minutes is not None else state.config.forecast.horizon))
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -300,6 +300,29 @@ def get_incident(incident_id: str) -> Incident:
     if incident is None:
         raise HTTPException(status_code=404, detail=f"Incident inconnu : {incident_id}")
     return incident
+
+
+@app.get("/incidents/{incident_id}/alerts", response_model=list[Alert])
+def incident_alerts(incident_id: str, limit: int = Query(default=100, ge=1, le=500)) -> list[Alert]:
+    """
+    Chronologie des alertes d'un incident (§27) : SUSPECT → OUVERT → MISE À JOUR
+    → RÉCUPÉRATION → FERMÉ (ou STALE), de la plus récente à la plus ancienne.
+    """
+    if state.storage.get_incident(incident_id) is None:
+        raise HTTPException(status_code=404, detail=f"Incident inconnu : {incident_id}")
+    return state.storage.get_alerts(incident_id=incident_id, limit=limit)
+
+
+@app.get("/outputs/{output_id}/alerts", response_model=list[Alert])
+def output_alerts(
+    output_id: str,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[Alert]:
+    _ensure_known_output(output_id)
+    start, end = _parse_window(since, until, timedelta(days=1))
+    return state.storage.get_alerts(output_id=output_id, start=start, end=end, limit=limit)
 
 
 @app.get("/monitoring/status", response_model=MonitoringStatus)

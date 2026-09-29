@@ -125,10 +125,22 @@ def build_anomaly_result(
     persistence: PersistenceTracker,
     open_threshold: float,
     data_gap: bool = False,
+    traffic_enabled: bool = True,
+    loss_enabled: bool = True,
 ) -> AnomalyResult:
-    """Assemble un AnomalyResult complet à partir d'une observation validée (§16)."""
-    traffic_score, traffic_deviation_pct, out_of_interval = detect_traffic_anomaly(sample, forecast)
-    loss_score, loss_deviation_pts = detect_loss_anomaly(sample, loss_baseline)
+    """
+    Assemble un AnomalyResult complet à partir d'une observation validée (§16).
+    `traffic_enabled` / `loss_enabled` reflètent `detection.traffic.enabled` et
+    `detection.loss.enabled` (§35) : un détecteur désactivé contribue un score nul.
+    """
+    if traffic_enabled:
+        traffic_score, traffic_deviation_pct, out_of_interval = detect_traffic_anomaly(sample, forecast)
+    else:
+        traffic_score, traffic_deviation_pct, out_of_interval = 0.0, 0.0, False
+    if loss_enabled:
+        loss_score, loss_deviation_pts = detect_loss_anomaly(sample, loss_baseline)
+    else:
+        loss_score, loss_deviation_pts = 0.0, 0.0
     joint_score = combine_scores(traffic_score, loss_score)
 
     duration_seconds = persistence.update(sample.output_id, joint_score, open_threshold)

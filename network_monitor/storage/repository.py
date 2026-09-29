@@ -12,10 +12,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Column, DateTime, Float, Index, String, create_engine
+from sqlalchemy import JSON, Column, DateTime, Float, Index, Integer, String, create_engine, func, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from network_monitor.app.models import (
+    Alert,
     AnomalyResult,
     ForecastModelName,
     ForecastResult,
@@ -70,6 +71,29 @@ class AnomalyRow(Base):
     persistence_score = Column(Float, nullable=False)
     joint_anomaly_score = Column(Float, nullable=False)
     data_gap = Column(String, nullable=False)  # "0"/"1", évite les soucis de portage bool SQLite
+    # Colonnes ajoutées après la première version du schéma : nullables pour
+    # rester compatibles avec les lignes déjà présentes (voir _migrate_additive).
+    traffic_deviation_percent = Column(Float, nullable=True)
+    loss_deviation_points = Column(Float, nullable=True)
+    traffic_out_of_interval = Column(String, nullable=True)  # "0"/"1"
+
+
+class AlertRow(Base):
+    """Historique des alertes (§27), lié à l'incident qui les a produites."""
+
+    __tablename__ = "alerts"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    incident_id = Column(String, nullable=False)
+    output_id = Column(String, nullable=False)
+    severity = Column(String, nullable=False)
+    event = Column(String, nullable=False)
+    timestamp = Column(DateTime(timezone=True), nullable=False)
+    message = Column(String, nullable=False)
+
+    __table_args__ = (
+        Index("ix_alerts_incident", "incident_id", "timestamp"),
+        Index("ix_alerts_output_ts", "output_id", "timestamp"),
+    )
 
 
 class IncidentRow(Base):
@@ -84,6 +108,7 @@ class IncidentRow(Base):
     last_seen_at = Column(DateTime(timezone=True), nullable=False)
     closed_at = Column(DateTime(timezone=True), nullable=True)
     score = Column(Float, nullable=False)
+    current_score = Column(Float, nullable=True)  # ajouté après coup, voir AnomalyRow
     peak_traffic_deviation_percent = Column(Float, nullable=False)
     peak_loss_percent = Column(Float, nullable=False)
     description = Column(String, nullable=False)
@@ -132,6 +157,20 @@ def _anomaly_row(a: AnomalyResult) -> AnomalyRow:
         persistence_score=a.persistence_score,
         joint_anomaly_score=a.joint_anomaly_score,
         data_gap="1" if a.data_gap else "0",
+        traffic_deviation_percent=a.traffic_deviation_percent,
+        loss_deviation_points=a.loss_deviation_points,
+        traffic_out_of_interval="1" if a.traffic_out_of_interval else "0",
+    )
+
+
+def _alert_row(a: Alert) -> AlertRow:
+    return AlertRow(
+        incident_id=a.incident_id,
+        output_id=a.output_id,
+        severity=a.severity.value,
+        event=a.event.value,
+        timestamp=_to_utc(a.timestamp),
+        message=a.message,
     )
 
 
@@ -147,6 +186,7 @@ def _incident_row(incident: Incident) -> IncidentRow:
         last_seen_at=_to_utc(incident.last_seen_at),
         closed_at=_to_utc(incident.closed_at),
         score=incident.score,
+        current_score=incident.current_score,
         peak_traffic_deviation_percent=incident.peak_traffic_deviation_percent,
         peak_loss_percent=incident.peak_loss_percent,
         description=incident.description,
@@ -177,8 +217,39 @@ class Repository(ABC):
         forecasts: list[ForecastResult],
         anomalies: list[AnomalyResult],
         incidents: list[Incident],
+        alerts: list[Alert] | None = None,
     ) -> None:
-        """Équivalent transactionnel à un appel groupé de save_samples/save_forecasts/save_anomalies/upsert_incident."""
+        """Équivalent transactionnel à un appel groupé de save_samples/save_forecasts/save_anomalies/upsert_incident/save_alerts."""
+        ...
+
+    @abstractmethod
+    def save_alerts(self, alerts: list[Alert]) -> None: ...
+
+    @abstractmethod
+    def get_alerts(
+        self,
+        output_id: str | None = None,
+        incident_id: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = 100,
+    ) -> list[Alert]:
+        """Alertes, de la plus récente à la plus ancienne."""
+        ...
+
+    @abstractmethod
+    def list_incidents_overlapping(self, start: datetime, end: datetime) -> list[Incident]:
+        """Incidents (tous statuts) dont la période recoupe [start, end]."""
+        ...
+
+    @abstractmethod
+    def purge_before(self, cutoff: datetime) -> dict[str, int]:
+        """
+        Supprime les mesures, prévisions et anomalies antérieures à `cutoff`
+        (tables à croissance continue). Les incidents et les alertes, peu
+        volumineux et utiles à l'historique, sont conservés. Renvoie le
+        nombre de lignes supprimées par table.
+        """
         ...
 
     def dispose(self) -> None:
@@ -230,10 +301,37 @@ class SqlAlchemyRepository(Repository):
                 conn.exec_driver_sql("PRAGMA journal_mode=WAL")
                 conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
         Base.metadata.create_all(self._engine)
+        self._migrate_additive()
         self._session_factory = sessionmaker(bind=self._engine, future=True)
 
     def _session(self) -> Session:
         return self._session_factory()
+
+    def _migrate_additive(self) -> None:
+        """
+        `create_all` ne crée que les tables MANQUANTES : il n'ajoute jamais une
+        colonne à une table déjà présente. Une base créée par une version
+        précédente échouerait donc à la première requête. Cette migration
+        ajoute, sans rien perdre, les colonnes déclarées dans les modèles mais
+        absentes de la base (elles doivent être nullables : c'est la règle
+        du schéma pour toute évolution). Ce n'est PAS un outil de migration
+        général (pas de renommage ni de suppression) : au-delà d'ajouts de
+        colonnes, adopter Alembic.
+        """
+        inspector = inspect(self._engine)
+        with self._engine.begin() as conn:
+            for table in Base.metadata.sorted_tables:
+                existing = {c["name"] for c in inspector.get_columns(table.name)}
+                for column in table.columns:
+                    if column.name in existing:
+                        continue
+                    if not column.nullable:
+                        raise RuntimeError(
+                            f"Colonne non nullable manquante {table.name}.{column.name} : "
+                            "migration automatique impossible, supprimer la base ou utiliser Alembic."
+                        )
+                    ddl_type = column.type.compile(dialect=self._engine.dialect)
+                    conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {ddl_type}'))
 
     def dispose(self) -> None:
         """
@@ -276,6 +374,7 @@ class SqlAlchemyRepository(Repository):
         forecasts: list[ForecastResult],
         anomalies: list[AnomalyResult],
         incidents: list[Incident],
+        alerts: list[Alert] | None = None,
     ) -> None:
         """
         Persiste tout le résultat d'un tick (mesures, prévisions, anomalies,
@@ -297,7 +396,66 @@ class SqlAlchemyRepository(Repository):
                 session.merge(_anomaly_row(a))
             for i in incidents:
                 session.merge(_incident_row(i))
+            for al in alerts or []:
+                session.add(_alert_row(al))
             session.commit()
+
+    def save_alerts(self, alerts: list[Alert]) -> None:
+        with self._session() as session:
+            for al in alerts:
+                session.add(_alert_row(al))
+            session.commit()
+
+    def get_alerts(
+        self,
+        output_id: str | None = None,
+        incident_id: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = 100,
+    ) -> list[Alert]:
+        with self._session() as session:
+            query = session.query(AlertRow)
+            if output_id is not None:
+                query = query.filter(AlertRow.output_id == output_id)
+            if incident_id is not None:
+                query = query.filter(AlertRow.incident_id == incident_id)
+            if start is not None:
+                query = query.filter(AlertRow.timestamp >= _to_utc(start))
+            if end is not None:
+                query = query.filter(AlertRow.timestamp < _to_utc(end))
+            rows = query.order_by(AlertRow.timestamp.desc(), AlertRow.id.desc()).limit(limit).all()
+            return [
+                Alert(
+                    incident_id=r.incident_id,
+                    output_id=r.output_id,
+                    severity=r.severity,
+                    event=r.event,
+                    timestamp=_as_utc(r.timestamp),
+                    message=r.message,
+                )
+                for r in rows
+            ]
+
+    def list_incidents_overlapping(self, start: datetime, end: datetime) -> list[Incident]:
+        first_seen = func.coalesce(IncidentRow.suspected_at, IncidentRow.opened_at, IncidentRow.last_seen_at)
+        with self._session() as session:
+            rows = (
+                session.query(IncidentRow)
+                .filter(IncidentRow.last_seen_at >= _to_utc(start), first_seen <= _to_utc(end))
+                .order_by(IncidentRow.last_seen_at)
+                .all()
+            )
+            return [_incident_from_row(r) for r in rows]
+
+    def purge_before(self, cutoff: datetime) -> dict[str, int]:
+        cutoff = _to_utc(cutoff)
+        deleted: dict[str, int] = {}
+        with self._session() as session:
+            for name, row in (("measurements", RawMeasurementRow), ("forecasts", ForecastRow), ("anomalies", AnomalyRow)):
+                deleted[name] = session.query(row).filter(row.timestamp < cutoff).delete(synchronize_session=False)
+            session.commit()
+        return deleted
 
     def get_history(self, output_id: str, start: datetime, end: datetime) -> list[TrafficSample]:
         with self._session() as session:
@@ -341,6 +499,9 @@ class SqlAlchemyRepository(Repository):
                     loss_anomaly_score=r.loss_anomaly_score,
                     persistence_score=r.persistence_score,
                     joint_anomaly_score=r.joint_anomaly_score,
+                    traffic_deviation_percent=r.traffic_deviation_percent,
+                    loss_deviation_points=r.loss_deviation_points,
+                    traffic_out_of_interval=r.traffic_out_of_interval == "1",
                     data_gap=r.data_gap == "1",
                 )
                 for r in rows
@@ -405,6 +566,7 @@ def _incident_from_row(row: IncidentRow) -> Incident:
         last_seen_at=_as_utc(row.last_seen_at),
         closed_at=_as_utc(row.closed_at),
         score=row.score,
+        current_score=row.current_score,
         peak_traffic_deviation_percent=row.peak_traffic_deviation_percent,
         peak_loss_percent=row.peak_loss_percent,
         description=row.description,

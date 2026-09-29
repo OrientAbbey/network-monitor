@@ -282,6 +282,15 @@ class Incident(BaseModel):
     closed_at: Optional[datetime] = None
 
     score: float = Field(ge=0, le=1)
+    """PIC du score joint depuis l'ouverture de l'incident : ne redescend jamais
+    tant que l'incident est actif. À ne pas confondre avec `current_score`."""
+
+    current_score: Optional[float] = Field(default=None, ge=0, le=1)
+    """Score joint du DERNIER pas de temps traité. `severity` est recalculée à
+    partir de cette valeur (elle peut donc redescendre), alors que `score` est un
+    pic : afficher les deux évite l'apparente contradiction « score 0.90 mais
+    sévérité warning » (PLAN_CORRECTION.md §3.6). `None` pour un incident
+    persisté avant l'introduction de ce champ."""
 
     peak_traffic_deviation_percent: float = 0.0
     peak_loss_percent: float = 0.0
@@ -311,3 +320,30 @@ class Incident(BaseModel):
     def is_active(self) -> bool:
         """Un incident SUSPECT, OPEN ou STALE nécessite encore un suivi actif."""
         return self.status in (IncidentStatus.SUSPECT, IncidentStatus.OPEN, IncidentStatus.STALE)
+
+
+# ---------------------------------------------------------------------------
+# Alertes
+# ---------------------------------------------------------------------------
+
+
+class AlertEvent(str, Enum):
+    """Événement du cycle de vie d'un incident qui déclenche une alerte (§27)."""
+
+    SUSPECT = "suspect"
+    OPENED = "opened"
+    UPDATED = "updated"
+    RECOVERING = "recovering"
+    CLOSED = "closed"
+    STALE = "stale"
+
+
+class Alert(BaseModel):
+    """Une alerte, toujours liée à un événement du moteur d'incidents (§27)."""
+
+    incident_id: str
+    output_id: str
+    severity: Severity
+    event: AlertEvent
+    timestamp: datetime
+    message: str

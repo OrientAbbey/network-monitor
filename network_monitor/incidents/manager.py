@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 
 from network_monitor.app.config import IncidentConfig
 from network_monitor.app.models import (
+    Alert,
+    AlertEvent,
     AnomalyResult,
     Incident,
     IncidentEvidence,
@@ -47,18 +49,6 @@ def _classify_type(traffic_score: float, loss_score: float, traffic_deviation_pc
     return IncidentType.HIGH_LOSS
 
 
-@dataclass
-class Alert:
-    """Une alerte, toujours liée à un événement du moteur d'incidents (§27)."""
-
-    incident_id: str
-    output_id: str
-    severity: Severity
-    event: str  # "suspect", "opened", "updated", "recovering", "closed", "stale"
-    timestamp: datetime
-    message: str
-
-
 class IncidentManager:
     """
     Gestionnaire du cycle de vie des incidents (§19-§27), à états
@@ -66,9 +56,12 @@ class IncidentManager:
     algorithmes de detection : ne consomme que des `AnomalyResult`.
     """
 
-    def __init__(self, config: IncidentConfig, critical_score: float = 0.80) -> None:
+    def __init__(self, config: IncidentConfig, critical_score: float = 0.80, alerts_enabled: bool = True) -> None:
         self._config = config
         self._critical_score = critical_score
+        # `alerts.enabled` (§35) : coupe la génération des alertes ; le cycle de
+        # vie des incidents, lui, n'est jamais affecté.
+        self._alerts_enabled = alerts_enabled
         self._states: dict[str, _OutputState] = {}
 
     def update_config(self, config: IncidentConfig, critical_score: float | None = None) -> None:
@@ -83,6 +76,23 @@ class IncidentManager:
             self._critical_score = critical_score
 
     def process(
+        self,
+        result: AnomalyResult,
+        expected_traffic_mbps: float | None = None,
+        expected_loss_percent: float | None = None,
+        observed_traffic_mbps: float | None = None,
+        observed_loss_percent: float | None = None,
+    ) -> tuple[list[Alert], Incident | None]:
+        alerts, incident = self._process(
+            result,
+            expected_traffic_mbps,
+            expected_loss_percent,
+            observed_traffic_mbps,
+            observed_loss_percent,
+        )
+        return (alerts if self._alerts_enabled else []), incident
+
+    def _process(
         self,
         result: AnomalyResult,
         expected_traffic_mbps: float | None = None,
@@ -157,6 +167,7 @@ class IncidentManager:
         self._append_evidence(incident, result, expected_traffic, expected_loss, observed_traffic, observed_loss)
         incident.last_seen_at = result.timestamp
         incident.score = max(incident.score, score)
+        incident.current_score = score
         if result.traffic_deviation_percent is not None:
             incident.peak_traffic_deviation_percent = _peak(incident.peak_traffic_deviation_percent, result.traffic_deviation_percent)
         if observed_loss is not None:
@@ -247,6 +258,7 @@ class IncidentManager:
             incident_type=IncidentType.TRAFFIC_DROP,  # affiné à l'ouverture (§23)
             last_seen_at=result.timestamp,
             score=result.joint_anomaly_score,
+            current_score=result.joint_anomaly_score,
         )
         self._append_evidence(incident, result, expected_traffic, expected_loss, observed_traffic, observed_loss)
         return incident
@@ -274,8 +286,13 @@ class IncidentManager:
     def _describe(self, incident: Incident) -> str:
         return (
             f"{incident.incident_type.value} sur {incident.output_id} "
-            f"(score={incident.score:.2f}, sévérité={incident.severity.value})"
+            f"(score max={incident.score:.2f}, actuel={self._current(incident):.2f}, "
+            f"sévérité={incident.severity.value})"
         )
+
+    @staticmethod
+    def _current(incident: Incident) -> float:
+        return incident.current_score if incident.current_score is not None else incident.score
 
     def _alert(self, incident: Incident, event: str, timestamp: datetime, message: str) -> Alert:
         severity = Severity.INFO if event in ("suspect", "recovering") else incident.severity
@@ -283,7 +300,7 @@ class IncidentManager:
             incident_id=incident.id,
             output_id=incident.output_id,
             severity=severity,
-            event=event,
+            event=AlertEvent(event),
             timestamp=timestamp,
             message=message,
         )
