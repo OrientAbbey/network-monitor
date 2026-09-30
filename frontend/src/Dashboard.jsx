@@ -1,5 +1,16 @@
-import { useState, useEffect, useRef, useCallback } from "react";
-import { api } from "./api.js";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { api, isAbortError } from "./api.js";
+import {
+  backoffDelay,
+  downsampleMinMax,
+  formatAge,
+  formatAxisLabel,
+  formatClock,
+  formatMbps,
+  isPageHidden,
+  nearestIndexByTime,
+  niceDomain,
+} from "./lib.js";
 
 /* ---------------------------------------------------------------------
    "Signal Room" — même identité visuelle que la maquette v2, mais toutes
@@ -43,38 +54,14 @@ const RANGES = [
 
 const DEFAULT_CONFIG_UPDATE_DELTA_THRESHOLDS = { traffic: 0.05, loss: 0.1 };
 
-function formatMbps(v) {
-  if (v == null) return "—";
-  if (v >= 1000) return (v / 1000).toFixed(2) + " Gbps";
-  return v.toFixed(1) + " Mbps";
-}
-
-function formatClock(date) {
-  return date.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
-}
-
-function formatAxisLabel(date, rangeKey, now) {
-  if (rangeKey === "12h" || rangeKey === "1d") return formatClock(date);
-  const daysAgo = Math.round((now - date) / (24 * 3600_000));
-  return daysAgo <= 0 ? formatClock(date) : `-${daysAgo}j ${formatClock(date)}`;
-}
-
 // --- Graphe détaillé --------------------------------------------------
 
 const CHART_W = 640;
 const CHART_H = 230;
-const MARGIN = { top: 12, right: 52, bottom: 26, left: 50 };
+// left: 66 (et non 50) — l'étiquette d'axe la plus longue (« 32.00 Gbps ») débordait du SVG.
+const MARGIN = { top: 16, right: 52, bottom: 26, left: 66 };
 const INNER_W = CHART_W - MARGIN.left - MARGIN.right;
 const INNER_H = CHART_H - MARGIN.top - MARGIN.bottom;
-
-function niceDomain(values, paddingFrac = 0.12, floorAtZero = false) {
-  if (!values.length) return [0, 1];
-  let min = Math.min(...values);
-  let max = Math.max(...values);
-  if (min === max) { min -= 1; max += 1; }
-  const pad = (max - min) * paddingFrac;
-  return [floorAtZero ? Math.max(0, min - pad) : min - pad, max + pad];
-}
 
 function EmptyRange({ label }) {
   return (
@@ -86,129 +73,235 @@ function EmptyRange({ label }) {
   );
 }
 
-function DetailChart({ outputId, rangeKey, onRangeChange, visibility, onToggle, current }) {
+function DetailChart({ outputId, rangeKey, onRangeChange, visibility, onToggle, current, simNowRef }) {
   const [history, setHistory] = useState([]);
   const [baseline, setBaseline] = useState([]);
   const [prediction, setPrediction] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState(null);
+  const [lastOk, setLastOk] = useState(null);
+  const [cursor, setCursor] = useState(null);
+  const controllerRef = useRef(null);
   const range = RANGES.find((r) => r.key === rangeKey) ?? RANGES[0];
 
   const refresh = useCallback(async () => {
-    const until = new Date();
-    const since = new Date(until.getTime() - range.spanMs);
+    if (isPageHidden()) return;
+    controllerRef.current?.abort(); // une requête en cours devient inutile
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    const { signal } = controller;
+
+    // La fenêtre est calculée dans l'horloge SIMULÉE du serveur (simNowRef), pas dans celle du
+    // navigateur : l'horloge simulée avance 150× plus vite que le temps réel, donc une fenêtre
+    // calée sur `new Date()` ne contenait presque plus aucun point après quelques secondes.
+    // `until` est volontairement omis : le serveur prend alors sa propre horloge et inclut les
+    // mesures les plus récentes.
+    const simNow = simNowRef.current ?? new Date();
+    const since = new Date(simNow.getTime() - range.spanMs).toISOString();
     try {
       const [hist, fc, ahead] = await Promise.all([
-        api.history(outputId, since.toISOString(), until.toISOString()),
-        visibility.baseline ? api.forecast(outputId, since.toISOString(), until.toISOString()) : Promise.resolve([]),
-        visibility.prediction ? api.forecastAhead(outputId, 35) : Promise.resolve([]),
+        api.history(outputId, since, undefined, signal),
+        visibility.baseline ? api.forecast(outputId, since, undefined, signal) : Promise.resolve([]),
+        visibility.prediction ? api.forecastAhead(outputId, 35, signal) : Promise.resolve([]),
       ]);
       setHistory(hist);
       setBaseline(fc);
       setPrediction(ahead);
+      setFetchError(null);
+      setLastOk(new Date());
     } catch (err) {
-      console.error("Échec du rafraîchissement du graphe", outputId, err);
+      if (isAbortError(err)) return;
+      setFetchError(err.message ?? String(err));
     } finally {
-      setLoading(false);
+      if (!signal.aborted) setLoading(false);
     }
-  }, [outputId, rangeKey, visibility.baseline, visibility.prediction]);
+  }, [outputId, rangeKey, visibility.baseline, visibility.prediction, simNowRef]);
 
   useEffect(() => {
     setLoading(true);
     refresh();
     const id = setInterval(refresh, 5000);
-    return () => clearInterval(id);
+    return () => {
+      clearInterval(id);
+      controllerRef.current?.abort();
+    };
   }, [refresh]);
 
+  // Tout ce qui est coûteux (échelles, chemins SVG) est calculé une seule fois par jeu de données :
+  // déplacer le curseur ne doit pas reconstruire des courbes de plusieurs milliers de points.
+  const geometry = useMemo(() => {
+    if (history.length < 2) return null;
+    const points = history.map((h) => ({ date: new Date(h.timestamp), traffic: h.traffic_mbps, loss: h.loss_percent }));
+    const baselinePoints = baseline.map((f) => ({ date: new Date(f.timestamp), traffic: f.predicted_traffic_mbps }));
+    const predictionPoints = prediction.map((f) => ({ date: new Date(f.timestamp), traffic: f.predicted_traffic_mbps }));
+
+    const tStart = points[0].date.getTime();
+    const last = points[points.length - 1];
+    const tEnd = (predictionPoints.length ? predictionPoints[predictionPoints.length - 1].date : last.date).getTime();
+    const span = Math.max(1, tEnd - tStart);
+    const xAt = (date) => MARGIN.left + ((date.getTime() - tStart) / span) * INNER_W;
+
+    const trafficValues = [
+      ...(visibility.traffic ? points.map((p) => p.traffic) : []),
+      ...(visibility.baseline ? baselinePoints.map((p) => p.traffic) : []),
+      ...(visibility.prediction ? predictionPoints.map((p) => p.traffic) : []),
+    ];
+    const lossValues = visibility.loss ? points.map((p) => p.loss) : [];
+    const [tMin, tMax] = niceDomain(trafficValues.length ? trafficValues : [current.traffic || 1]);
+    const [lMin, lMax] = niceDomain(lossValues.length ? lossValues : [current.loss || 0.1], 0.25, true);
+    const yTraffic = (v) => MARGIN.top + INNER_H - ((v - tMin) / (tMax - tMin || 1)) * INNER_H;
+    const yLoss = (v) => MARGIN.top + INNER_H - ((v - lMin) / (lMax - lMin || 1)) * INNER_H;
+
+    // Sous-échantillonnage (min/max par tranche) : sur « 1 mois » une courbe fait 8 640 points, alors
+    // que le graphe n'a que ~520 unités de large. Les extrêmes sont conservés pour ne pas lisser les pics.
+    const shownTraffic = downsampleMinMax(points, (p) => p.traffic, INNER_W);
+    const shownLoss = downsampleMinMax(points, (p) => p.loss, INNER_W);
+    const shownBaseline = downsampleMinMax(baselinePoints, (p) => p.traffic, INNER_W);
+    const pathFor = (pts, valueOf, yFn) =>
+      pts.map((p, i) => `${i === 0 ? "M" : "L"} ${xAt(p.date).toFixed(1)} ${yFn(valueOf(p)).toFixed(1)}`).join(" ");
+
+    const nTimeLabels = 5;
+    const timeIdx = Array.from({ length: nTimeLabels }, (_, i) => Math.round((points.length - 1) * (i / (nTimeLabels - 1))));
+
+    let minT = Infinity;
+    let maxT = -Infinity;
+    for (const p of points) {
+      if (p.traffic < minT) minT = p.traffic;
+      if (p.traffic > maxT) maxT = p.traffic;
+    }
+
+    return {
+      points, last, tStart, span, xAt, yTraffic, yLoss, tMin, tMax, lMin, lMax, shownTraffic, timeIdx, minT, maxT,
+      nowX: xAt(last.date),
+      trafficPath: pathFor(shownTraffic, (p) => p.traffic, yTraffic),
+      lossPath: pathFor(shownLoss, (p) => p.loss, yLoss),
+      baselinePath: pathFor(shownBaseline, (p) => p.traffic, yTraffic),
+      predictionPath: pathFor(predictionPoints, (p) => p.traffic, yTraffic),
+      baselineCount: baselinePoints.length,
+      predictionCount: predictionPoints.length,
+    };
+  }, [history, baseline, prediction, visibility.traffic, visibility.loss, visibility.baseline, visibility.prediction, current.traffic, current.loss]);
+
   if (loading && history.length === 0) {
-    return <div className="chart-loading">Chargement…</div>;
+    return <div className="chart-loading" role="status">Chargement…</div>;
   }
-  if (history.length < 2) {
+  if (!geometry) {
     return (
       <div>
         <RangeSelector rangeKey={rangeKey} onRangeChange={onRangeChange} />
         <EmptyRange label={range.label} />
+        <StaleNote error={fetchError} lastOk={lastOk} />
         <Legend visibility={visibility} onToggle={onToggle} current={current} />
       </div>
     );
   }
 
-  const now = new Date();
-  const points = history.map((h) => ({ date: new Date(h.timestamp), traffic: h.traffic_mbps, loss: h.loss_percent }));
-  const baselinePoints = baseline.map((f) => ({ date: new Date(f.timestamp), traffic: f.predicted_traffic_mbps }));
-  const predictionPoints = prediction.map((f) => ({ date: new Date(f.timestamp), traffic: f.predicted_traffic_mbps, loss: null }));
-
-  const tStart = points[0].date.getTime();
-  const tEnd = (predictionPoints.length ? predictionPoints[predictionPoints.length - 1].date : points[points.length - 1].date).getTime();
-  const span = Math.max(1, tEnd - tStart);
-  const xAt = (date) => MARGIN.left + ((date.getTime() - tStart) / span) * INNER_W;
-  const nowX = xAt(points[points.length - 1].date);
-
-  const trafficValues = [
-    ...(visibility.traffic ? points.map((p) => p.traffic) : []),
-    ...(visibility.baseline ? baselinePoints.map((p) => p.traffic) : []),
-    ...(visibility.prediction ? predictionPoints.map((p) => p.traffic) : []),
-  ];
-  const lossValues = visibility.loss ? points.map((p) => p.loss) : [];
-  const [tMin, tMax] = niceDomain(trafficValues.length ? trafficValues : [current.traffic || 1]);
-  const [lMin, lMax] = niceDomain(lossValues.length ? lossValues : [current.loss || 0.1], 0.25, true);
-
-  const yTraffic = (v) => MARGIN.top + INNER_H - ((v - tMin) / (tMax - tMin || 1)) * INNER_H;
-  const yLoss = (v) => MARGIN.top + INNER_H - ((v - lMin) / (lMax - lMin || 1)) * INNER_H;
-  const pathFor = (pts, yFn) => pts.map((p, i) => `${i === 0 ? "M" : "L"} ${xAt(p.date).toFixed(1)} ${yFn(p.v).toFixed(1)}`).join(" ");
-
-  const actualTrafficPath = pathFor(points.map((p) => ({ date: p.date, v: p.traffic })), yTraffic);
-  const actualLossPath = pathFor(points.map((p) => ({ date: p.date, v: p.loss })), yLoss);
-  const baselinePath = pathFor(baselinePoints.map((p) => ({ date: p.date, v: p.traffic })), yTraffic);
-  const predictionPath = pathFor(predictionPoints.map((p) => ({ date: p.date, v: p.traffic })), yTraffic);
-
+  const g = geometry;
   const rows = [0, 1 / 3, 2 / 3, 1];
-  const nTimeLabels = 5;
-  const timeIdx = Array.from({ length: nTimeLabels }, (_, i) => Math.round((points.length - 1) * (i / (nTimeLabels - 1))));
+  const cursorIndex = cursor == null ? null : Math.min(cursor, g.shownTraffic.length - 1);
+  const cursorPoint = cursorIndex == null ? null : g.shownTraffic[cursorIndex];
+  const readout = cursorPoint
+    ? `${formatAxisLabel(cursorPoint.date, rangeKey, g.last.date)} · ${formatMbps(cursorPoint.traffic)} · ${cursorPoint.loss.toFixed(2)} % de pertes`
+    : "Survolez le graphe, ou utilisez le curseur (flèches du clavier), pour lire une valeur exacte.";
+  const summary =
+    `Trafic et pertes de ${outputId} sur ${range.label} : ${g.points.length} mesures, ` +
+    `trafic de ${formatMbps(g.minT)} à ${formatMbps(g.maxT)}, dernière valeur ${formatMbps(g.last.traffic)}, ` +
+    `pertes ${g.last.loss.toFixed(2)} %.`;
+
+  const onMove = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (!rect.width) return;
+    const x = ((e.clientX - rect.left) / rect.width) * CHART_W;
+    const t = g.tStart + ((x - MARGIN.left) / INNER_W) * g.span;
+    setCursor(nearestIndexByTime(g.shownTraffic, t));
+  };
 
   return (
     <div>
       <RangeSelector rangeKey={rangeKey} onRangeChange={onRangeChange} />
-      <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} style={{ width: "100%", height: "auto", display: "block" }}>
-        {rows.map((f) => {
-          const py = MARGIN.top + f * INNER_H;
-          const tVal = tMax - f * (tMax - tMin);
-          const lVal = lMax - f * (lMax - lMin);
-          return (
-            <g key={f}>
-              <line x1={MARGIN.left} x2={CHART_W - MARGIN.right} y1={py} y2={py} stroke={COLORS.grid} strokeWidth="1" />
-              {(visibility.traffic || visibility.baseline || visibility.prediction) && (
-                <text x={MARGIN.left - 8} y={py + 3} textAnchor="end" fontSize="9" fill={COLORS.textFaint} fontFamily="JetBrains Mono, monospace">
-                  {formatMbps(Math.max(0, tVal))}
-                </text>
-              )}
-              {visibility.loss && (
-                <text x={CHART_W - MARGIN.right + 8} y={py + 3} textAnchor="start" fontSize="9" fill={COLORS.textFaint} fontFamily="JetBrains Mono, monospace">
-                  {Math.max(0, lVal).toFixed(2)}%
-                </text>
-              )}
-            </g>
-          );
-        })}
+      <div className="chart-wrap">
+        <svg
+          viewBox={`0 0 ${CHART_W} ${CHART_H}`}
+          style={{ width: "100%", height: "auto", display: "block" }}
+          role="img"
+          aria-label={summary}
+          onMouseMove={onMove}
+          onMouseLeave={() => setCursor(null)}
+        >
+          {rows.map((f) => {
+            const py = MARGIN.top + f * INNER_H;
+            const tVal = g.tMax - f * (g.tMax - g.tMin);
+            const lVal = g.lMax - f * (g.lMax - g.lMin);
+            return (
+              <g key={f}>
+                <line x1={MARGIN.left} x2={CHART_W - MARGIN.right} y1={py} y2={py} stroke={COLORS.grid} strokeWidth="1" />
+                {(visibility.traffic || visibility.baseline || visibility.prediction) && (
+                  <text x={MARGIN.left - 8} y={py + 3} textAnchor="end" fontSize="9" fill={COLORS.textFaint} fontFamily="JetBrains Mono, monospace">
+                    {formatMbps(Math.max(0, tVal))}
+                  </text>
+                )}
+                {visibility.loss && (
+                  <text x={CHART_W - MARGIN.right + 8} y={py + 3} textAnchor="start" fontSize="9" fill={COLORS.textFaint} fontFamily="JetBrains Mono, monospace">
+                    {Math.max(0, lVal).toFixed(2)}%
+                  </text>
+                )}
+              </g>
+            );
+          })}
 
-        {timeIdx.map((i) => (
-          <text key={i} x={xAt(points[i].date)} y={CHART_H - 6} textAnchor="middle" fontSize="8.5" fill={COLORS.textFaint} fontFamily="JetBrains Mono, monospace">
-            {formatAxisLabel(points[i].date, rangeKey, now)}
+          {g.timeIdx.map((i) => (
+            <text key={i} x={g.xAt(g.points[i].date)} y={CHART_H - 6} textAnchor="middle" fontSize="8.5" fill={COLORS.textFaint} fontFamily="JetBrains Mono, monospace">
+              {formatAxisLabel(g.points[i].date, rangeKey, g.last.date)}
+            </text>
+          ))}
+
+          <line x1={g.nowX} x2={g.nowX} y1={MARGIN.top} y2={MARGIN.top + INNER_H} stroke={COLORS.borderBright} strokeWidth="1" strokeDasharray="2 3" />
+          <text x={g.nowX} y={MARGIN.top - 5} textAnchor={g.nowX > CHART_W - MARGIN.right - 30 ? "end" : "middle"} fontSize="8.5" fill={COLORS.textFaint}>
+            dernière mesure
           </text>
-        ))}
 
-        <line x1={nowX} x2={nowX} y1={MARGIN.top} y2={MARGIN.top + INNER_H} stroke={COLORS.borderBright} strokeWidth="1" strokeDasharray="2 3" />
-        <text x={nowX} y={MARGIN.top - 2} textAnchor="middle" fontSize="8.5" fill={COLORS.textFaint}>maintenant</text>
+          {visibility.baseline && g.baselineCount > 1 && (
+            <path d={g.baselinePath} fill="none" stroke={COLORS.trace} strokeWidth="1" strokeDasharray="4 3" opacity="0.55" />
+          )}
+          {visibility.prediction && g.predictionCount > 1 && (
+            <path d={g.predictionPath} fill="none" stroke={COLORS.trace} strokeWidth="1.3" strokeDasharray="1 3" strokeLinecap="round" opacity="0.85" />
+          )}
+          {visibility.loss && <path d={g.lossPath} fill="none" stroke={COLORS.lossTrace} strokeWidth="1.3" strokeLinejoin="round" />}
+          {visibility.traffic && <path d={g.trafficPath} fill="none" stroke={COLORS.trace} strokeWidth="1.6" strokeLinejoin="round" />}
 
-        {visibility.baseline && baselinePoints.length > 1 && (
-          <path d={baselinePath} fill="none" stroke={COLORS.trace} strokeWidth="1" strokeDasharray="4 3" opacity="0.55" />
-        )}
-        {visibility.prediction && predictionPoints.length > 1 && (
-          <path d={predictionPath} fill="none" stroke={COLORS.trace} strokeWidth="1.3" strokeDasharray="1 3" strokeLinecap="round" opacity="0.85" />
-        )}
-        {visibility.loss && <path d={actualLossPath} fill="none" stroke={COLORS.lossTrace} strokeWidth="1.3" strokeLinejoin="round" />}
-        {visibility.traffic && <path d={actualTrafficPath} fill="none" stroke={COLORS.trace} strokeWidth="1.6" strokeLinejoin="round" />}
-      </svg>
+          {cursorPoint && (
+            <g data-testid="chart-cursor" pointerEvents="none">
+              <line x1={g.xAt(cursorPoint.date)} x2={g.xAt(cursorPoint.date)} y1={MARGIN.top} y2={MARGIN.top + INNER_H} stroke={COLORS.text} strokeWidth="1" opacity="0.5" />
+              {visibility.traffic && <circle cx={g.xAt(cursorPoint.date)} cy={g.yTraffic(cursorPoint.traffic)} r="3" fill={COLORS.trace} />}
+              {visibility.loss && <circle cx={g.xAt(cursorPoint.date)} cy={g.yLoss(cursorPoint.loss)} r="3" fill={COLORS.lossTrace} />}
+            </g>
+          )}
+        </svg>
+        {/* Curseur clavier : un vrai <input type="range"> donne gratuitement flèches, Début/Fin et
+            annonce par les lecteurs d'écran (aria-valuetext), sans réinventer un widget. */}
+        <input
+          type="range"
+          className="chart-cursor-input"
+          min={0}
+          max={g.shownTraffic.length - 1}
+          value={cursorIndex ?? g.shownTraffic.length - 1}
+          onChange={(e) => setCursor(Number(e.target.value))}
+          aria-label={`Parcourir les valeurs du graphe de ${outputId}`}
+          aria-valuetext={readout}
+        />
+      </div>
+      <div className="chart-readout mono" data-testid="chart-readout">{readout}</div>
+      <StaleNote error={fetchError} lastOk={lastOk} />
       <Legend visibility={visibility} onToggle={onToggle} current={current} />
+    </div>
+  );
+}
+
+function StaleNote({ error, lastOk }) {
+  if (!error) return null;
+  return (
+    <div role="status" className="chart-stale">
+      Rafraîchissement impossible ({error}){lastOk ? ` — données affichées de ${formatClock(lastOk)}` : ""}.
     </div>
   );
 }
@@ -275,56 +368,41 @@ function TrendChip({ current, previous, formatValue, threshold }) {
   );
 }
 
-async function fetchNearest(outputId, targetDate) {
-  const since = new Date(targetDate.getTime() - 35 * 60_000);
-  const until = new Date(targetDate.getTime() + 10 * 60_000);
-  try {
-    const points = await api.history(outputId, since.toISOString(), until.toISOString());
-    if (!points.length) return null;
-    let best = null;
-    let bestDist = Infinity;
-    for (const p of points) {
-      const d = Math.abs(new Date(p.timestamp).getTime() - targetDate.getTime());
-      if (d < bestDist) { bestDist = d; best = p; }
-    }
-    return best;
-  } catch {
-    return null;
-  }
-}
+// Décalages (en secondes, avant la dernière mesure de la sortie) des quatre colonnes du tableau.
+const SNAPSHOT_OFFSETS = { now: 0, prev: 300, day: 86400, week: 604800 };
 
 function SummaryTable({ outputIds, thresholds }) {
   const [rows, setRows] = useState({});
+  const [error, setError] = useState(null);
+  const controllerRef = useRef(null);
+  const idsKey = outputIds.join(",");
 
+  // Une requête par sortie (le serveur calcule les 8 mesures voisines et dans SON horloge) au lieu de
+  // 24 requêtes /history par rafraîchissement calées sur l'horloge du navigateur.
   const refresh = useCallback(async () => {
-    const now = new Date();
-    const windows = [
-      { key: "now", offset: 0 },
-      { key: "prev", offset: 5 * 60_000 },
-      { key: "day", offset: 24 * 3600_000 },
-      { key: "week", offset: 7 * 24 * 3600_000 },
-    ];
-    const next = {};
-    await Promise.all(
-      outputIds.map(async (id) => {
-        const perWindow = await Promise.all(
-          windows.map(async (w) => {
-            const target = new Date(now.getTime() - w.offset);
-            const prevTarget = new Date(target.getTime() - 5 * 60_000);
-            const [cur, prev] = await Promise.all([fetchNearest(id, target), fetchNearest(id, prevTarget)]);
-            return { key: w.key, cur, prev };
-          })
-        );
-        next[id] = perWindow;
-      })
-    );
-    setRows(next);
-  }, [outputIds.join(",")]);
+    if (isPageHidden()) return;
+    controllerRef.current?.abort();
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    try {
+      const entries = await Promise.all(
+        idsKey.split(",").map(async (id) => [id, await api.snapshots(id, Object.values(SNAPSHOT_OFFSETS), controller.signal)])
+      );
+      setRows(Object.fromEntries(entries));
+      setError(null);
+    } catch (err) {
+      if (isAbortError(err)) return;
+      setError(err.message ?? String(err));
+    }
+  }, [idsKey]);
 
   useEffect(() => {
     refresh();
     const id = setInterval(refresh, 15000);
-    return () => clearInterval(id);
+    return () => {
+      clearInterval(id);
+      controllerRef.current?.abort();
+    };
   }, [refresh]);
 
   const windowMeta = [
@@ -333,47 +411,52 @@ function SummaryTable({ outputIds, thresholds }) {
     { key: "day", label: "-1j", full: "Il y a un jour" },
     { key: "week", label: "-1s", full: "Il y a une semaine" },
   ];
+  const cellFor = (perOutput, w) => perOutput?.find((snap) => snap.offset_seconds === SNAPSHOT_OFFSETS[w.key]);
 
   return (
-    <table className="nm-table">
-      <thead>
-        <tr>
-          <th rowSpan={2} className="nm-table-id-head">Sortie</th>
-          <th colSpan={4} className="nm-table-group">Trafic (Gbps)</th>
-          <th colSpan={4} className="nm-table-group">Pertes (%)</th>
-        </tr>
-        <tr>
-          {windowMeta.map((w) => <th key={"t" + w.key} title={w.full}>{w.label}</th>)}
-          {windowMeta.map((w) => <th key={"l" + w.key} title={w.full}>{w.label}</th>)}
-        </tr>
-      </thead>
-      <tbody>
-        {outputIds.map((id) => {
-          const perWindow = rows[id];
-          return (
-            <tr key={id}>
-              <td className="nm-table-id">{id}</td>
-              {windowMeta.map((w) => {
-                const cell = perWindow?.find((r) => r.key === w.key);
-                return (
-                  <td key={"t" + w.key}>
-                    <TrendChip current={cell?.cur?.traffic_mbps} previous={cell?.prev?.traffic_mbps} formatValue={formatGbpsBare} threshold={thresholds.traffic} />
-                  </td>
-                );
-              })}
-              {windowMeta.map((w) => {
-                const cell = perWindow?.find((r) => r.key === w.key);
-                return (
-                  <td key={"l" + w.key}>
-                    <TrendChip current={cell?.cur?.loss_percent} previous={cell?.prev?.loss_percent} formatValue={formatPercentBare} threshold={thresholds.loss} />
-                  </td>
-                );
-              })}
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+    <>
+      {error && <div role="status" className="chart-stale">Mise à jour du tableau impossible ({error}).</div>}
+      <table className="nm-table">
+        <caption className="sr-only">Comparatif temporel du trafic et des pertes, par sortie</caption>
+        <thead>
+          <tr>
+            <th rowSpan={2} className="nm-table-id-head" scope="col">Sortie</th>
+            <th colSpan={4} className="nm-table-group" scope="colgroup">Trafic (Gbps)</th>
+            <th colSpan={4} className="nm-table-group" scope="colgroup">Pertes (%)</th>
+          </tr>
+          <tr>
+            {windowMeta.map((w) => <th key={"t" + w.key} title={w.full} scope="col"><abbr title={w.full}>{w.label}</abbr></th>)}
+            {windowMeta.map((w) => <th key={"l" + w.key} title={w.full} scope="col"><abbr title={w.full}>{w.label}</abbr></th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {outputIds.map((id) => {
+            const perOutput = rows[id];
+            return (
+              <tr key={id}>
+                <th scope="row" className="nm-table-id">{id}</th>
+                {windowMeta.map((w) => {
+                  const cell = cellFor(perOutput, w);
+                  return (
+                    <td key={"t" + w.key}>
+                      <TrendChip current={cell?.current?.traffic_mbps} previous={cell?.previous?.traffic_mbps} formatValue={formatGbpsBare} threshold={thresholds.traffic} />
+                    </td>
+                  );
+                })}
+                {windowMeta.map((w) => {
+                  const cell = cellFor(perOutput, w);
+                  return (
+                    <td key={"l" + w.key}>
+                      <TrendChip current={cell?.current?.loss_percent} previous={cell?.previous?.loss_percent} formatValue={formatPercentBare} threshold={thresholds.loss} />
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </>
   );
 }
 
@@ -432,12 +515,42 @@ function SettingsPanel({ config, deltaThresholds, onDeltaThresholdsChange, onSav
 
 // --- Composant racine -----------------------------------------------------
 
+// Ajoute une valeur par défaut pour chaque nouvel id SANS changer l'identité de l'objet quand rien
+// ne change : retourner un nouvel objet à chaque appel (toutes les 4 s) forçait un re-rendu complet.
+function withDefaults(prev, ids, makeDefault) {
+  let next = prev;
+  for (const id of ids) {
+    if (id in prev) continue;
+    if (next === prev) next = { ...prev };
+    next[id] = makeDefault();
+  }
+  return next;
+}
+
+/** Âge de la dernière mise à jour réussie : c'est LA donnée de confiance d'un outil de supervision. */
+function FreshnessBadge({ lastOk }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+  if (!lastOk) return null;
+  const age = (Date.now() - lastOk.getTime()) / 1000;
+  return (
+    <div className={`nm-fresh${age > 15 ? " is-stale" : ""}`} title="Âge de la dernière mise à jour réussie">
+      màj il y a {formatAge(age)}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [outputs, setOutputs] = useState([]);
   const [incidents, setIncidents] = useState([]);
   const [config, setConfig] = useState(null);
   const [monitoringStatus, setMonitoringStatus] = useState(null);
   const [connectionError, setConnectionError] = useState(null);
+  const [staleError, setStaleError] = useState(null);
+  const [lastOk, setLastOk] = useState(null);
   const [expandedCharts, setExpandedCharts] = useState({});
   const [visibility, setVisibility] = useState({});
   const [chartRange, setChartRange] = useState({});
@@ -447,30 +560,73 @@ export default function Dashboard() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
 
+  // Horloge SIMULÉE du serveur, lue par les graphes pour calculer leurs fenêtres (voir DetailChart).
+  const simNowRef = useRef(null);
+  const hasDataRef = useRef(false);
+  const configLoadedRef = useRef(false);
+
   const ensureOutputDefaults = (ids) => {
-    setExpandedCharts((prev) => { const next = { ...prev }; ids.forEach((id) => { if (!(id in next)) next[id] = true; }); return next; });
-    setVisibility((prev) => { const next = { ...prev }; ids.forEach((id) => { if (!(id in next)) next[id] = { traffic: true, loss: true, baseline: false, prediction: false }; }); return next; });
-    setChartRange((prev) => { const next = { ...prev }; ids.forEach((id) => { if (!(id in next)) next[id] = "12h"; }); return next; });
+    setExpandedCharts((prev) => withDefaults(prev, ids, () => true));
+    setVisibility((prev) => withDefaults(prev, ids, () => ({ traffic: true, loss: true, baseline: false, prediction: false })));
+    setChartRange((prev) => withDefaults(prev, ids, () => "12h"));
   };
 
-  const refreshTopLevel = useCallback(async () => {
+  // Renvoie true (succès), false (échec) ou null (annulé : composant démonté).
+  const refreshTopLevel = useCallback(async (signal) => {
+    if (isPageHidden()) return true;
     try {
-      const [outs, incs, status] = await Promise.all([api.outputs(), api.incidents(undefined, 100), api.monitoringStatus()]);
+      const [outs, incs, status, cfg] = await Promise.all([
+        api.outputs(signal),
+        api.incidents(undefined, 100, signal),
+        api.monitoringStatus(signal),
+        configLoadedRef.current ? Promise.resolve(null) : api.getConfig(signal),
+      ]);
+      simNowRef.current = new Date(status.simulated_now);
+      if (cfg) {
+        setConfig(cfg);
+        configLoadedRef.current = true;
+      }
       setOutputs(outs);
       setIncidents(incs);
       setMonitoringStatus(status);
-      setConnectionError(null);
       ensureOutputDefaults(outs.map((o) => o.output_id));
+      hasDataRef.current = true;
+      setConnectionError(null);
+      setStaleError(null);
+      setLastOk(new Date());
+      return true;
     } catch (err) {
-      setConnectionError(`Impossible de joindre l'API (${err.message}). Vérifiez qu'elle tourne sur l'URL configurée (VITE_API_BASE_URL).`);
+      if (isAbortError(err)) return null;
+      const message = err.message ?? String(err);
+      if (hasDataRef.current) {
+        // On a déjà des données : on les GARDE à l'écran avec un avertissement, au lieu de tout remplacer.
+        setStaleError(message);
+      } else {
+        setConnectionError(`Impossible de joindre l'API (${message}). Vérifiez qu'elle tourne sur l'URL configurée (VITE_API_BASE_URL).`);
+      }
+      return false;
     }
   }, []);
 
+  // Rafraîchissement périodique avec recul exponentiel : si l'API est surchargée ou arrêtée, on
+  // espace les tentatives (4 s → 8 s → … → 30 s) au lieu de la marteler à fréquence constante.
   useEffect(() => {
-    api.getConfig().then(setConfig).catch(() => {});
-    refreshTopLevel();
-    const id = setInterval(refreshTopLevel, 4000);
-    return () => clearInterval(id);
+    let cancelled = false;
+    let timer = null;
+    let failures = 0;
+    const controller = new AbortController();
+    const tick = async () => {
+      const ok = await refreshTopLevel(controller.signal);
+      if (cancelled) return;
+      failures = ok === false ? failures + 1 : 0;
+      timer = setTimeout(tick, backoffDelay(failures));
+    };
+    tick();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, [refreshTopLevel]);
 
   const saveIncidentConfig = async (draft) => {
@@ -493,11 +649,11 @@ export default function Dashboard() {
   const toggleChart = (id) => setExpandedCharts((prev) => ({ ...prev, [id]: !prev[id] }));
   const toggleSeries = (id, key) => setVisibility((prev) => ({ ...prev, [id]: { ...prev[id], [key]: !prev[id][key] } }));
 
-  if (connectionError) {
+  if (connectionError && !hasDataRef.current) {
     return (
       <div className="nm-root">
         <style>{BASE_STYLE}</style>
-        <div className="connection-error">
+        <div className="connection-error" role="alert">
           <h1>Signal Room</h1>
           <p>{connectionError}</p>
         </div>
@@ -509,117 +665,142 @@ export default function Dashboard() {
     return (
       <div className="nm-root">
         <style>{BASE_STYLE}</style>
-        <p className="chart-loading">Connexion à l'API…</p>
+        <p className="chart-loading" role="status">Connexion à l'API…</p>
       </div>
     );
   }
 
   const activeIncidents = outputs.filter((o) => o.status === "open").length;
+  const scoreLabel = (inc) =>
+    inc.current_score != null && Math.abs(inc.current_score - inc.score) > 0.005
+      ? `score max ${inc.score.toFixed(2)}, actuel ${inc.current_score.toFixed(2)}`
+      : `score ${inc.score.toFixed(2)}`;
 
   return (
     <div className="nm-root">
       <style>{BASE_STYLE}</style>
+      <a className="skip-link" href="#main">Aller au contenu</a>
 
-      <div className="nm-header">
-        <div className="nm-title">Signal Room <span>· réseau, branché sur l'API réelle</span></div>
+      <header className="nm-header">
+        <h1 className="nm-title">Signal Room <span>· réseau, branché sur l'API réelle</span></h1>
         <div className="nm-header-meta">
-          <div className="nm-live"><span className="nm-live-dot" />{monitoringStatus?.running ? "live" : "arrêté"}</div>
+          <div className="nm-live"><span className="nm-live-dot" aria-hidden="true" />{monitoringStatus?.running ? "live" : "arrêté"}</div>
           <div>{outputs.length} sorties · <span className={activeIncidents ? "nm-incident-count" : ""}>{activeIncidents} incident{activeIncidents !== 1 ? "s" : ""} actif{activeIncidents !== 1 ? "s" : ""}</span></div>
-          <div className="nm-clock mono">{monitoringStatus ? formatClock(new Date(monitoringStatus.simulated_now)) : "—"}</div>
+          <div className="nm-clock mono" title="Horloge simulée du serveur">{monitoringStatus ? formatClock(new Date(monitoringStatus.simulated_now)) : "—"}</div>
+          <FreshnessBadge lastOk={lastOk} />
         </div>
-      </div>
+      </header>
 
-      <div className="nm-channels">
-        {outputs.map((output) => {
-          const id = output.output_id;
-          const style = STATUS_STYLE[output.status] ?? STATUS_STYLE.normal;
-          const isActive = output.status === "open" || output.status === "stale";
-          const expanded = expandedCharts[id];
-          return (
-            <div key={id} className={`nm-channel${isActive ? " is-active" : ""}`} style={{ "--stripe": style.color, borderLeftColor: isActive ? style.color : COLORS.border }}>
-              <div className="nm-channel-head" onClick={() => toggleChart(id)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") toggleChart(id); }}>
-                <div className="nm-channel-id-block">
-                  <span className="nm-card-id">{id}</span>
+      {staleError && (
+        <div role="alert" className="nm-banner">
+          Connexion à l'API perdue — les données affichées peuvent être périmées ({staleError}).
+        </div>
+      )}
+
+      <main id="main" tabIndex={-1}>
+        <section className="nm-channels" aria-labelledby="h-outputs">
+          <h2 id="h-outputs" className="sr-only">Sorties</h2>
+          {outputs.map((output) => {
+            const id = output.output_id;
+            const style = STATUS_STYLE[output.status] ?? STATUS_STYLE.normal;
+            const isActive = output.status === "open" || output.status === "stale";
+            const expanded = expandedCharts[id];
+            return (
+              <div key={id} className={`nm-channel${isActive ? " is-active" : ""}`} style={{ "--stripe": style.color, borderLeftColor: isActive ? style.color : COLORS.border }}>
+                {/* Souris : toute la barre est cliquable. Clavier et lecteurs d'écran : le <button> seul
+                    (natif : Entrée et Espace). Aucun role="button" imbriqué autour d'un autre bouton. */}
+                <div className="nm-channel-head" onClick={() => toggleChart(id)}>
+                  <div className="nm-channel-id-block">
+                    <span className="nm-card-id">{id}</span>
+                  </div>
+                  <div className="nm-channel-readout">
+                    <span className="mono">{formatMbps(output.latest_sample?.traffic_mbps)}</span>
+                    <span className="mono nm-readout-loss">{output.latest_sample ? `${output.latest_sample.loss_percent.toFixed(2)}% perte` : "—"}</span>
+                  </div>
+                  <div className="nm-status-row">
+                    <span className="nm-status-dot" style={{ background: style.color }} aria-hidden="true" />
+                    <span style={{ color: style.color, fontWeight: 600 }}>{style.label}</span>
+                  </div>
+                  <button type="button" className="nm-collapse-btn" aria-expanded={!!expanded} aria-label={expanded ? `Replier ${id}` : `Déplier ${id}`}
+                    onClick={(e) => { e.stopPropagation(); toggleChart(id); }}>
+                    {expanded ? "−" : "+"}
+                  </button>
                 </div>
-                <div className="nm-channel-readout">
-                  <span className="mono">{formatMbps(output.latest_sample?.traffic_mbps)}</span>
-                  <span className="mono nm-readout-loss">{output.latest_sample ? `${output.latest_sample.loss_percent.toFixed(2)}% perte` : "—"}</span>
-                </div>
-                <div className="nm-status-row">
-                  <span className="nm-status-dot" style={{ background: style.color }} />
-                  <span style={{ color: style.color, fontWeight: 600 }}>{style.label}</span>
-                </div>
-                <button type="button" className="nm-collapse-btn" aria-expanded={expanded} aria-label={expanded ? `Replier ${id}` : `Déplier ${id}`}
-                  onClick={(e) => { e.stopPropagation(); toggleChart(id); }}>
-                  {expanded ? "−" : "+"}
-                </button>
+                {expanded && visibility[id] && (
+                  <div className="nm-channel-body">
+                    <DetailChart
+                      outputId={id}
+                      rangeKey={chartRange[id] || "12h"}
+                      onRangeChange={(key) => setChartRange((prev) => ({ ...prev, [id]: key }))}
+                      visibility={visibility[id]}
+                      onToggle={(key) => toggleSeries(id, key)}
+                      current={{ traffic: output.latest_sample?.traffic_mbps, loss: output.latest_sample?.loss_percent }}
+                      simNowRef={simNowRef}
+                    />
+                  </div>
+                )}
               </div>
-              {expanded && visibility[id] && (
-                <div className="nm-channel-body">
-                  <DetailChart
-                    outputId={id}
-                    rangeKey={chartRange[id] || "12h"}
-                    onRangeChange={(key) => setChartRange((prev) => ({ ...prev, [id]: key }))}
-                    visibility={visibility[id]}
-                    onToggle={(key) => toggleSeries(id, key)}
-                    current={{ traffic: output.latest_sample?.traffic_mbps, loss: output.latest_sample?.loss_percent }}
-                  />
+            );
+          })}
+        </section>
+
+        <section className="nm-panel" aria-labelledby="h-compare">
+          <div className="nm-panel-head" onClick={() => setTableExpanded((v) => !v)}>
+            <h2 id="h-compare">Comparatif temporel</h2>
+            <button type="button" className="nm-collapse-btn" aria-expanded={tableExpanded} aria-label={tableExpanded ? "Replier le tableau" : "Déplier le tableau"} onClick={(e) => { e.stopPropagation(); setTableExpanded((v) => !v); }}>
+              {tableExpanded ? "−" : "+"}
+            </button>
+          </div>
+          {/* L'overflow horizontal est sur ce conteneur, pas sur le panneau : le titre ne défile plus avec le tableau. */}
+          {tableExpanded && (
+            <div className="nm-table-scroll">
+              <SummaryTable outputIds={outputs.map((o) => o.output_id)} thresholds={deltaThresholds} />
+            </div>
+          )}
+        </section>
+
+        <section className="nm-panel" aria-labelledby="h-config">
+          <div className="nm-panel-head" onClick={() => setSettingsExpanded((v) => !v)}>
+            <h2 id="h-config">Configuration</h2>
+            <button type="button" className="nm-collapse-btn" aria-expanded={settingsExpanded} aria-label={settingsExpanded ? "Replier la configuration" : "Déplier la configuration"} onClick={(e) => { e.stopPropagation(); setSettingsExpanded((v) => !v); }}>
+              {settingsExpanded ? "−" : "+"}
+            </button>
+          </div>
+          {settingsExpanded && (
+            <SettingsPanel
+              config={config}
+              deltaThresholds={deltaThresholds}
+              onDeltaThresholdsChange={setDeltaThresholds}
+              onSave={saveIncidentConfig}
+              saving={saving}
+              saveError={saveError}
+            />
+          )}
+        </section>
+
+        <section className="nm-panel" aria-labelledby="h-incidents">
+          <h2 id="h-incidents">Incidents (récents et actifs)</h2>
+          {/* role="log" : région live polie — l'arrivée d'un incident est annoncée aux lecteurs d'écran. */}
+          <div className="nm-log" role="log" aria-live="polite" aria-relevant="additions" aria-label="Journal des incidents">
+            {incidents.length === 0 && <div className="nm-log-empty">Aucun incident pour l'instant.</div>}
+            {incidents.map((inc) => {
+              const st = STATUS_STYLE[inc.status] ?? STATUS_STYLE.normal;
+              return (
+                <div className="nm-log-row" key={inc.id}>
+                  <span className="nm-log-time mono">{formatClock(new Date(inc.last_seen_at))}</span>
+                  <span className="nm-log-dot" style={{ background: st.color }} aria-hidden="true" />
+                  <span className="nm-log-msg">{inc.output_id} — {inc.incident_type} ({st.label}, {scoreLabel(inc)})</span>
                 </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      <div className="nm-panel nm-table-panel">
-        <div className="nm-panel-head" onClick={() => setTableExpanded((v) => !v)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setTableExpanded((v) => !v); }}>
-          <h2>Comparatif temporel</h2>
-          <button type="button" className="nm-collapse-btn" aria-expanded={tableExpanded} aria-label={tableExpanded ? "Replier le tableau" : "Déplier le tableau"} onClick={(e) => { e.stopPropagation(); setTableExpanded((v) => !v); }}>
-            {tableExpanded ? "−" : "+"}
-          </button>
-        </div>
-        {tableExpanded && <SummaryTable outputIds={outputs.map((o) => o.output_id)} thresholds={deltaThresholds} />}
-      </div>
-
-      <div className="nm-panel nm-table-panel">
-        <div className="nm-panel-head" onClick={() => setSettingsExpanded((v) => !v)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setSettingsExpanded((v) => !v); }}>
-          <h2>Configuration</h2>
-          <button type="button" className="nm-collapse-btn" aria-expanded={settingsExpanded} aria-label={settingsExpanded ? "Replier la configuration" : "Déplier la configuration"} onClick={(e) => { e.stopPropagation(); setSettingsExpanded((v) => !v); }}>
-            {settingsExpanded ? "−" : "+"}
-          </button>
-        </div>
-        {settingsExpanded && (
-          <SettingsPanel
-            config={config}
-            deltaThresholds={deltaThresholds}
-            onDeltaThresholdsChange={setDeltaThresholds}
-            onSave={saveIncidentConfig}
-            saving={saving}
-            saveError={saveError}
-          />
-        )}
-      </div>
-
-      <div className="nm-panel">
-        <h2>Incidents (récents et actifs)</h2>
-        <div className="nm-log">
-          {incidents.length === 0 && <div className="nm-log-empty">Aucun incident pour l'instant.</div>}
-          {incidents.map((inc) => (
-            <div className="nm-log-row" key={inc.id}>
-              <span className="nm-log-time mono">{formatClock(new Date(inc.last_seen_at))}</span>
-              <span className="nm-log-dot" style={{ background: (STATUS_STYLE[inc.status] ?? STATUS_STYLE.normal).color, marginTop: 4 }} />
-              <span className="nm-log-msg">{inc.output_id} — {inc.incident_type} ({(STATUS_STYLE[inc.status] ?? STATUS_STYLE.normal).label}, score {inc.score.toFixed(2)})</span>
-            </div>
-          ))}
-        </div>
-      </div>
+              );
+            })}
+          </div>
+        </section>
+      </main>
     </div>
   );
 }
 
 const BASE_STYLE = `
-  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
-
   .nm-root {
     background: ${COLORS.bg};
     background-image: repeating-linear-gradient(0deg, rgba(127,231,196,0.012) 0px, rgba(127,231,196,0.012) 1px, transparent 1px, transparent 3px);
@@ -634,7 +815,7 @@ const BASE_STYLE = `
   .empty-range { color: ${COLORS.textFaint}; font-size: 12px; padding: 30px 10px; text-align: center; border: 1px dashed ${COLORS.border}; margin: 10px 0; }
 
   .nm-header { display: flex; align-items: baseline; justify-content: space-between; border-bottom: 1px solid ${COLORS.border}; padding-bottom: 18px; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
-  .nm-title { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+  .nm-title { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; margin: 0; }
   .nm-title span { color: ${COLORS.textDim}; font-weight: 400; }
   .nm-header-meta { display: flex; align-items: center; gap: 22px; font-size: 13px; color: ${COLORS.textDim}; }
   .nm-live { display: flex; align-items: center; gap: 7px; }
@@ -673,7 +854,7 @@ const BASE_STYLE = `
   .nm-panel { background: ${COLORS.panel}; border: 1px solid ${COLORS.border}; padding: 18px 20px; margin-bottom: 20px; }
   .nm-panel h2 { font-size: 13px; font-weight: 500; color: ${COLORS.textDim}; margin: 0; }
   .nm-panel-head { display: flex; align-items: center; justify-content: space-between; cursor: pointer; margin-bottom: 14px; }
-  .nm-table-panel { overflow-x: auto; }
+  .nm-table-scroll { overflow-x: auto; }
 
   .nm-table { border-collapse: collapse; width: 100%; margin-top: 14px; font-size: 12.5px; min-width: 760px; }
   .nm-table th, .nm-table td { padding: 7px 10px; text-align: right; border-bottom: 1px solid ${COLORS.grid}; }
@@ -684,6 +865,8 @@ const BASE_STYLE = `
   .nm-table tbody td:nth-child(5) { border-right: 1px solid ${COLORS.border}; }
   .nm-table-id-head { text-align: left; vertical-align: bottom; }
   .nm-table-id { text-align: left; font-weight: 600; }
+  .nm-table caption.sr-only { caption-side: top; }
+  .nm-table abbr { text-decoration: none; }
   .trend-cell { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
   .trend-value { font-size: 12.5px; }
   .trend-delta { font-size: 10.5px; }
@@ -705,4 +888,31 @@ const BASE_STYLE = `
   .nm-log-time { color: ${COLORS.textFaint}; flex-shrink: 0; width: 40px; }
   .nm-log-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; margin-top: 4px; }
   .nm-log-empty { color: ${COLORS.textFaint}; font-size: 12.5px; }
+
+  /* --- Accessibilité --- */
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  .skip-link { position: absolute; left: 12px; top: -48px; background: ${COLORS.trace}; color: ${COLORS.bg}; padding: 8px 14px; z-index: 10; font-weight: 600; text-decoration: none; }
+  .skip-link:focus { top: 12px; }
+  main:focus { outline: none; }
+  /* Focus visible sur TOUS les contrôles (WCAG 2.4.7), pas seulement quelques-uns. */
+  .nm-root :is(button, a, input, select, textarea, [tabindex]):focus-visible { outline: 2px solid ${COLORS.trace}; outline-offset: 2px; }
+  .chart-wrap { position: relative; }
+  .chart-wrap:focus-within { outline: 1px solid ${COLORS.borderBright}; outline-offset: 2px; }
+  .chart-cursor-input { position: absolute; width: 1px; height: 1px; opacity: 0; margin: 0; pointer-events: none; }
+  .chart-readout { min-height: 18px; margin: 6px 0 2px; font-size: 12px; color: ${COLORS.textDim}; }
+
+  /* --- Fraîcheur et erreurs de rafraîchissement --- */
+  .nm-fresh { font-size: 12px; color: ${COLORS.textFaint}; }
+  .nm-fresh.is-stale { color: ${COLORS.amber}; font-weight: 600; }
+  .nm-banner { border: 1px solid ${COLORS.amber}; color: ${COLORS.amber}; padding: 10px 14px; margin-bottom: 20px; font-size: 13px; }
+  .chart-stale { color: ${COLORS.amber}; font-size: 12px; margin: 6px 0; }
+
+  /* --- Petits écrans --- */
+  @media (max-width: 720px) {
+    .nm-root { padding: 18px 14px 36px; }
+    .nm-header-meta { gap: 12px; flex-wrap: wrap; }
+    .nm-channel-head { gap: 12px; padding: 12px; }
+    .nm-channel-id-block, .nm-channel-readout, .nm-status-row { min-width: 0; }
+    .nm-panel { padding: 14px 12px; }
+  }
 `;

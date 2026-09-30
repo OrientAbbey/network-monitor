@@ -41,5 +41,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Installer (à froid, sans --legacy-peer-deps)
         run: npm ci
+      - name: Tests (vitest + jsdom)
+        run: npm test
       - name: Build
         run: npm run build

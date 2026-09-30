@@ -7,6 +7,12 @@ import react from "@vitejs/plugin-react";
 // l'API est lue depuis VITE_API_BASE_URL (voir .env.example) plutôt que
 // codée en dur, pour pouvoir pointer vers un autre hôte/port sans toucher au code.
 export default defineConfig({
+  test: {
+    environment: "jsdom",
+    globals: true,
+    setupFiles: ["./src/test-setup.js"],
+    css: false,
+  },
   plugins: [react()],
   server: {
     port: 5173,
