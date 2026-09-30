@@ -141,7 +141,7 @@ réellement passée par la boucle de monitoring l'est.
 
 ## 5. Vérifications effectuées
 
-- Suite de tests complète (98 tests) exécutée depuis la structure finale
+- Suite de tests complète (146 tests backend, 38 tests frontend) exécutée depuis la structure finale
   du projet (imports vérifiés depuis la racine).
 - `npm run build` du frontend depuis la structure finale.
 - Backend démarré en conditions réelles (`uvicorn`, pas seulement
@@ -155,3 +155,22 @@ réellement passée par la boucle de monitoring l'est.
   `Z`, jamais de `+`, donc pas de piège d'encodage d'URL côté navigateur,
   contrairement à un test manuel avec `datetime.isoformat()` de Python où
   ce piège existe réellement et a été rencontré puis résolu ici).
+
+## Ajouts postérieurs à la revue
+
+- **Recalibration périodique (§32)** — `MonitoringLoop._maybe_recalibrate` : à l'échéance de
+  `monitoring.recalibration_interval`, les modèles sont réajustés en excluant les périodes couvertes par
+  un incident confirmé (`list_incidents_overlapping`). Si plus de la moitié de l'historique d'une sortie
+  serait exclue, son modèle actuel est conservé. Un échec ne stoppe pas la boucle.
+- **Alertes (§27)** — `Alert`/`AlertEvent` (`models.py`), table `alerts`, `GET /incidents/{id}/alerts`
+  et `GET /outputs/{id}/alerts`. Pas de canal externe (webhook…) : hors périmètre V1 (§38).
+- **Rétention** — `Repository.purge_before` supprime mesures, prévisions et anomalies anciennes ; les
+  incidents et alertes sont conservés.
+- **Évaluation (§33)** — `network_monitor/evaluation/` : `metrics.py` (fonctions pures), `harness.py`
+  (pipeline complet sur la suite de scénarios par défaut), CLI `python -m network_monitor.evaluation`.
+- **Instantanés** — `GET /outputs/{id}/snapshots` : comparatif temporel calculé côté serveur ; la
+  référence est la dernière mesure de la sortie (une mesure a un pas de retard sur l'horloge).
+- **Schéma** — `create_all` n'ajoute pas de colonnes aux tables existantes : `SqlAlchemyRepository`
+  applique une migration additive (colonnes nullables uniquement, sinon erreur explicite → Alembic).
+- **`Incident.score`** est le PIC du score depuis l'ouverture ; `Incident.current_score` est le dernier
+  score (celui dont dérive `severity`).

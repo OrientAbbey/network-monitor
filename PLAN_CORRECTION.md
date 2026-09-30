@@ -8,11 +8,35 @@ Ce document **complète** `REVUE.md`, il ne le remplace pas : je n'y répète pa
 
 ---
 
-## Avancement (mis à jour après l'exécution des Lots 0 et 1)
+## Avancement final
 
-**Fait, testé (98 tests verts, dont 32 nouveaux tests de non-régression — vérifiés en échec sur le code d'origine) et vérifié sous `uvicorn` réel :** items 1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 21, 24 (partiel : tests des correctifs ci-dessus), 25 (partiel : `dispose()`), plus `pyproject.toml`.
-**Non traité :** items 16 (rétention/purge), 18-20, 22-23, Lot 3 (frontend a11y/perf), Lot 4 (fonctionnalités §32/§33/§27).
-**Erreurs de ce document corrigées ci-dessous** (deux reprises non vérifiées de REVUE.md, et un diagnostic faux de ma part) : voir « Rectificatifs ».
+Tous les lots ont été exécutés, sauf deux décisions volontaires (items 16 partiel et 22, voir ci-dessous).
+Vérifications : **146 tests backend + 38 tests frontend verts**, `ruff` et `mypy` sans erreur, `npm ci` + build à
+froid, vérification du contrat frontend/backend contre un vrai serveur `uvicorn`. Pour les correctifs de
+comportement, les tests de non-régression ont été **vérifiés en échec sur le code d'origine** (backend : 17 échecs
++ 3 erreurs sur `test_regressions.py` ; frontend : 16 échecs sur 18 sur l'ancien `Dashboard.jsx`).
+
+| # | Item | État |
+|---|---|---|
+| 1, 2, 5-8 | Lot 0 (plugin-react, trous fantômes, `dispose()`, attentes actives, WAL, docs) | Fait |
+| 3, 4 | `.gitignore`, `LICENSE` | Déjà présents (rectificatif n°1-2) ; `pyproject.toml` ajouté |
+| 9-15, 17 | CORS, bornes de fenêtre, validation des seuils et des durées, transaction unique, index, `stop()`+`join`, verrou du Mock, doublons | Fait |
+| 16 | Purge / rétention | Fait : `storage.retention` (30 j par défaut) + `purge_interval` ; incidents et alertes conservés |
+| 18 | `ruff` + `mypy` + CI | Fait (`ruff format` volontairement non imposé : reformaterait 17 fichiers) |
+| 19 | Configuration inopérante | Fait : chaque option est câblée ou refusée explicitement (`isolation_forest`/`extended_features` refusés si activés ; `alerts.warning_score` supprimé, doublon d'`incident.warning_score`) |
+| 20 | Déviations persistées | Fait (+ migration additive des bases existantes) |
+| 21 | Holt-Winters | Fait : `predict()` respecte `from_time` ; série régularisée (trous interpolés) ; non-convergence journalisée |
+| 22 | Backtest glissant | **Évalué, non implémenté** — voir « Mesures » : ne change aucune décision sur le Mock et coûte 3× plus |
+| 23 | `score` / `peak_score` | Fait : `score` reste le pic (compatibilité API), `current_score` ajouté |
+| 24, 25 | Tests manquants, `dispose()` | Fait (146 tests) ; `Repository.delete()` non ajouté (non nécessaire) |
+| 26 | Recalibration périodique (§32) | Fait |
+| 27 | Évaluation quantitative (§33) | Fait : `network_monitor/evaluation/`, CLI |
+| 28 | Alertes (§27) | Fait : persistées + `GET /incidents/{id}/alerts`, `GET /outputs/{id}/alerts` (pas de canal externe : V2 selon §38) |
+| Lot 3 | Frontend | Fait, sauf types générés depuis OpenAPI (non fait) — voir §3.7 |
+
+**Non traité, volontairement :** authentification de l'API (décision de déploiement) ; typage TypeScript du frontend ;
+migration vers `Mapped[...]` de SQLAlchemy (des exceptions `mypy` ciblent `storage/repository.py`) ; auto-hébergement des
+polices (elles sont maintenant chargées depuis `index.html`, avec un commentaire) ; rendu visuel dans un vrai navigateur.
 
 ## Rectificatifs (constatés en exécutant les travaux)
 
@@ -186,6 +210,49 @@ Résultat concret dans `_describe()` (utilisé pour le message d'alerte et poten
 **Correctif suggéré :** soit exposer les deux notions séparément (`score` instantané *et* `peak_score`), soit documenter explicitement dans le modèle `Incident` que `score` est un maximum et que `severity` ne l'est pas.
 
 ---
+
+### 3.7 🔴 Le frontend calculait ses fenêtres avec l'horloge du navigateur, pas celle du serveur
+
+**Fichiers :** `frontend/src/Dashboard.jsx` (`DetailChart`, `SummaryTable`), `network_monitor/app/api.py`
+
+Découvert en implémentant le Lot 3 — ni REVUE.md ni la première version de ce document ne l'avaient vu. Le backend
+horodate en horloge *simulée* (300 s par tick de 2 s : 150× le temps réel) ; le frontend demandait
+`until = new Date()`. Mesuré sur un vrai serveur après 40 s : l'horloge simulée avait 1,7 h d'avance et une fenêtre de
+12 h ne renvoyait **1 point sur 20 disponibles** — le dashboard affichait « pas assez d'historique » alors que les
+données existaient. Corrigé : les graphes lisent `simulated_now` et **omettent `until`** (le serveur prend alors sa
+propre horloge) ; le tableau comparatif est calculé côté serveur (`GET /outputs/{id}/snapshots`), ce qui règle aussi les
+24 requêtes par rafraîchissement (3 désormais).
+
+### 3.8 🟡 La colonne « Actuelle » du tableau comparatif affichait toujours une tendance nulle
+
+Une mesure porte l'horodatage de l'intervalle qu'elle décrit, donc un pas de *retard* sur l'horloge. Avec « maintenant »
+comme référence, les décalages 0 et 5 min tombaient sur la même mesure. Le nouvel endpoint prend pour référence la
+**dernière mesure de la sortie** ; test dédié (`test_snapshots_default_offsets_and_content`).
+
+## Mesures
+
+**Banc d'évaluation (§33), défauts actuels, 6 graines, 10 scénarios chacune** (`python -m network_monitor.evaluation`) :
+rappel 0,93 ; précision 0,82 ; 2,2 faux positifs par 2 jours ; délai de détection moyen 9,9 min ; scénario manqué :
+`intermittent_incident`. Les intervalles de prévision sont bien calibrés (couverture 79 % pour 80 % nominal).
+
+| Variante (6 graines) | Rappel | Précision | Faux positifs / 2 j | Délai détection moy. | Manqués |
+|---|---|---|---|---|---|
+| Défauts (`open` 0,75 ; `minimum_duration` 10 min) | 0,93 | 0,82 | 2,2 | 9,9 min | intermittent |
+| `minimum_duration` 15 min | 0,82 | 0,98 | 0,2 | 15,3 min | intermittent, short |
+| `minimum_duration` 20 min | 0,82 | 1,00 | 0,0 | 20,3 min | intermittent, short |
+| `open_score` 0,85 | 0,93 | 0,85 | 1,8 | 9,9 min | intermittent |
+| `open_score` 0,85 + `minimum_duration` 15 min | 0,82 | 0,98 | 0,2 | 15,4 min | intermittent, short |
+
+Lecture : allonger `minimum_duration` supprime presque tous les faux positifs mais rend le scénario de 15 minutes
+indétectable par construction et retarde la détection de 5 min. **Les défauts n'ont pas été modifiés** : c'est un choix
+d'exploitation (§35 : valeurs initiales à calibrer), à faire avec vos propres données, pas avec un Mock à graine fixe.
+
+**Backtest (item 22)** — 2 graines × 2 sorties, 90 jours d'historique : la méthode actuelle (une origine, 7 jours d'un
+coup) et un backtest glissant (3 origines, horizon 24 h) désignent **la baseline dans les 4 cas** (erreur de
+Holt-Winters 4 à 5 fois supérieure : ex. 52 vs 12 Mbps sur `OUT_001`). Le glissant coûterait 20 à 35 s d'ajustement
+Holt-Winters par sortie et par calibration, sans changer une seule décision. Le biais méthodologique relevé par
+REVUE.md (Q-5) est réel en théorie mais sans effet mesurable ici ; à reconsidérer si une source réelle rend
+Holt-Winters compétitif.
 
 ## 4. Fonctionnalités du cahier des charges absentes du code
 

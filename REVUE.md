@@ -1,5 +1,11 @@
 # Revue complète du projet — Network Monitor
 
+> **Note de suivi (ajoutée après vérification) :** deux constats de cette revue se sont révélés faux à
+> l'exécution — un `.gitignore` complet et une `LICENSE` (MIT) **existent déjà** dans le dépôt. Par ailleurs,
+> des défauts qu'elle n'avait pas relevés ont été trouvés depuis : trous de données fantômes (§31),
+> prévision Holt-Winters constante, horloge simulée ignorée par le frontend. Voir `PLAN_CORRECTION.md`
+> (sections « Rectificatifs » et « Constats supplémentaires »).
+
 **Date de la revue :** 28 septembre 2026
 **Périmètre :** `network_monitor/` (backend Python/FastAPI), `frontend/` (React/Vite), `docs/`, outillage
 **Méthode :** lecture intégrale du code source, exécution de la suite de tests, profiling (`cProfile`), inspection du schéma SQLite et des `EXPLAIN QUERY PLAN`, `npm install` / `npm run build` à froid, tests d'API réels (CORS, authentification, bornes de requête, injection)

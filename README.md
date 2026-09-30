@@ -7,25 +7,28 @@ backend, qui les génère (source Mock), les analyse et les stocke.
 
 ## État du projet
 
-Ce dépôt est un projet en développement. Une revue complète figure dans
-**[`REVUE.md`](REVUE.md)** ; le plan de correction et son avancement dans
-**[`PLAN_CORRECTION.md`](PLAN_CORRECTION.md)**.
+Une revue complète figure dans **[`REVUE.md`](REVUE.md)** ; le plan de correction, son
+avancement, les rectificatifs et les mesures dans **[`PLAN_CORRECTION.md`](PLAN_CORRECTION.md)**.
 
-Corrigé depuis la revue (Lots 0 et 1 du plan) : installation du frontend à
-froid, suite de tests verte et indépendante de la vitesse du disque (98 tests),
-SQLite en mode WAL avec une transaction par tick, CORS restreint aux origines
-locales du frontend, bornes sur les fenêtres temporelles, validation complète
-des seuils d'incident, détection de trous de données (§31) qui ne génère plus
-de faux positifs, et prévision Holt-Winters qui respecte l'horodatage demandé.
+Corrigé depuis la revue : installation du frontend à froid ; suite de tests déterministe
+(indépendante de la vitesse du disque) ; SQLite en WAL avec une transaction par tick ; CORS
+restreint ; bornes sur les fenêtres temporelles ; validation complète des seuils et des durées ;
+détection des trous de données (§31) sans faux positifs ; prévision Holt-Winters qui respecte
+l'horodatage demandé ; **recalibration périodique** (§32) ; **évaluation quantitative** (§33) ;
+**alertes** persistées et exposées (§27) ; rétention configurable ; options de configuration
+toutes effectives ou explicitement refusées ; lint (`ruff`), typage (`mypy`) et CI ; frontend :
+horloge simulée respectée (les graphes étaient quasi vides), accessibilité, robustesse réseau,
+sous-échantillonnage, curseur, tests.
 
-**Limites connues** (restent à traiter, voir le plan) :
+**Limites connues :**
 
 - L'API n'a **aucune authentification** : ne l'exposez pas au-delà de `localhost`.
-- Pas de recalibration périodique du modèle (§32) ni de module d'évaluation
-  quantitative (§33) ; les alertes générées par le gestionnaire d'incidents ne
-  sont pas encore exposées par l'API (§27).
-- Rétention des mesures non bornée, lint/typage (`ruff`, `mypy`) et CI absents,
-  améliorations d'accessibilité du frontend en attente.
+- Le frontend n'a été vérifié que par des tests jsdom et le build, pas dans un navigateur réel
+  (rendu visuel, responsive et lecteurs d'écran à contrôler à la main).
+- Les seuils d'incident par défaut sont des valeurs initiales : sur 6 graines, ils donnent un
+  rappel de 0,93 et ~2 faux positifs par 2 jours (voir « Évaluation »). À régler pour votre usage.
+- Pas de migration de schéma générale (seuls les ajouts de colonnes nullables sont automatiques) ;
+  pas d'authentification ; Holt-Winters n'est jamais retenu sur les données du Mock.
 
 ## Structure
 
@@ -40,19 +43,24 @@ network_monitor/        Backend Python (le paquet importable)
   analysis/              Forecasting + détection d'anomalies
   incidents/             Moteur d'incidents (machine à états, hystérésis)
   storage/               Persistance SQLite/SQLAlchemy
-  tests/                 98 tests (unitaires, scénarios, API, non-régression)
+  evaluation/            Évaluation quantitative (§33) : métriques, banc, CLI
+  tests/                 146 tests (unitaires, scénarios, API, maintenance, évaluation, non-régression)
 
 frontend/                Dashboard React (Vite), branché sur l'API
   src/
-    api.js               Client HTTP vers le backend — aucune génération de données
+    api.js               Client HTTP (délai maximal, annulation) — aucune génération de données
+    lib.js               Fonctions pures (sous-échantillonnage min/max, formats, recul)
     Dashboard.jsx         Interface "Signal Room"
+    ErrorBoundary.jsx     Évite l'écran blanc en cas d'exception de rendu
+    *.test.js(x)          38 tests (vitest + jsdom + Testing Library)
   .env.example            VITE_API_BASE_URL à copier en .env
 
 docs/
   CAHIER_DES_CHARGES_RESEAU.md   Spécifications du système de détection
   ARCHITECTURE.md                 Documentation technique du projet complet
 
-requirements.txt         Dépendances Python
+requirements.txt         Dépendances Python (pyproject.toml : idem + outils de développement)
+.github/workflows/ci.yml  CI : ruff, mypy, pytest (Python 3.11/3.12), tests + build du frontend
 ```
 
 ## Démarrage rapide
@@ -79,11 +87,32 @@ npm run dev
 
 Ouvrir `http://localhost:5173`.
 
-**3. Tests backend :**
+**3. Tests, lint, typage :**
 
 ```bash
-python -m pytest network_monitor/tests/ -v
+pip install -e ".[dev]"
+pytest -q                          # 146 tests backend
+ruff check network_monitor && mypy network_monitor
+cd frontend && npm test            # 38 tests frontend
 ```
+
+**4. Évaluation quantitative (§33)** — détection et prévision comparées à la vérité terrain du Mock,
+sur une période distincte de la calibration :
+
+```bash
+python -m network_monitor.evaluation            # rapport lisible (≈ 5 s)
+python -m network_monitor.evaluation --seed 7 --days 2 --json --out rapport.json
+```
+
+Sur 6 graines (défauts actuels) : rappel 0,93, précision 0,82, ~2,2 faux positifs / 2 jours, délai de
+détection moyen ≈ 10 min ; le scénario `intermittent_incident` est le point faible. Passer
+`minimum_duration` à 15 min supprime presque tous les faux positifs (précision 0,98) mais fait manquer
+les incidents courts (15 min). C'est un compromis à trancher, pas un défaut : voir `PLAN_CORRECTION.md`.
+
+**Configuration** : origines CORS autorisées via `NETWORK_MONITOR_CORS_ORIGINS` (liste séparée par des
+virgules, défaut : `http://localhost:5173,http://127.0.0.1:5173`). Recalibration
+(`monitoring.recalibration_interval`, défaut 24 h, `null` pour désactiver) et rétention
+(`storage.retention`, défaut 30 j, `null` pour illimitée) : voir `network_monitor/app/config.py`.
 
 ## Ce que fait le dashboard
 
@@ -114,6 +143,11 @@ dans `app/api.py`) — mais une plage "1 mois" nécessite quand même environ
 l'afficher. Le dashboard gère ce cas proprement (message explicite plutôt
 qu'un graphe vide ou cassé) plutôt que de le cacher. Voir
 `docs/ARCHITECTURE.md` pour le détail.
+
+**Conséquence pour tout client de l'API** : les horodatages sont dans l'horloge *simulée*, qui avance
+150× plus vite que l'horloge réelle. Ne jamais calculer une fenêtre avec `new Date()` : lire
+`simulated_now` (`GET /monitoring/status`), ou omettre `until` (le serveur prend alors sa propre
+horloge). Le dashboard faisait l'erreur — après 40 s, 1 point sur 21 seulement était récupéré.
 
 ## Historique du projet
 
