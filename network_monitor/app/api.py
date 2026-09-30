@@ -159,6 +159,14 @@ class OutputSummary(BaseModel):
     active_incident_id: str | None = None
 
 
+class Snapshot(BaseModel):
+    """Mesure la plus proche de « dernière mesure − offset », avec sa voisine 5 minutes plus tôt (pour la tendance)."""
+
+    offset_seconds: int
+    current: TrafficSample | None = None
+    previous: TrafficSample | None = None
+
+
 class MonitoringStatus(BaseModel):
     running: bool
     calibrated: bool
@@ -256,6 +264,65 @@ def output_anomalies(
     _ensure_known_output(output_id)
     start, end = _parse_window(since, until, timedelta(hours=12))
     return state.storage.get_anomalies(output_id, start, end)
+
+
+# Instantanés : tolérance de recherche autour de la cible (mêmes valeurs que l'ancien calcul côté
+# navigateur) et écart entre la mesure « courante » et la mesure « précédente » d'une tendance.
+_SNAPSHOT_BEFORE = timedelta(minutes=35)
+_SNAPSHOT_AFTER = timedelta(minutes=10)
+_SNAPSHOT_TREND_STEP = timedelta(minutes=5)
+_SNAPSHOT_MAX_OFFSETS = 8
+
+
+def _nearest_sample(output_id: str, target: datetime) -> TrafficSample | None:
+    candidates = state.storage.get_history(output_id, target - _SNAPSHOT_BEFORE, target + _SNAPSHOT_AFTER)
+    return min(candidates, key=lambda p: abs((p.timestamp - target).total_seconds()), default=None)
+
+
+@app.get("/outputs/{output_id}/snapshots", response_model=list[Snapshot])
+def output_snapshots(
+    output_id: str,
+    offsets: list[int] = Query(
+        default=[0, 300, 86400, 604800],
+        description="Décalages en secondes avant `at` (0 = maintenant, 300 = il y a 5 min, 86400 = il y a 1 jour…)",
+    ),
+    at: datetime | None = Query(
+        default=None, description="Référence (défaut : horodatage de la dernière mesure de la sortie)"
+    ),
+) -> list[Snapshot]:
+    """
+    Comparatif temporel calculé côté serveur : une seule requête par sortie
+    (au lieu de deux par cellule du tableau), et surtout dans l'horloge du
+    serveur — qui est simulée et n'est PAS celle du navigateur.
+
+    La référence par défaut est la DERNIÈRE MESURE de la sortie, pas l'horloge
+    du serveur : une mesure porte l'horodatage de l'intervalle qu'elle décrit
+    (donc un pas de retard sur l'horloge). Avec `now` comme référence, les
+    décalages 0 et 300 s retombaient sur la même mesure et la tendance de la
+    première colonne était toujours plate.
+    """
+    _ensure_known_output(output_id)
+    if not offsets or len(offsets) > _SNAPSHOT_MAX_OFFSETS:
+        raise HTTPException(status_code=400, detail=f"Entre 1 et {_SNAPSHOT_MAX_OFFSETS} décalages attendus")
+    if any(o < 0 or timedelta(seconds=o) > MAX_WINDOW_SPAN for o in offsets):
+        raise HTTPException(status_code=400, detail=f"Décalage hors bornes (0 à {MAX_WINDOW_SPAN.days} jours)")
+    if at is not None:
+        reference = _as_aware(at)
+    else:
+        interval = state.source.get_interval()
+        recent = state.storage.get_history(output_id, state.now - interval * 3, state.now + interval)
+        reference = recent[-1].timestamp if recent else state.now
+    result = []
+    for offset in offsets:
+        target = reference - timedelta(seconds=offset)
+        result.append(
+            Snapshot(
+                offset_seconds=offset,
+                current=_nearest_sample(output_id, target),
+                previous=_nearest_sample(output_id, target - _SNAPSHOT_TREND_STEP),
+            )
+        )
+    return result
 
 
 @app.get("/outputs/{output_id}/forecast", response_model=list[ForecastResult])

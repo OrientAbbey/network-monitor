@@ -1,7 +1,7 @@
 """Tests de l'API FastAPI (§37)."""
 
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -241,3 +241,49 @@ def test_alerts_endpoints_404_and_empty(client):
     assert client.get("/incidents/inconnu/alerts").status_code == 404
     assert client.get("/outputs/NOPE/alerts").status_code == 404
     assert client.get("/outputs/OUT_003/alerts").status_code == 200
+
+
+# --- Instantanés (remplacent 24 requêtes du tableau comparatif par 1 par sortie) -----
+
+
+def test_snapshots_default_offsets_and_content(client):
+    _wait_until(lambda: len(client.get("/outputs/OUT_001/history").json()) >= 4)
+    body = client.get("/outputs/OUT_001/snapshots").json()
+    assert [s["offset_seconds"] for s in body] == [0, 300, 86400, 604800]
+    now, prev5 = body[0], body[1]
+    assert now["current"] is not None and now["previous"] is not None
+    # « Actuelle » et « Précédente » doivent être deux mesures DIFFÉRENTES, consécutives.
+    assert prev5["current"]["timestamp"] == now["previous"]["timestamp"]
+    assert now["current"]["timestamp"] > prev5["current"]["timestamp"]
+    # La référence par défaut est la dernière mesure connue de la sortie.
+    latest = next(o for o in client.get("/outputs").json() if o["output_id"] == "OUT_001")["latest_sample"]
+    # (le snapshot est pris AVANT /outputs et la simulation avance entre les deux : au plus 2 pas d'écart)
+    snap_ts = datetime.fromisoformat(now["current"]["timestamp"].replace("Z", "+00:00"))
+    latest_ts = datetime.fromisoformat(latest["timestamp"].replace("Z", "+00:00"))
+    assert timedelta(0) <= latest_ts - snap_ts <= timedelta(minutes=10)
+    # Le simulateur ne tourne que depuis quelques secondes : rien d'il y a une semaine.
+    assert body[3]["current"] is None and body[3]["previous"] is None
+
+
+def test_snapshots_match_history_nearest_point(client):
+    _wait_until(lambda: len(client.get("/outputs/OUT_002/history").json()) >= 3)
+    at = api_module.state.now
+    snap = client.get("/outputs/OUT_002/snapshots", params={"offsets": [0], "at": at.isoformat()}).json()[0]
+    hist = client.get(
+        "/outputs/OUT_002/history",
+        params={"since": (at - timedelta(minutes=35)).isoformat(), "until": (at + timedelta(minutes=10)).isoformat()},
+    ).json()
+    expected = min(hist, key=lambda p: abs(datetime.fromisoformat(p["timestamp"].replace("Z", "+00:00")) - at))
+    assert snap["current"]["timestamp"] == expected["timestamp"]
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"offsets": [-1]}, {"offsets": [40 * 86400]}, {"offsets": list(range(9))}],
+)
+def test_snapshots_reject_invalid_offsets(client, params):
+    assert client.get("/outputs/OUT_001/snapshots", params=params).status_code == 400
+
+
+def test_snapshots_unknown_output_is_404(client):
+    assert client.get("/outputs/NOPE/snapshots").status_code == 404
