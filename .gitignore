@@ -22,6 +22,13 @@ htmlcov/
 *.db
 *.sqlite
 *.sqlite3
+# Fichiers annexes créés par le mode WAL de SQLite (voir storage/repository.py)
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
 
 # Node / frontend
 node_modules/
