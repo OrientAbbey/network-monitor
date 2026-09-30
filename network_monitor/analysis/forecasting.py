@@ -184,12 +184,7 @@ class HoltWintersModel(ForecastModel):
         self._fit_result: Any = None
         self._interval: timedelta | None = None
         self._residual_std_log: float = 0.0
-        self._last_level: float = 0.0
         self._last_timestamp: datetime | None = None
-        # False si l'optimiseur de statsmodels n'a pas convergé : le modèle reste
-        # utilisable (l'ajustement retenu donne des prévisions saisonnières
-        # plausibles), mais l'information est conservée et journalisée.
-        self.converged: bool = True
 
     def fit(self, history: list[TrafficSample]) -> None:
         history = sorted(history, key=lambda s: s.timestamp)
@@ -213,12 +208,9 @@ class HoltWintersModel(ForecastModel):
         )
         self._fit_result = model.fit(optimized=True)
         retvals = getattr(self._fit_result, "mle_retvals", None)
-        self.converged = bool(getattr(retvals, "success", True)) if retvals is not None else True
-        if not self.converged:
-            logger.warning(
-                "Holt-Winters : l'optimisation n'a pas convergé pour %s (ajustement conservé, "
-                "la sélection de modèle s'appuie sur le backtest)", self.output_id
-            )
+        if retvals is not None and not getattr(retvals, "success", True):
+            # L'ajustement reste utilisable ; c'est le backtest de select_model qui départage les modèles.
+            logger.warning("Holt-Winters : l'optimisation n'a pas convergé pour %s", self.output_id)
 
         residuals = series - self._fit_result.fittedvalues
         self._residual_std_log = float(np.std(residuals))
@@ -229,11 +221,8 @@ class HoltWintersModel(ForecastModel):
 
         n_steps = max(1, int(horizon / interval))
 
-        # statsmodels prévoit toujours à partir de la FIN de la série
-        # d'entraînement : il faut donc convertir chaque horodatage demandé en
-        # nombre de pas depuis cette fin. Sans ce décalage, chaque appel à
-        # 1 pas renvoyait la même valeur quelle que soit l'heure demandée —
-        # aucune saisonnalité en usage réel (PLAN_CORRECTION.md §3.5).
+        # statsmodels prévoit toujours depuis la fin de la série d'entraînement : on convertit
+        # l'horodatage demandé en nombre de pas depuis cette fin.
         first_step = round((from_time + interval - self._last_timestamp) / interval)
         if first_step < 1:
             raise ValueError(
@@ -247,8 +236,7 @@ class HoltWintersModel(ForecastModel):
         for i, log_pred in enumerate(forecast_log, start=1):
             ts = from_time + i * interval
             steps_from_fit_end = first_step + i - 1
-            # L'incertitude croît avec la distance à la dernière observation
-            # d'entraînement (racine du nombre de pas).
+            # L'incertitude croît avec la racine de la distance à la fin de l'entraînement.
             spread = _Z_80 * self._residual_std_log * math.sqrt(steps_from_fit_end)
             predicted = float(np.expm1(log_pred))
             lower = float(np.expm1(log_pred - spread))
@@ -358,12 +346,7 @@ def _backtest_mae(
 
 
 def _infer_interval(history: list[TrafficSample]) -> timedelta:
-    """
-    Déduit le pas d'échantillonnage : médiane des écarts entre points
-    consécutifs (sur les 500 premiers), donc insensible à un trou isolé — un
-    historique dont on a retiré des périodes anormales (recalibration, §32)
-    ou qui comporte des lacunes ne fausse pas le pas.
-    """
+    """Pas d'échantillonnage : médiane des écarts entre points consécutifs (insensible aux trous)."""
     deltas = sorted(
         (history[i].timestamp - history[i - 1].timestamp).total_seconds()
         for i in range(1, min(len(history), 501))
@@ -376,11 +359,8 @@ def _infer_interval(history: list[TrafficSample]) -> timedelta:
 
 def _regular_series(history: list[TrafficSample], interval: timedelta) -> np.ndarray:
     """
-    Série de trafic sur une grille STRICTEMENT régulière, du premier au dernier
-    point : les créneaux absents (lacune de collecte, période anormale retirée
-    pour la recalibration) sont interpolés linéairement. Holt-Winters exige une
-    série sans trou : sans cela, un seul créneau manquant décalerait toute la
-    saisonnalité qui suit.
+    Trafic sur une grille régulière, créneaux absents interpolés linéairement. Holt-Winters exige une
+    série sans trou : un créneau manquant décalerait toute la saisonnalité qui suit.
     """
     t0 = history[0].timestamp
     n = int(round((history[-1].timestamp - t0) / interval)) + 1

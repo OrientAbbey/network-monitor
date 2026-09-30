@@ -7,28 +7,17 @@ backend, qui les génère (source Mock), les analyse et les stocke.
 
 ## État du projet
 
-Une revue complète figure dans **[`REVUE.md`](REVUE.md)** ; le plan de correction, son
-avancement, les rectificatifs et les mesures dans **[`PLAN_CORRECTION.md`](PLAN_CORRECTION.md)**.
-
-Corrigé depuis la revue : installation du frontend à froid ; suite de tests déterministe
-(indépendante de la vitesse du disque) ; SQLite en WAL avec une transaction par tick ; CORS
-restreint ; bornes sur les fenêtres temporelles ; validation complète des seuils et des durées ;
-détection des trous de données (§31) sans faux positifs ; prévision Holt-Winters qui respecte
-l'horodatage demandé ; **recalibration périodique** (§32) ; **évaluation quantitative** (§33) ;
-**alertes** persistées et exposées (§27) ; rétention configurable ; options de configuration
-toutes effectives ou explicitement refusées ; lint (`ruff`), typage (`mypy`) et CI ; frontend :
-horloge simulée respectée (les graphes étaient quasi vides), accessibilité, robustesse réseau,
-sous-échantillonnage, curseur, tests.
+Revue initiale : [`REVUE.md`](REVUE.md). Corrections, mesures et rectificatifs : [`PLAN_CORRECTION.md`](PLAN_CORRECTION.md).
 
 **Limites connues :**
 
-- L'API n'a **aucune authentification** : ne l'exposez pas au-delà de `localhost`.
-- Le frontend n'a été vérifié que par des tests jsdom et le build, pas dans un navigateur réel
-  (rendu visuel, responsive et lecteurs d'écran à contrôler à la main).
-- Les seuils d'incident par défaut sont des valeurs initiales : sur 6 graines, ils donnent un
-  rappel de 0,93 et ~2 faux positifs par 2 jours (voir « Évaluation »). À régler pour votre usage.
-- Pas de migration de schéma générale (seuls les ajouts de colonnes nullables sont automatiques) ;
-  pas d'authentification ; Holt-Winters n'est jamais retenu sur les données du Mock.
+- L'API n'a aucune authentification : ne l'exposez pas au-delà de `localhost`.
+- Le frontend est testé sous jsdom et par son build, pas dans un navigateur réel (rendu, responsive et
+  lecteurs d'écran à contrôler à la main).
+- Les seuils d'incident par défaut sont des valeurs initiales. Sur 6 graines du Mock : rappel 0,93 et
+  environ 2 faux positifs par 2 jours (voir « Évaluation quantitative »). À régler sur vos données.
+- Migration de schéma : seuls les ajouts de colonnes nullables sont automatiques.
+- Sur le Mock, la baseline saisonnière est toujours retenue face à Holt-Winters.
 
 ## Structure
 
@@ -52,7 +41,7 @@ frontend/                Dashboard React (Vite), branché sur l'API
     lib.js               Fonctions pures (sous-échantillonnage min/max, formats, recul)
     Dashboard.jsx         Interface "Signal Room"
     ErrorBoundary.jsx     Évite l'écran blanc en cas d'exception de rendu
-    *.test.js(x)          38 tests (vitest + jsdom + Testing Library)
+    *.test.js(x)          37 tests (vitest + jsdom + Testing Library)
   .env.example            VITE_API_BASE_URL à copier en .env
 
 docs/
@@ -93,7 +82,7 @@ Ouvrir `http://localhost:5173`.
 pip install -e ".[dev]"
 pytest -q                          # 146 tests backend
 ruff check network_monitor && mypy network_monitor
-cd frontend && npm test            # 38 tests frontend
+cd frontend && npm test            # 37 tests frontend
 ```
 
 **4. Évaluation quantitative (§33)** — détection et prévision comparées à la vérité terrain du Mock,

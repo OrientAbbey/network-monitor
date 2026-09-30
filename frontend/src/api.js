@@ -1,16 +1,12 @@
 /**
- * Client HTTP vers l'API FastAPI (../../app/api.py). Aucune génération de
- * données ici — uniquement des appels réseau vers le vrai backend.
- *
- * Chaque requête a un délai maximal (une requête pendante ne bloque plus
- * indéfiniment) et peut être annulée par l'appelant via un `AbortSignal`
- * (démontage d'un composant, nouvelle requête qui remplace l'ancienne).
+ * Client HTTP vers l'API FastAPI (network_monitor/app/api.py).
+ * Chaque requête a un délai maximal et peut être annulée par l'appelant via un `AbortSignal`.
  */
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 export const REQUEST_TIMEOUT_MS = 8000;
 
-/** Vrai si l'erreur vient d'une annulation VOULUE (pas d'un échec réseau ni d'un délai dépassé). */
+/** Vrai pour une annulation volontaire (ni échec réseau, ni délai dépassé). */
 export function isAbortError(err) {
   return err?.name === "AbortError";
 }

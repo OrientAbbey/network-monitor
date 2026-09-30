@@ -96,7 +96,8 @@ describe("formatage et calculs", () => {
     expect(niceDomain([])).toEqual([0, 1]);
     expect(niceDomain([5, 5])).toEqual([4 - 0.24, 6 + 0.24]);
     const [lo, hi] = niceDomain([10, 20], 0.1, true);
-    expect(lo).toBeCloseTo(9) && expect(hi).toBeCloseTo(21);
+    expect(lo).toBeCloseTo(9);
+    expect(hi).toBeCloseTo(21);
     expect(niceDomain([0.1, 0.2], 5, true)[0]).toBe(0); // plancher à zéro
   });
 

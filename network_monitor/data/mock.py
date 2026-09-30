@@ -209,11 +209,8 @@ class MockDataSource(DataSource):
         self._interval = interval
         self._rng = np.random.default_rng(seed)
         self._scenarios: list[AnomalyScenario] = []
-        # L'API ajoute des scénarios depuis un thread HTTP pendant que la
-        # boucle de monitoring lit/génère depuis un autre thread : le verrou
-        # (réentrant, get_latest() appelle _generate_range()) garantit que
-        # chaque génération voit une liste de scénarios cohérente
-        # (REVUE.md, Conc-3).
+        # L'API ajoute des scénarios depuis un thread HTTP pendant que la boucle génère depuis un autre.
+        # Réentrant : get_latest() appelle _generate_range().
         self._lock = threading.RLock()
         self._clock: datetime | None = None
 

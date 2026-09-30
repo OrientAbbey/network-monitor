@@ -280,15 +280,11 @@ class Incident(BaseModel):
     closed_at: datetime | None = None
 
     score: float = Field(ge=0, le=1)
-    """PIC du score joint depuis l'ouverture de l'incident : ne redescend jamais
-    tant que l'incident est actif. À ne pas confondre avec `current_score`."""
+    """Pic du score joint depuis l'ouverture : ne redescend pas tant que l'incident est actif."""
 
     current_score: float | None = Field(default=None, ge=0, le=1)
-    """Score joint du DERNIER pas de temps traité. `severity` est recalculée à
-    partir de cette valeur (elle peut donc redescendre), alors que `score` est un
-    pic : afficher les deux évite l'apparente contradiction « score 0.90 mais
-    sévérité warning » (PLAN_CORRECTION.md §3.6). `None` pour un incident
-    persisté avant l'introduction de ce champ."""
+    """Score joint du dernier pas traité, dont dérive `severity` (qui peut donc redescendre alors que
+    `score` est un pic). `None` pour un incident enregistré avant l'ajout de ce champ."""
 
     peak_traffic_deviation_percent: float = 0.0
     peak_loss_percent: float = 0.0

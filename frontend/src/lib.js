@@ -1,7 +1,4 @@
-/**
- * Fonctions pures du dashboard (aucune dépendance à React ni au DOM), extraites
- * pour être testées isolément.
- */
+/** Fonctions pures du dashboard (sans React ni DOM). */
 
 export function formatMbps(v) {
   if (v == null) return "—";
@@ -46,15 +43,13 @@ export function backoffDelay(failures, baseMs = 4000, maxMs = 30000) {
 }
 
 /**
- * Sous-échantillonne une série pour le tracé SVG en conservant les PICS : pour
- * chaque tranche de temps on garde le minimum ET le maximum (dans l'ordre
- * chronologique), plus le premier et le dernier point. Une moyenne ou un
- * pas fixe lisserait justement les pointes qu'une console de supervision doit
- * montrer. Renvoie la série d'origine si elle tient déjà dans le budget.
+ * Sous-échantillonne une série pour le tracé en gardant, par tranche, le minimum et le maximum
+ * (dans l'ordre chronologique), plus le premier et le dernier point : une moyenne effacerait les pics.
+ * Renvoie la série d'origine si elle tient déjà dans le budget.
  *
- * @param points       tableau ordonné par temps
- * @param valueOf      (point) => nombre (ou null : le point n'influence pas min/max)
- * @param maxBuckets   nombre maximal de tranches (≈ largeur utile du graphe)
+ * @param points      tableau ordonné par temps
+ * @param valueOf     (point) => nombre, ou null (le point est ignoré pour min/max)
+ * @param maxBuckets  nombre maximal de tranches (≈ largeur utile du graphe)
  */
 export function downsampleMinMax(points, valueOf, maxBuckets) {
   const n = points.length;

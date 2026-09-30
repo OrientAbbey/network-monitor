@@ -1,19 +1,14 @@
 """
-Métriques d'évaluation (§33) — fonctions pures, sans accès au stockage ni au
-pipeline, donc testables sur des données synthétiques.
+Métriques d'évaluation (§33), fonctions pures.
 
 Conventions :
-
-- Seuls les incidents CONFIRMÉS (`opened_at` renseigné) comptent comme des
-  détections : un simple signal faible (SUSPECT) jamais confirmé n'est pas un
-  incident (§20).
-- La fenêtre d'un incident va de `opened_at` à `closed_at` (ou `last_seen_at`
-  s'il n'est pas fermé) ; celle d'un scénario, de `start_time` à `end_time`.
-- Un incident « explique » un scénario s'il concerne la même sortie et que les
-  deux fenêtres se recoupent. Un scénario est *détecté* s'il est expliqué par au
-  moins un incident ; un incident est un *vrai positif* s'il explique au moins
-  un scénario, sinon un *faux positif*. Plusieurs incidents sur un même scénario
-  (fragmentation) sont tous des vrais positifs mais sont comptés à part.
+- Seuls les incidents confirmés (`opened_at` renseigné) comptent : un signal faible jamais
+  confirmé n'est pas un incident (§20).
+- Un incident explique un scénario s'il concerne la même sortie et que leurs fenêtres se recoupent
+  (incident : `opened_at` → `closed_at` ou `last_seen_at` ; scénario : `start_time` → `end_time`).
+- Scénario détecté = expliqué par au moins un incident. Incident vrai positif = explique au moins
+  un scénario, sinon faux positif. Plusieurs incidents sur un scénario (fragmentation) sont tous
+  des vrais positifs, et comptés à part.
 """
 
 from __future__ import annotations

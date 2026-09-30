@@ -15,12 +15,10 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 def _parse_duration(value: str | int | float) -> timedelta:
     """
-    Convertit '5m', '30d', '10min' etc. en timedelta. Accepte aussi un nombre
-    de secondes (ou la chaîne '0'). Une durée négative est rejetée : une
-    `minimum_duration` négative rendrait la condition d'ouverture vraie dès le
-    premier tick et contournerait l'hystérésis du §21.
+    Convertit '5m', '30d', '10min'… (ou un nombre de secondes) en timedelta.
+    Une durée négative est refusée : une `minimum_duration` négative contournerait l'hystérésis (§21).
     """
-    if isinstance(value, bool):  # bool est un int en Python : `True` ne doit pas devenir 1 s
+    if isinstance(value, bool):  # bool est un int en Python
         raise ValueError(f"Durée non reconnue : {value!r}")
     if isinstance(value, (int, float)):
         result = timedelta(seconds=float(value))
@@ -42,11 +40,12 @@ def _parse_duration(value: str | int | float) -> timedelta:
 
 
 def _coerce_duration(v):
-    """Point d'entrée commun des validateurs : parse les chaînes/nombres et vérifie aussi les `timedelta` déjà construits."""
-    result = v if isinstance(v, timedelta) else _parse_duration(v)
-    if result < timedelta(0):
-        raise ValueError(f"Durée négative refusée : {v!r}")
-    return result
+    """Point d'entrée des validateurs : accepte aussi un `timedelta` déjà construit, et refuse les négatifs."""
+    if isinstance(v, timedelta):
+        if v < timedelta(0):
+            raise ValueError(f"Durée négative refusée : {v!r}")
+        return v
+    return _parse_duration(v)
 
 
 class ModelSelectionConfig(BaseModel):
@@ -119,19 +118,9 @@ class IncidentConfig(BaseModel):
     def _parse(cls, v):
         return _coerce_duration(v)
 
-    @field_validator("close_score")
-    @classmethod
-    def _close_below_open(cls, v, info):
-        open_score = info.data.get("open_score")
-        if open_score is not None and v >= open_score:
-            raise ValueError("close_score doit être strictement inférieur à open_score (§21)")
-        return v
-
     @model_validator(mode="after")
     def _thresholds_are_ordered(self):
-        # §21 : close_score < warning_score < open_score. Sans cette vérification
-        # d'ensemble, un warning_score au-dessus de open_score créait une zone
-        # morte de scores qui ne déclenchait aucun état (PLAN_CORRECTION.md §3.2).
+        # §21. Un warning_score au-dessus de open_score laisserait une plage de scores sans aucun effet.
         if not (self.close_score < self.warning_score < self.open_score):
             raise ValueError(
                 "les seuils doivent respecter close_score < warning_score < open_score (§21) : "

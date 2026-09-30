@@ -25,9 +25,7 @@ def _run(scenario: AnomalyScenario | None, ticks: int) -> list[IncidentRow]:
     suffisamment au-dessus du minimum de 30j pour un taux de faux positifs réaliste, cf. §11),
     injecte éventuellement un scénario, exécute `ticks` pas et renvoie les lignes
     d'incident enregistrées pour la sortie testée."""
-    # TemporaryDirectory (et non tempfile.mktemp, déprécié : course sur le nom
-    # de fichier, REVUE.md S-10). `dispose()` libère le fichier SQLite avant
-    # le nettoyage du répertoire — indispensable sous Windows (P0-3).
+    # dispose() libère le fichier SQLite avant la suppression du répertoire (verrou sous Windows).
     with tempfile.TemporaryDirectory() as tmpdir:
         storage = SqlAlchemyRepository(f"sqlite:///{tmpdir}/scenario.db")
         try:

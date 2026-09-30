@@ -129,9 +129,8 @@ def build_anomaly_result(
     loss_enabled: bool = True,
 ) -> AnomalyResult:
     """
-    Assemble un AnomalyResult complet à partir d'une observation validée (§16).
-    `traffic_enabled` / `loss_enabled` reflètent `detection.traffic.enabled` et
-    `detection.loss.enabled` (§35) : un détecteur désactivé contribue un score nul.
+    Assemble un AnomalyResult à partir d'une observation validée (§16).
+    Un détecteur désactivé (`detection.*.enabled`, §35) contribue un score nul.
     """
     if traffic_enabled:
         traffic_score, traffic_deviation_pct, out_of_interval = detect_traffic_anomaly(sample, forecast)

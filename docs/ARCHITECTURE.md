@@ -141,7 +141,7 @@ réellement passée par la boucle de monitoring l'est.
 
 ## 5. Vérifications effectuées
 
-- Suite de tests complète (146 tests backend, 38 tests frontend) exécutée depuis la structure finale
+- Suite de tests complète (146 tests backend, 37 tests frontend) exécutée depuis la structure finale
   du projet (imports vérifiés depuis la racine).
 - `npm run build` du frontend depuis la structure finale.
 - Backend démarré en conditions réelles (`uvicorn`, pas seulement
@@ -156,7 +156,7 @@ réellement passée par la boucle de monitoring l'est.
   contrairement à un test manuel avec `datetime.isoformat()` de Python où
   ce piège existe réellement et a été rencontré puis résolu ici).
 
-## Ajouts postérieurs à la revue
+## Recalibration, alertes, rétention, évaluation
 
 - **Recalibration périodique (§32)** — `MonitoringLoop._maybe_recalibrate` : à l'échéance de
   `monitoring.recalibration_interval`, les modèles sont réajustés en excluant les périodes couvertes par
@@ -172,5 +172,5 @@ réellement passée par la boucle de monitoring l'est.
   référence est la dernière mesure de la sortie (une mesure a un pas de retard sur l'horloge).
 - **Schéma** — `create_all` n'ajoute pas de colonnes aux tables existantes : `SqlAlchemyRepository`
   applique une migration additive (colonnes nullables uniquement, sinon erreur explicite → Alembic).
-- **`Incident.score`** est le PIC du score depuis l'ouverture ; `Incident.current_score` est le dernier
+- **`Incident.score`** est le pic du score depuis l'ouverture ; `Incident.current_score` est le dernier
   score (celui dont dérive `severity`).

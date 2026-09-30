@@ -1,5 +1,6 @@
 """Tests de l'API FastAPI (§37)."""
 
+import threading
 import time
 from datetime import datetime, timedelta
 
@@ -13,13 +14,7 @@ from network_monitor.data.mock import AnomalyScenario, ScenarioType
 
 
 def _wait_until(predicate, timeout: float = 30.0, interval: float = 0.05):
-    """
-    Attente active sur une condition observable, au lieu d'un `time.sleep()` de
-    durée fixe : indépendante de la vitesse du disque/de la machine (un
-    sleep court était insuffisant quand un tick prenait ~1,5 s, REVUE.md
-    P0-3 cause 2) et ne ralentit pas la suite quand la condition est
-    remplie rapidement. Renvoie la dernière valeur de `predicate`.
-    """
+    """Attend (jusqu'à `timeout`) qu'une condition soit vraie et renvoie sa dernière valeur. Remplace les sleep fixes, qui dépendent de la vitesse de la machine."""
     deadline = time.monotonic() + timeout
     while True:
         value = predicate()
@@ -180,7 +175,7 @@ def test_forecast_ahead_unknown_output_returns_404(client):
     assert client.get("/outputs/UNKNOWN/forecast/ahead").status_code == 404
 
 
-# --- Sécurité et robustesse des entrées (PLAN_CORRECTION.md, Lot 1) ---------
+# --- Sécurité et robustesse des entrées ---
 
 
 def test_cors_allows_local_frontend_origin(client):
@@ -226,15 +221,16 @@ def test_config_rejects_warning_score_above_open_score(client):
     assert client.get("/config").json()["incident"]["warning_score"] == 0.5
 
 
-def test_stop_then_start_never_runs_two_loop_threads(client):
-    import threading
+def _loop_threads():
+    return [t for t in threading.enumerate() if t.name == "monitoring-loop" and t.is_alive()]
 
+
+def test_stop_then_start_never_runs_two_loop_threads(client):
     for _ in range(3):
         client.post("/monitoring/stop")
+        assert _loop_threads() == []  # stop() attend la fin du thread
         client.post("/monitoring/start")
-    loops = [t for t in threading.enumerate() if t.name.startswith("Thread") and t.is_alive()
-             and getattr(t, "_target", None) == api_module.state._run]
-    assert len(loops) <= 1
+        assert len(_loop_threads()) == 1
 
 
 def test_alerts_endpoints_404_and_empty(client):

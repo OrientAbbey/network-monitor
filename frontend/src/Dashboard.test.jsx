@@ -1,6 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Dashboard from "./Dashboard.jsx";
 import ErrorBoundary from "./ErrorBoundary.jsx";
@@ -77,7 +76,7 @@ describe("structure et accessibilité", () => {
     expect(screen.getByRole("main")).toBeInTheDocument();
     const skip = screen.getByRole("link", { name: /Aller au contenu/ });
     expect(skip).toHaveAttribute("href", "#main");
-    expect(document.getElementById("main")).toBeTruthy();
+    expect(document.getElementById("main")).toBeInTheDocument();
 
     for (const name of [/Sorties/, /Comparatif temporel/, /Configuration/, /Incidents/]) {
       expect(screen.getByRole("heading", { level: 2, name })).toBeInTheDocument();
@@ -139,25 +138,6 @@ describe("clavier (repli des panneaux)", () => {
     await renderReady(makeServer());
     await user.click(screen.getByRole("button", { name: "Replier le tableau" }));
     expect(screen.getByRole("button", { name: "Déplier le tableau" })).toHaveAttribute("aria-expanded", "false");
-  });
-
-  it("CONTRÔLE : le motif d'origine (bouton dans un div role=button + onKeyDown) annulait la touche Entrée", async () => {
-    function LegacyHeader() {
-      const [open, setOpen] = useState(true);
-      const toggle = () => setOpen((v) => !v);
-      return (
-        <div onClick={toggle} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") toggle(); }}>
-          <button type="button" aria-expanded={open} aria-label="legacy" onClick={(e) => { e.stopPropagation(); toggle(); }}>x</button>
-        </div>
-      );
-    }
-    const user = userEvent.setup();
-    render(<LegacyHeader />);
-    const btn = screen.getByRole("button", { name: "legacy" });
-    btn.focus();
-    await user.keyboard("{Enter}");
-    // click natif (toggle) + keydown remontant au parent (toggle) => retour à l'état initial : le bouton « ne fait rien ».
-    expect(btn).toHaveAttribute("aria-expanded", "true");
   });
 });
 

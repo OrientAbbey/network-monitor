@@ -1,12 +1,7 @@
 """
-Banc d'évaluation (§33) : exécute le pipeline complet (calibration → boucle de
-supervision → incidents) sur le Mock avec une suite de scénarios connus, puis
-compare détections et prévisions à la vérité terrain.
-
-Protocole : la calibration utilise l'historique qui PRÉCÈDE `eval_start` ; les
-scénarios sont tous injectés APRÈS `eval_start` (refusé sinon). L'évaluation
-porte donc toujours sur une période distincte de la calibration, comme
-l'exige le §33.
+Banc d'évaluation (§33) : pipeline complet sur le Mock avec des scénarios connus, puis comparaison
+à la vérité terrain. La calibration utilise l'historique qui précède `eval_start` ; les scénarios
+doivent tous commencer après (sinon ValueError), donc évaluation et calibration sont disjointes.
 """
 
 from __future__ import annotations
@@ -42,11 +37,7 @@ _DEFAULT_DURATION = timedelta(minutes=40)
 
 
 def evaluation_config() -> AppConfig:
-    """
-    Configuration par défaut de l'évaluation : 40 jours d'historique (comme
-    l'API de démonstration), rétention illimitée (rien ne doit être purgé
-    pendant la mesure). La recalibration périodique reste active.
-    """
+    """40 jours d'historique (comme l'API de démonstration), rétention illimitée, recalibration active."""
     return AppConfig.model_validate(
         {"history": {"minimum": "30d", "preferred": "40d"}, "storage": {"retention": None}}
     )
@@ -57,11 +48,7 @@ def default_scenarios(
     output_ids: list[str] | None = None,
     spacing: timedelta = timedelta(hours=4),
 ) -> list[AnomalyScenario]:
-    """
-    Une occurrence de chacun des dix types de scénarios (§7), espacées de
-    `spacing` et réparties tour à tour sur les sorties, à partir de
-    `eval_start + 3 h`.
-    """
+    """Un scénario de chacun des dix types (§7), espacés de `spacing`, répartis tour à tour sur les sorties."""
     outputs = output_ids or ["OUT_001", "OUT_002", "OUT_003"]
     scenarios = []
     for i, sc_type in enumerate(ScenarioType):
@@ -205,12 +192,7 @@ def run_evaluation(
     scenarios: list[AnomalyScenario] | None = None,
     config: AppConfig | None = None,
 ) -> EvaluationReport:
-    """
-    Exécute l'évaluation complète et renvoie le rapport.
-
-    Lève `ValueError` si un scénario commence avant `eval_start` (il serait
-    appris pendant la calibration) ou finit après la fin de la période.
-    """
+    """Exécute l'évaluation complète. ValueError si un scénario sort de [eval_start, fin de période]."""
     config = config or evaluation_config()
     interval = config.monitoring.interval
     eval_end = eval_start + timedelta(days=eval_days)

@@ -1,7 +1,4 @@
-"""
-Tests de non-régression des défauts identifiés dans PLAN_CORRECTION.md.
-Chacun échouait avant le correctif correspondant.
-"""
+"""Tests de non-régression : chacun échoue sans le correctif correspondant."""
 
 import math
 from datetime import UTC, datetime, timedelta
@@ -55,7 +52,7 @@ def _record_flags(lp: MonitoringLoop, monkeypatch) -> list[list[DataQualityFlag]
     return seen
 
 
-# --- §3.1 : trou de données fantôme à chaque tick ---------------------------
+# --- trous de données : aucun faux positif, les vrais trous détectés une seule fois ---
 
 
 def test_no_phantom_missing_slot_in_normal_operation(loop, monkeypatch):
@@ -87,7 +84,7 @@ def test_real_gap_is_detected_exactly_once(loop, monkeypatch):
     assert all(DataQualityFlag.MISSING not in f for f in seen)
 
 
-# --- §3.4 : un doublon n'est pas un trou de données -------------------------
+# --- un doublon n'est pas un trou de données ---
 
 
 def test_duplicate_measurement_is_not_treated_as_data_gap(loop):
@@ -103,7 +100,7 @@ def test_duplicate_measurement_is_not_treated_as_data_gap(loop):
     assert lp.incident_manager.active_incidents() == []
 
 
-# --- §3.2 / §3.3 : validation de configuration ------------------------------
+# --- validation de la configuration ---
 
 
 @pytest.mark.parametrize(
@@ -147,7 +144,7 @@ def test_incident_config_rejects_negative_timedelta_and_string():
         IncidentConfig(minimum_duration="-5m")
 
 
-# --- §3.5 : Holt-Winters doit respecter `from_time` --------------------------
+# --- Holt-Winters doit respecter `from_time` ---
 
 
 def _seasonal_history(days: int = 4) -> list[TrafficSample]:

@@ -22,12 +22,7 @@ T0 = datetime(2026, 8, 1, 18, 0, tzinfo=UTC)
 
 @pytest.fixture
 def repo(tmp_path):
-    # `tmp_path` (plutôt que `tempfile.mktemp`, déprécié et sujet à une
-    # course sur le nom de fichier, REVUE.md S-10) : un répertoire dédié à
-    # ce test, nettoyé par pytest lui-même. `dispose()` libère le pool de
-    # connexions avant que pytest ne tente de supprimer le répertoire —
-    # sans ça, le fichier reste verrouillé au teardown sous Windows
-    # (REVUE.md P0-3, cause 1).
+    # dispose() libère le fichier SQLite avant que pytest ne supprime tmp_path (verrou sous Windows).
     path = tmp_path / "test.db"
     r = SqlAlchemyRepository(f"sqlite:///{path}")
     yield r

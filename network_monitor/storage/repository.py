@@ -118,10 +118,7 @@ class IncidentRow(Base):
     # un volume par incident qui reste faible.
     evidence = Column(JSON, nullable=False)
 
-    # GET /outputs et GET /incidents filtrent/trient sur ces deux colonnes à
-    # chaque appel (toutes les 4 s côté dashboard) : sans index, c'est un
-    # SCAN complet de la table sur une table qui grossit en continu
-    # (REVUE.md, Perf-7).
+    # /outputs et /incidents filtrent et trient sur ces colonnes à chaque rafraîchissement du dashboard.
     __table_args__ = (
         Index("ix_incidents_status", "status"),
         Index("ix_incidents_last_seen", "last_seen_at"),
@@ -246,10 +243,8 @@ class Repository(ABC):
     @abstractmethod
     def purge_before(self, cutoff: datetime) -> dict[str, int]:
         """
-        Supprime les mesures, prévisions et anomalies antérieures à `cutoff`
-        (tables à croissance continue). Les incidents et les alertes, peu
-        volumineux et utiles à l'historique, sont conservés. Renvoie le
-        nombre de lignes supprimées par table.
+        Supprime les mesures, prévisions et anomalies antérieures à `cutoff` (les tables qui grossissent
+        en continu). Incidents et alertes sont conservés. Renvoie le nombre de lignes supprimées par table.
         """
         ...
 
@@ -283,21 +278,14 @@ class SqlAlchemyRepository(Repository):
     """
 
     def __init__(self, url: str = "sqlite:///network_monitor.db") -> None:
-        # `check_same_thread=False` : l'API fait tourner la boucle de monitoring
-        # dans un thread dédié pendant que les requêtes HTTP arrivent sur un
-        # autre thread. Chaque appel garde une session courte (`with self._session()`),
-        # ce qui reste sûr avec SQLite tant qu'aucune session n'est partagée
-        # entre threads — seul l'engine (le pool de connexions) l'est.
+        # check_same_thread=False : la boucle de monitoring et les requêtes HTTP tournent dans des
+        # threads différents. Sûr tant que chaque appel ouvre sa propre session (seul l'engine est partagé).
         connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
         self._engine = create_engine(url, future=True, connect_args=connect_args)
         if url.startswith("sqlite"):
-            # WAL supprime le verrou d'écriture global (meilleure concurrence
-            # lecture/écriture entre le thread de monitoring et les requêtes
-            # HTTP) et NORMAL n'fsync qu'aux points de contrôle du WAL plutôt
-            # qu'à chaque commit — gain mesuré ~23x sur le coût d'un tick
-            # (REVUE.md §4, Perf-1), sans perte de durabilité au-delà d'un
-            # crash du système d'exploitation lui-même (compromis acceptable
-            # pour des données de supervision, régénérables par le Mock).
+            # WAL : les lectures HTTP ne bloquent plus l'écriture du thread de monitoring.
+            # synchronous=NORMAL : fsync aux points de contrôle du WAL plutôt qu'à chaque commit ;
+            # seul un crash du système (pas de l'application) peut perdre les derniers commits.
             with self._engine.connect() as conn:
                 conn.exec_driver_sql("PRAGMA journal_mode=WAL")
                 conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
@@ -310,14 +298,9 @@ class SqlAlchemyRepository(Repository):
 
     def _migrate_additive(self) -> None:
         """
-        `create_all` ne crée que les tables MANQUANTES : il n'ajoute jamais une
-        colonne à une table déjà présente. Une base créée par une version
-        précédente échouerait donc à la première requête. Cette migration
-        ajoute, sans rien perdre, les colonnes déclarées dans les modèles mais
-        absentes de la base (elles doivent être nullables : c'est la règle
-        du schéma pour toute évolution). Ce n'est PAS un outil de migration
-        général (pas de renommage ni de suppression) : au-delà d'ajouts de
-        colonnes, adopter Alembic.
+        `create_all` ne modifie pas une table existante : une base créée par une version précédente
+        échouerait à la première requête. On ajoute donc les colonnes (nullables) qui manquent.
+        Ni renommage ni suppression : au-delà, utiliser Alembic.
         """
         inspector = inspect(self._engine)
         with self._engine.begin() as conn:
@@ -335,15 +318,7 @@ class SqlAlchemyRepository(Repository):
                     conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {ddl_type}'))
 
     def dispose(self) -> None:
-        """
-        Libère le pool de connexions de l'engine. Sans cet appel, le fichier
-        SQLite reste verrouillé après la dernière session fermée (le driver
-        garde des connexions ouvertes dans le pool) — inoffensif sous Linux
-        (un fichier ouvert peut être supprimé), mais provoque un
-        `PermissionError` au teardown des tests sous Windows (REVUE.md P0-3).
-        À appeler explicitement en fin de vie du repository : fixtures de
-        tests, et arrêt propre de l'application si un jour nécessaire.
-        """
+        """Ferme le pool de connexions. Sans cela, le fichier SQLite reste verrouillé sous Windows."""
         self._engine.dispose()
 
     def save_samples(self, samples: list[TrafficSample]) -> None:
@@ -377,17 +352,7 @@ class SqlAlchemyRepository(Repository):
         incidents: list[Incident],
         alerts: list[Alert] | None = None,
     ) -> None:
-        """
-        Persiste tout le résultat d'un tick (mesures, prévisions, anomalies,
-        incidents touchés) en une seule transaction, au lieu des 7 à 10
-        `commit()` séparés qu'impliquerait un appel individuel par sortie et
-        par type de résultat (REVUE.md, Perf-1 — complément à WAL : réduit
-        aussi le nombre de points de synchronisation, pas seulement leur
-        coût unitaire, et rend le tick atomique, ce qui est de toute façon
-        la sémantique attendue). `incidents` peut contenir des doublons
-        (plusieurs sorties touchant le même incident n'arrive pas en
-        pratique, mais `merge()` gère de toute façon l'idempotence par clé).
-        """
+        """Persiste tout le résultat d'un tick en une seule transaction. Mesures, prévisions, anomalies et incidents sont idempotents (merge par clé)."""
         with self._session() as session:
             for s in samples:
                 session.merge(_sample_row(s))

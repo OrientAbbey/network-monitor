@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
+import network_monitor.app.main as main_module
 from network_monitor.app.config import AppConfig, MonitoringConfig, StorageConfig
 from network_monitor.app.main import MonitoringLoop
 from network_monitor.app.models import (
@@ -118,21 +119,26 @@ def test_recalibration_excludes_confirmed_incident_windows(tmp_path):
         storage.dispose()
 
 
-def test_calibrate_excluding_windows_removes_anomalous_samples_from_the_model(tmp_path):
-    """Sans exclusion, une longue anomalie apprise comme « normale » abaisse la prévision ; avec, non."""
-    week = timedelta(days=7)
-    scenario = AnomalyScenario(
-        scenario_id="OLD", output_id="OUT_001", start_time=NOW - week - timedelta(hours=1),
-        end_time=NOW - week + timedelta(hours=5), type=ScenarioType.TRAFFIC_DROP, severity=Severity.CRITICAL,
-        traffic_drop_fraction=0.9,
-    )
-    loop, src, storage = _loop(tmp_path, _config(), scenarios=[scenario])
+def test_calibrate_does_not_give_excluded_windows_to_the_model(tmp_path, monkeypatch):
+    loop, _, storage = _loop(tmp_path, _config())
     try:
-        target = NOW - week  # même jour de semaine/créneau que l'anomalie apprise
-        polluted = loop._forecast_models["OUT_001"].predict(target - IV, IV, IV)[0].predicted_traffic_mbps
-        loop.calibrate(NOW, exclude_windows=[(scenario.start_time, scenario.end_time)])
-        cleaned = loop._forecast_models["OUT_001"].predict(target - IV, IV, IV)[0].predicted_traffic_mbps
-        assert cleaned >= polluted  # l'exclusion ne peut pas dégrader la référence normale
+        seen = {}
+        original = main_module.select_model
+
+        def spy(output_id, history, *args, **kwargs):
+            seen[output_id] = history
+            return original(output_id, history, *args, **kwargs)
+
+        monkeypatch.setattr(main_module, "select_model", spy)
+        loop.calibrate(NOW)
+        full = len(seen["OUT_001"])
+
+        start = NOW - timedelta(days=3)
+        window = (start, start + timedelta(hours=6))
+        loop.calibrate(NOW, exclude_windows=[window])
+        history = seen["OUT_001"]
+        assert not any(window[0] <= s.timestamp <= window[1] for s in history)
+        assert full - len(history) == 73  # 6 h à 5 min, bornes incluses
     finally:
         storage.dispose()
 
@@ -164,7 +170,7 @@ def test_recalibration_failure_keeps_running_with_previous_models(tmp_path):
         storage.dispose()
 
 
-# --- alertes persistées (§27) et current_score (§3.6) -----------------------
+# --- alertes persistées (§27) et current_score ---
 
 
 def test_alerts_are_persisted_with_the_incident_lifecycle(tmp_path):

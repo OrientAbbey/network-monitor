@@ -74,11 +74,8 @@ class MonitoringLoop:
         """
         Calibration (§8) : un modèle et une baseline de pertes par sortie.
 
-        `exclude_windows` : périodes [début, fin] à retirer de l'historique
-        avant l'ajustement (recalibration §32 : périodes d'incident confirmé).
-        Si trop de données disparaissent pour une sortie (plus de la moitié),
-        son modèle actuel est conservé plutôt que remplacé par un modèle appris
-        sur trop peu de comportement normal.
+        `exclude_windows` retire de l'historique des périodes anormales (recalibration, §32).
+        Si plus de la moitié de l'historique d'une sortie disparaît, son modèle actuel est conservé.
         """
         start = now - self._config.history.preferred
         full_history = self._source.load_history(start, now)
@@ -88,7 +85,7 @@ class MonitoringLoop:
 
         for output_id in self._source.list_outputs():
             history = by_output.get(output_id, [])
-            if len(history) < 1:
+            if not history:
                 logger.warning("Historique vide pour %s : calibration ignorée", output_id)
                 continue
 
@@ -137,8 +134,7 @@ class MonitoringLoop:
             self.calibrate(now, exclude_windows=windows)
             logger.info("Recalibration effectuée à %s (%d période(s) anormale(s) exclue(s))", now, len(windows))
         except Exception:
-            # Les modèles précédents restent en place : mieux vaut un modèle un peu
-            # ancien qu'une boucle de supervision arrêtée. Nouvel essai à l'échéance suivante.
+            # On garde les modèles actuels plutôt que d'arrêter la supervision ; nouvel essai à l'échéance suivante.
             logger.exception("Recalibration échouée à %s : modèles précédents conservés", now)
             self._last_calibrated_at = now
 
@@ -158,20 +154,9 @@ class MonitoringLoop:
         # 1. récupérer les nouvelles données
         raw = [RawMeasurement(**s.model_dump()) for s in self._source.get_latest()]
 
-        # 2. valider
-        #
-        # Les trous DOIVENT être détectés avant que validate_batch() ne mette à
-        # jour _last_valid_timestamp avec l'échantillon du tick courant, sinon
-        # un vrai trou multi-pas serait masqué par la reprise (le dernier
-        # timestamp valide sauterait directement au point de reprise sans
-        # jamais laisser missing_slots voir les pas manqués entre les deux).
-        #
-        # La borne `now - 2 * interval` (et non `now`) reflète le décalage
-        # structurel d'un pas entre l'horloge simulée `now` et le timestamp du
-        # dernier échantillon réellement disponible (`now - interval`, cf.
-        # MockDataSource.get_latest) : sans ce décalage, missing_slots signale
-        # à chaque tick un créneau qui n'est simplement pas encore dû, pas
-        # réellement manquant (cf. PLAN_CORRECTION.md §3.1).
+        # 2. valider. Les trous sont cherchés AVANT validate_batch, qui avance le dernier timestamp
+        # valide et masquerait un trou de plusieurs pas. Borne `now - 2 * interval` : l'échantillon
+        # de ce tick est daté `now - interval`, il ne doit pas être compté comme manquant.
         interval = self._source.get_interval()
         missing: list = []
         for output_id in self._source.list_outputs():
@@ -180,10 +165,7 @@ class MonitoringLoop:
 
         valid_samples: list[TrafficSample] = [v.sample for v in validated if v.is_usable]
 
-        # 3-11. Un seul commit pour tout le tick plutôt qu'un commit par sortie
-        # et par type de résultat (jusqu'à 10 auparavant) : réduit d'autant
-        # les points de synchronisation SQLite et rend le tick atomique
-        # (REVUE.md, Perf-1 — complément à WAL, cf. storage/repository.py).
+        # 3-11. Un seul commit par tick : moins de synchronisations SQLite, et le tick est atomique.
         tick_forecasts: list[ForecastResult] = []
         tick_anomalies: list[AnomalyResult] = []
         tick_incidents: list[Incident] = []
@@ -200,19 +182,14 @@ class MonitoringLoop:
 
         self._storage.save_tick(valid_samples, tick_forecasts, tick_anomalies, tick_incidents, tick_alerts)
 
-        # Maintenance, APRÈS la persistance du tick : la recalibration lit les
-        # incidents tout juste enregistrés pour exclure leurs périodes (§32).
+        # Après la persistance : la recalibration lit les incidents qui viennent d'être enregistrés (§32).
         self._maybe_recalibrate(now)
         self._maybe_purge(now)
 
     def _process_validated_sample(
         self, validated, now: datetime
     ) -> tuple[ForecastResult | None, AnomalyResult | None, Incident | None, list[Alert]]:
-        """
-        Traite une mesure validée et renvoie ce qui doit être persisté pour
-        ce point, sans rien écrire lui-même : `run_tick` regroupe l'écriture
-        de tout le tick en une seule transaction (voir plus haut).
-        """
+        """Renvoie ce qui doit être persisté pour cette mesure (l'écriture est groupée dans `run_tick`)."""
         output_id = validated.output_id
         model = self._forecast_models.get(output_id)
         baseline = self._loss_baselines.get(output_id)
@@ -220,9 +197,7 @@ class MonitoringLoop:
             return None, None, None, []  # sortie non calibrée : rien à comparer
 
         if not validated.is_usable and DataQualityFlag.DUPLICATE in validated.quality_flags:
-            # Doublon : la mesure de ce créneau a déjà été traitée. Ce n'est PAS
-            # une absence de donnée — le traiter comme un trou ajouterait une
-            # fausse preuve `data_gap` à un incident actif (PLAN_CORRECTION.md §3.4).
+            # Doublon : déjà traité. Ce n'est pas une absence de donnée (ce serait une fausse preuve `data_gap`).
             logger.debug("Doublon ignoré pour %s à %s", output_id, validated.timestamp)
             return None, None, None, []
 
@@ -268,9 +243,8 @@ class MonitoringLoop:
             observed_loss_percent=sample.loss_percent,
         )
 
-        # 11. le résultat (y compris un incident tout juste fermé, qui ne
-        # réapparaîtrait plus jamais dans active_incidents(), §29) est
-        # renvoyé à l'appelant plutôt que persisté ici.
+        # 11. Un incident tout juste fermé ne réapparaîtra plus dans active_incidents() (§29) :
+        # il doit être renvoyé pour être persisté.
         return forecast, anomaly, incident, alerts
 
     def run_forever(self, start_at: datetime, max_ticks: int | None = None) -> None:

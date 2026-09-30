@@ -59,8 +59,7 @@ class IncidentManager:
     def __init__(self, config: IncidentConfig, critical_score: float = 0.80, alerts_enabled: bool = True) -> None:
         self._config = config
         self._critical_score = critical_score
-        # `alerts.enabled` (§35) : coupe la génération des alertes ; le cycle de
-        # vie des incidents, lui, n'est jamais affecté.
+        # `alerts.enabled` (§35) coupe les alertes sans toucher au cycle de vie des incidents.
         self._alerts_enabled = alerts_enabled
         self._states: dict[str, _OutputState] = {}
 

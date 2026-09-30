@@ -1,10 +1,6 @@
 import { Component } from "react";
 
-/**
- * Empêche qu'une exception de rendu ne blanchisse toute la page : affiche un
- * message clair avec un moyen de réessayer. (React exige un composant classe
- * pour les limites d'erreur.)
- */
+/** Affiche un message avec un bouton « Réessayer » au lieu d'une page blanche quand le rendu plante. */
 export default class ErrorBoundary extends Component {
   constructor(props) {
     super(props);

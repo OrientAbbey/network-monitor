@@ -24,7 +24,6 @@ describe("client HTTP", () => {
     const pending = api.outputs().then(() => null, (e) => e);
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 10);
     const err = await pending;
-    expect(err).toBeTruthy();
     expect(err.name).toBe("TimeoutError");
     expect(isAbortError(err)).toBe(false);
   });

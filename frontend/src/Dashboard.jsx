@@ -58,7 +58,7 @@ const DEFAULT_CONFIG_UPDATE_DELTA_THRESHOLDS = { traffic: 0.05, loss: 0.1 };
 
 const CHART_W = 640;
 const CHART_H = 230;
-// left: 66 (et non 50) — l'étiquette d'axe la plus longue (« 32.00 Gbps ») débordait du SVG.
+// left: 66 pour que l'étiquette « 32.00 Gbps » tienne dans le SVG.
 const MARGIN = { top: 16, right: 52, bottom: 26, left: 66 };
 const INNER_W = CHART_W - MARGIN.left - MARGIN.right;
 const INNER_H = CHART_H - MARGIN.top - MARGIN.bottom;
@@ -91,11 +91,8 @@ function DetailChart({ outputId, rangeKey, onRangeChange, visibility, onToggle, 
     controllerRef.current = controller;
     const { signal } = controller;
 
-    // La fenêtre est calculée dans l'horloge SIMULÉE du serveur (simNowRef), pas dans celle du
-    // navigateur : l'horloge simulée avance 150× plus vite que le temps réel, donc une fenêtre
-    // calée sur `new Date()` ne contenait presque plus aucun point après quelques secondes.
-    // `until` est volontairement omis : le serveur prend alors sa propre horloge et inclut les
-    // mesures les plus récentes.
+    // Fenêtre en horloge simulée du serveur (simNowRef), pas en `new Date()` : la simulation avance
+    // 150× plus vite que le temps réel. `until` est omis : le serveur prend son horloge.
     const simNow = simNowRef.current ?? new Date();
     const since = new Date(simNow.getTime() - range.spanMs).toISOString();
     try {
@@ -127,8 +124,7 @@ function DetailChart({ outputId, rangeKey, onRangeChange, visibility, onToggle, 
     };
   }, [refresh]);
 
-  // Tout ce qui est coûteux (échelles, chemins SVG) est calculé une seule fois par jeu de données :
-  // déplacer le curseur ne doit pas reconstruire des courbes de plusieurs milliers de points.
+  // Échelles et chemins SVG calculés une fois par jeu de données : bouger le curseur ne les recalcule pas.
   const geometry = useMemo(() => {
     if (history.length < 2) return null;
     const points = history.map((h) => ({ date: new Date(h.timestamp), traffic: h.traffic_mbps, loss: h.loss_percent }));
@@ -152,8 +148,7 @@ function DetailChart({ outputId, rangeKey, onRangeChange, visibility, onToggle, 
     const yTraffic = (v) => MARGIN.top + INNER_H - ((v - tMin) / (tMax - tMin || 1)) * INNER_H;
     const yLoss = (v) => MARGIN.top + INNER_H - ((v - lMin) / (lMax - lMin || 1)) * INNER_H;
 
-    // Sous-échantillonnage (min/max par tranche) : sur « 1 mois » une courbe fait 8 640 points, alors
-    // que le graphe n'a que ~520 unités de large. Les extrêmes sont conservés pour ne pas lisser les pics.
+    // Min/max par tranche : un mois fait 8 640 points pour ~520 unités de large, et les pics sont conservés.
     const shownTraffic = downsampleMinMax(points, (p) => p.traffic, INNER_W);
     const shownLoss = downsampleMinMax(points, (p) => p.loss, INNER_W);
     const shownBaseline = downsampleMinMax(baselinePoints, (p) => p.traffic, INNER_W);
@@ -277,8 +272,7 @@ function DetailChart({ outputId, rangeKey, onRangeChange, visibility, onToggle, 
             </g>
           )}
         </svg>
-        {/* Curseur clavier : un vrai <input type="range"> donne gratuitement flèches, Début/Fin et
-            annonce par les lecteurs d'écran (aria-valuetext), sans réinventer un widget. */}
+        {/* Curseur clavier : un <input type="range"> natif (flèches, Début/Fin, aria-valuetext). */}
         <input
           type="range"
           className="chart-cursor-input"
@@ -368,7 +362,7 @@ function TrendChip({ current, previous, formatValue, threshold }) {
   );
 }
 
-// Décalages (en secondes, avant la dernière mesure de la sortie) des quatre colonnes du tableau.
+// Décalages (secondes avant la dernière mesure) des quatre colonnes.
 const SNAPSHOT_OFFSETS = { now: 0, prev: 300, day: 86400, week: 604800 };
 
 function SummaryTable({ outputIds, thresholds }) {
@@ -377,8 +371,7 @@ function SummaryTable({ outputIds, thresholds }) {
   const controllerRef = useRef(null);
   const idsKey = outputIds.join(",");
 
-  // Une requête par sortie (le serveur calcule les 8 mesures voisines et dans SON horloge) au lieu de
-  // 24 requêtes /history par rafraîchissement calées sur l'horloge du navigateur.
+  // Une requête par sortie : le serveur calcule les mesures voisines, dans son horloge.
   const refresh = useCallback(async () => {
     if (isPageHidden()) return;
     controllerRef.current?.abort();
@@ -515,8 +508,7 @@ function SettingsPanel({ config, deltaThresholds, onDeltaThresholdsChange, onSav
 
 // --- Composant racine -----------------------------------------------------
 
-// Ajoute une valeur par défaut pour chaque nouvel id SANS changer l'identité de l'objet quand rien
-// ne change : retourner un nouvel objet à chaque appel (toutes les 4 s) forçait un re-rendu complet.
+// Ajoute les ids manquants sans changer l'identité de l'objet quand rien ne change (évite un re-rendu).
 function withDefaults(prev, ids, makeDefault) {
   let next = prev;
   for (const id of ids) {
@@ -527,7 +519,7 @@ function withDefaults(prev, ids, makeDefault) {
   return next;
 }
 
-/** Âge de la dernière mise à jour réussie : c'est LA donnée de confiance d'un outil de supervision. */
+/** Âge de la dernière mise à jour réussie. */
 function FreshnessBadge({ lastOk }) {
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -560,7 +552,7 @@ export default function Dashboard() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
 
-  // Horloge SIMULÉE du serveur, lue par les graphes pour calculer leurs fenêtres (voir DetailChart).
+  // Horloge simulée du serveur, lue par les graphes pour calculer leurs fenêtres.
   const simNowRef = useRef(null);
   const hasDataRef = useRef(false);
   const configLoadedRef = useRef(false);
@@ -599,7 +591,7 @@ export default function Dashboard() {
       if (isAbortError(err)) return null;
       const message = err.message ?? String(err);
       if (hasDataRef.current) {
-        // On a déjà des données : on les GARDE à l'écran avec un avertissement, au lieu de tout remplacer.
+        // Des données sont déjà affichées : on les garde, avec un avertissement.
         setStaleError(message);
       } else {
         setConnectionError(`Impossible de joindre l'API (${message}). Vérifiez qu'elle tourne sur l'URL configurée (VITE_API_BASE_URL).`);
@@ -608,8 +600,7 @@ export default function Dashboard() {
     }
   }, []);
 
-  // Rafraîchissement périodique avec recul exponentiel : si l'API est surchargée ou arrêtée, on
-  // espace les tentatives (4 s → 8 s → … → 30 s) au lieu de la marteler à fréquence constante.
+  // Rafraîchissement périodique, avec recul exponentiel (4 s, 8 s, … 30 s) quand l'API échoue.
   useEffect(() => {
     let cancelled = false;
     let timer = null;
@@ -707,8 +698,7 @@ export default function Dashboard() {
             const expanded = expandedCharts[id];
             return (
               <div key={id} className={`nm-channel${isActive ? " is-active" : ""}`} style={{ "--stripe": style.color, borderLeftColor: isActive ? style.color : COLORS.border }}>
-                {/* Souris : toute la barre est cliquable. Clavier et lecteurs d'écran : le <button> seul
-                    (natif : Entrée et Espace). Aucun role="button" imbriqué autour d'un autre bouton. */}
+                {/* Souris : toute la barre est cliquable. Clavier et lecteurs d'écran : le <button> seul. */}
                 <div className="nm-channel-head" onClick={() => toggleChart(id)}>
                   <div className="nm-channel-id-block">
                     <span className="nm-card-id">{id}</span>
@@ -751,7 +741,7 @@ export default function Dashboard() {
               {tableExpanded ? "−" : "+"}
             </button>
           </div>
-          {/* L'overflow horizontal est sur ce conteneur, pas sur le panneau : le titre ne défile plus avec le tableau. */}
+          {/* overflow-x ici plutôt que sur le panneau : le titre ne défile pas avec le tableau. */}
           {tableExpanded && (
             <div className="nm-table-scroll">
               <SummaryTable outputIds={outputs.map((o) => o.output_id)} thresholds={deltaThresholds} />
@@ -780,7 +770,7 @@ export default function Dashboard() {
 
         <section className="nm-panel" aria-labelledby="h-incidents">
           <h2 id="h-incidents">Incidents (récents et actifs)</h2>
-          {/* role="log" : région live polie — l'arrivée d'un incident est annoncée aux lecteurs d'écran. */}
+          {/* role="log" : les nouveaux incidents sont annoncés aux lecteurs d'écran. */}
           <div className="nm-log" role="log" aria-live="polite" aria-relevant="additions" aria-label="Journal des incidents">
             {incidents.length === 0 && <div className="nm-log-empty">Aucun incident pour l'instant.</div>}
             {incidents.map((inc) => {
@@ -894,7 +884,7 @@ const BASE_STYLE = `
   .skip-link { position: absolute; left: 12px; top: -48px; background: ${COLORS.trace}; color: ${COLORS.bg}; padding: 8px 14px; z-index: 10; font-weight: 600; text-decoration: none; }
   .skip-link:focus { top: 12px; }
   main:focus { outline: none; }
-  /* Focus visible sur TOUS les contrôles (WCAG 2.4.7), pas seulement quelques-uns. */
+  /* Focus visible sur tous les contrôles. */
   .nm-root :is(button, a, input, select, textarea, [tabindex]):focus-visible { outline: 2px solid ${COLORS.trace}; outline-offset: 2px; }
   .chart-wrap { position: relative; }
   .chart-wrap:focus-within { outline: 1px solid ${COLORS.borderBright}; outline-offset: 2px; }

@@ -1,15 +1,12 @@
 """
 API FastAPI (§37) : expose le système de monitoring en HTTP.
 
-Couche fine au-dessus de MonitoringLoop / Repository / IncidentManager —
-aucune logique métier propre ici, uniquement sérialisation et orchestration
-du cycle de vie (démarrage/arrêt de la boucle en tâche de fond).
+Couche fine au-dessus de MonitoringLoop / Repository / IncidentManager : sérialisation et
+cycle de vie de la boucle en tâche de fond, pas de logique métier.
 
-Sécurité : CORS restreint par défaut aux origines de développement locales
-du frontend Vite ; à étendre via NETWORK_MONITOR_CORS_ORIGINS (liste séparée
-par des virgules) pour un autre hôte. Cette API ne comporte AUCUNE
-authentification : ne pas l'exposer au-delà de localhost sans ajouter une
-couche d'authentification devant (REVUE.md, S-1/S-2).
+Sécurité : CORS limité aux origines Vite locales (autres origines : variable
+NETWORK_MONITOR_CORS_ORIGINS, séparées par des virgules). Aucune authentification :
+ne pas exposer au-delà de localhost.
 """
 
 from __future__ import annotations
@@ -87,17 +84,15 @@ class MonitoringState:
                 self.source.start_realtime(self.now)
             self._clock_started = True
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread = threading.Thread(target=self._run, name="monitoring-loop", daemon=True)
         self._thread.start()
         self.running = True
 
     def stop(self) -> None:
         self._stop.set()
         thread = self._thread
-        # join() : sans lui, un start() immédiat après stop() pouvait lancer un
-        # second thread pendant que le premier finissait encore son tick
-        # (deux threads sur le même MockDataSource, REVUE.md Conc-2). Le
-        # timeout évite de bloquer indéfiniment si un tick est très long.
+        # join : un start() juste après stop() ne doit pas lancer un second thread pendant que le premier
+        # finit son tick. Le timeout évite de bloquer si un tick est très long.
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=10.0)
         self._thread = None
@@ -111,7 +106,7 @@ class MonitoringState:
                 self.loop.run_tick(self.now)
             except Exception:  # ne jamais laisser une erreur ponctuelle tuer la boucle
                 logger.exception("Erreur pendant run_tick à %s", self.now)
-            # wait() (et non sleep) : réveille immédiatement le thread dès que stop() est appelé.
+            # wait plutôt que sleep : stop() réveille le thread immédiatement.
             self._stop.wait(self.seconds_per_tick)
 
 
@@ -216,13 +211,12 @@ def list_outputs() -> list[OutputSummary]:
     return summaries
 
 
-# Borne maximale d'une fenêtre demandée : sans elle, une requête sur plusieurs
-# années chargerait l'intégralité de la table en mémoire (REVUE.md, S-5).
+# Largeur maximale d'une fenêtre demandée : évite de charger des années de mesures en mémoire.
 MAX_WINDOW_SPAN = timedelta(days=31)
 
 
 def _as_aware(dt: datetime) -> datetime:
-    """Un datetime naïf est interprété comme UTC (au lieu d'une comparaison qui lèverait un TypeError → 500)."""
+    """Un datetime naïf est lu comme UTC (sinon la comparaison avec un datetime aware lèverait une erreur 500)."""
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
@@ -284,22 +278,18 @@ def output_snapshots(
     output_id: str,
     offsets: list[int] = Query(
         default=[0, 300, 86400, 604800],
-        description="Décalages en secondes avant `at` (0 = maintenant, 300 = il y a 5 min, 86400 = il y a 1 jour…)",
+        description="Décalages en secondes avant la référence (0 = dernière mesure, 300 = 5 min avant, 86400 = 1 jour avant…)",
     ),
     at: datetime | None = Query(
         default=None, description="Référence (défaut : horodatage de la dernière mesure de la sortie)"
     ),
 ) -> list[Snapshot]:
     """
-    Comparatif temporel calculé côté serveur : une seule requête par sortie
-    (au lieu de deux par cellule du tableau), et surtout dans l'horloge du
-    serveur — qui est simulée et n'est PAS celle du navigateur.
+    Comparatif temporel calculé côté serveur, dans l'horloge simulée (pas celle du navigateur).
 
-    La référence par défaut est la DERNIÈRE MESURE de la sortie, pas l'horloge
-    du serveur : une mesure porte l'horodatage de l'intervalle qu'elle décrit
-    (donc un pas de retard sur l'horloge). Avec `now` comme référence, les
-    décalages 0 et 300 s retombaient sur la même mesure et la tendance de la
-    première colonne était toujours plate.
+    La référence par défaut est la dernière mesure de la sortie et non l'horloge du serveur : une
+    mesure est datée du début de son intervalle, donc un pas en retard. Avec l'horloge comme
+    référence, les décalages 0 et 300 s désigneraient la même mesure.
     """
     _ensure_known_output(output_id)
     if not offsets or len(offsets) > _SNAPSHOT_MAX_OFFSETS:

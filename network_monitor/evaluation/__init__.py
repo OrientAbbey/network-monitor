@@ -1,14 +1,8 @@
 """
-Évaluation quantitative (§33) : compare ce que le système a détecté et prévu à
-la vérité terrain du Mock (`MockDataSource.ground_truth()`), sur une période
-DISTINCTE de celle utilisée pour la calibration.
+Évaluation quantitative (§33) : détections et prévisions comparées à la vérité terrain du Mock,
+sur une période distincte de la calibration.
 
-- `metrics` : fonctions pures (appariement scénarios/incidents, précision,
-  rappel, F1, taux de faux positifs, délais de détection/fermeture, erreur de
-  durée ; MAE, RMSE, sMAPE, couverture de l'intervalle prédictif).
-- `harness` : exécute le pipeline complet sur une suite de scénarios et
-  produit un `EvaluationReport`.
-
+`metrics` : fonctions pures. `harness` : exécute le pipeline complet sur une suite de scénarios.
 Ligne de commande : `python -m network_monitor.evaluation --help`.
 """
 
