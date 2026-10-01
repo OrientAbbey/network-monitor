@@ -1,7 +1,5 @@
 """Tests du stockage : round-trip et séparation des tables (§29, §34)."""
 
-import os
-import tempfile
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -23,11 +21,10 @@ T0 = datetime(2026, 8, 1, 18, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture
-def repo():
-    path = tempfile.mktemp(suffix=".db")
-    r = SqlAlchemyRepository(f"sqlite:///{path}")
+def repo(tmp_path):
+    r = SqlAlchemyRepository(f"sqlite:///{tmp_path / 'repo.db'}")
     yield r
-    os.remove(path)
+    r.dispose()  # libère le fichier (sous Windows, un fichier ouvert ne peut pas être supprimé)
 
 
 def test_samples_round_trip_preserves_timezone(repo):
@@ -109,3 +106,27 @@ def test_forecasts_and_anomalies_do_not_affect_raw_measurements_table(repo):
         [AnomalyResult(output_id="OUT_001", timestamp=T0, traffic_anomaly_score=0.5, loss_anomaly_score=0.2, joint_anomaly_score=0.5)]
     )
     assert repo.get_history("OUT_001", T0, T0 + timedelta(hours=1)) == []
+
+
+def test_anomaly_deviation_fields_survive_a_round_trip(repo):
+    """Ces trois champs étaient calculés puis perdus à l'écriture."""
+    from network_monitor.app.models import AnomalyResult
+
+    repo.save_anomalies([AnomalyResult(
+        output_id="OUT_001", timestamp=T0, traffic_anomaly_score=0.5, loss_anomaly_score=0.2,
+        joint_anomaly_score=0.5, traffic_deviation_percent=-42.5, loss_deviation_points=3.5,
+        traffic_out_of_interval=True,
+    )])
+    (back,) = repo.get_anomalies("OUT_001", T0, T0 + timedelta(minutes=5))
+    assert back.traffic_deviation_percent == -42.5
+    assert back.loss_deviation_points == 3.5
+    assert back.traffic_out_of_interval is True
+
+
+def test_purge_removes_old_series_but_keeps_recent(repo):
+    old = TrafficSample(timestamp=T0, output_id="OUT_001", traffic_mbps=1, loss_percent=0)
+    new = TrafficSample(timestamp=T0 + timedelta(days=10), output_id="OUT_001", traffic_mbps=2, loss_percent=0)
+    repo.save_samples([old, new])
+    repo.purge_older_than(T0 + timedelta(days=5))
+    kept = repo.get_history("OUT_001", T0 - timedelta(days=1), T0 + timedelta(days=30))
+    assert [s.traffic_mbps for s in kept] == [2]

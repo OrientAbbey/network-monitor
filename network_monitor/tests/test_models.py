@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from network_monitor.app.models import (
     AnomalyResult,
+    DataQualityFlag,
     ForecastModelName,
     ForecastResult,
     Incident,
@@ -16,7 +17,6 @@ from network_monitor.app.models import (
     Severity,
     TrafficSample,
     ValidatedSample,
-    DataQualityFlag,
 )
 
 NOW = datetime(2026, 8, 1, 18, 0, 0, tzinfo=timezone.utc)
@@ -33,7 +33,7 @@ def test_traffic_sample_nominal():
 def test_traffic_sample_rejects_naive_timestamp():
     with pytest.raises(ValidationError):
         TrafficSample(
-            timestamp=datetime(2026, 8, 1, 18, 0, 0),  # naive, pas de tzinfo
+            timestamp=datetime(2026, 8, 1, 18, 0, 0),  # noqa: DTZ001 - naïf volontairement
             output_id="OUT_001",
             traffic_mbps=100.0,
             loss_percent=0.1,

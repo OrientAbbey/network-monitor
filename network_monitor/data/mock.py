@@ -17,7 +17,6 @@ from pydantic import BaseModel, Field
 from network_monitor.app.models import Severity, TrafficSample
 from network_monitor.data.source import DataSource
 
-
 # ---------------------------------------------------------------------------
 # Profils de sortie
 # ---------------------------------------------------------------------------

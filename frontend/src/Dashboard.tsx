@@ -1,5 +1,12 @@
-import { useState, useEffect, useRef, useCallback } from "react";
-import { api } from "./api.js";
+import { useState, useEffect, useRef, useCallback, type KeyboardEvent, type MouseEvent } from "react";
+import { api, currentSession, login, logout, type Session } from "./api";
+import { decimate, nearestIndex, pointerToTime, type Point } from "./chart";
+import type { Alert, AppConfigView, ForecastPoint, Incident, MonitoringStatus, OutputSummary, TrafficSample } from "./types";
+
+type Visibility = { traffic: boolean; loss: boolean; baseline: boolean; prediction: boolean };
+type Current = { traffic: number | null | undefined; loss: number | null | undefined };
+type Thresholds = { traffic: number; loss: number };
+type IncidentDraft = AppConfigView["incident"];
 
 /* ---------------------------------------------------------------------
    "Signal Room" — même identité visuelle que la maquette v2, mais toutes
@@ -41,21 +48,27 @@ const RANGES = [
   { key: "1m", label: "1 mois", spanMs: 30 * 24 * 3600_000 },
 ];
 
+const MAX_CHART_POINTS = 720; // ~1,3 point par pixel utile : au-delà, on décime (pics et creux conservés)
+
 const DEFAULT_CONFIG_UPDATE_DELTA_THRESHOLDS = { traffic: 0.05, loss: 0.1 };
 
-function formatMbps(v) {
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function formatMbps(v: number | null | undefined): string {
   if (v == null) return "—";
   if (v >= 1000) return (v / 1000).toFixed(2) + " Gbps";
   return v.toFixed(1) + " Mbps";
 }
 
-function formatClock(date) {
+function formatClock(date: Date): string {
   return date.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
 }
 
-function formatAxisLabel(date, rangeKey, now) {
+function formatAxisLabel(date: Date, rangeKey: string, now: Date): string {
   if (rangeKey === "12h" || rangeKey === "1d") return formatClock(date);
-  const daysAgo = Math.round((now - date) / (24 * 3600_000));
+  const daysAgo = Math.round((now.getTime() - date.getTime()) / (24 * 3600_000));
   return daysAgo <= 0 ? formatClock(date) : `-${daysAgo}j ${formatClock(date)}`;
 }
 
@@ -67,7 +80,7 @@ const MARGIN = { top: 12, right: 52, bottom: 26, left: 50 };
 const INNER_W = CHART_W - MARGIN.left - MARGIN.right;
 const INNER_H = CHART_H - MARGIN.top - MARGIN.bottom;
 
-function niceDomain(values, paddingFrac = 0.12, floorAtZero = false) {
+function niceDomain(values: number[], paddingFrac = 0.12, floorAtZero = false): [number, number] {
   if (!values.length) return [0, 1];
   let min = Math.min(...values);
   let max = Math.max(...values);
@@ -76,7 +89,7 @@ function niceDomain(values, paddingFrac = 0.12, floorAtZero = false) {
   return [floorAtZero ? Math.max(0, min - pad) : min - pad, max + pad];
 }
 
-function EmptyRange({ label }) {
+function EmptyRange({ label }: { label: string }) {
   return (
     <div className="empty-range">
       Pas encore assez d'historique réel pour "{label}" — le système n'a
@@ -86,20 +99,32 @@ function EmptyRange({ label }) {
   );
 }
 
-function DetailChart({ outputId, rangeKey, onRangeChange, visibility, onToggle, current }) {
-  const [history, setHistory] = useState([]);
-  const [baseline, setBaseline] = useState([]);
-  const [prediction, setPrediction] = useState([]);
+interface DetailChartProps {
+  outputId: string;
+  rangeKey: string;
+  onRangeChange: (key: string) => void;
+  visibility: Visibility;
+  onToggle: (key: keyof Visibility) => void;
+  current: Current;
+}
+
+export function DetailChart({ outputId, rangeKey, onRangeChange, visibility, onToggle, current }: DetailChartProps) {
+  const [history, setHistory] = useState<TrafficSample[]>([]);
+  const [baseline, setBaseline] = useState<ForecastPoint[]>([]);
+  const [prediction, setPrediction] = useState<ForecastPoint[]>([]);
   const [loading, setLoading] = useState(true);
+  const [hover, setHover] = useState<number | null>(null); // indice du point survolé / focalisé (dans la série affichée)
   const range = RANGES.find((r) => r.key === rangeKey) ?? RANGES[0];
 
   const refresh = useCallback(async () => {
-    const until = new Date();
-    const since = new Date(until.getTime() - range.spanMs);
+    // Fenêtres relatives à l'horloge du SERVEUR (`span_hours`) : l'horloge
+    // simulée du backend n'est pas celle du navigateur, construire since/until
+    // avec `new Date()` ne retrouvait presque aucun échantillon.
+    const spanHours = range.spanMs / 3600_000;
     try {
       const [hist, fc, ahead] = await Promise.all([
-        api.history(outputId, since.toISOString(), until.toISOString()),
-        visibility.baseline ? api.forecast(outputId, since.toISOString(), until.toISOString()) : Promise.resolve([]),
+        api.history(outputId, undefined, undefined, spanHours),
+        visibility.baseline ? api.forecast(outputId, undefined, undefined, spanHours) : Promise.resolve([]),
         visibility.prediction ? api.forecastAhead(outputId, 35) : Promise.resolve([]),
       ]);
       setHistory(hist);
@@ -132,15 +157,17 @@ function DetailChart({ outputId, rangeKey, onRangeChange, visibility, onToggle, 
     );
   }
 
-  const now = new Date();
-  const points = history.map((h) => ({ date: new Date(h.timestamp), traffic: h.traffic_mbps, loss: h.loss_percent }));
-  const baselinePoints = baseline.map((f) => ({ date: new Date(f.timestamp), traffic: f.predicted_traffic_mbps }));
+  const points = decimate(
+    history.map((h) => ({ date: new Date(h.timestamp), traffic: h.traffic_mbps, loss: h.loss_percent })),
+    MAX_CHART_POINTS,
+  );
+  const baselinePoints = decimate(baseline.map((f) => ({ date: new Date(f.timestamp), traffic: f.predicted_traffic_mbps, loss: 0 })), MAX_CHART_POINTS);
   const predictionPoints = prediction.map((f) => ({ date: new Date(f.timestamp), traffic: f.predicted_traffic_mbps, loss: null }));
 
   const tStart = points[0].date.getTime();
   const tEnd = (predictionPoints.length ? predictionPoints[predictionPoints.length - 1].date : points[points.length - 1].date).getTime();
   const span = Math.max(1, tEnd - tStart);
-  const xAt = (date) => MARGIN.left + ((date.getTime() - tStart) / span) * INNER_W;
+  const xAt = (date: Date) => MARGIN.left + ((date.getTime() - tStart) / span) * INNER_W;
   const nowX = xAt(points[points.length - 1].date);
 
   const trafficValues = [
@@ -152,14 +179,32 @@ function DetailChart({ outputId, rangeKey, onRangeChange, visibility, onToggle, 
   const [tMin, tMax] = niceDomain(trafficValues.length ? trafficValues : [current.traffic || 1]);
   const [lMin, lMax] = niceDomain(lossValues.length ? lossValues : [current.loss || 0.1], 0.25, true);
 
-  const yTraffic = (v) => MARGIN.top + INNER_H - ((v - tMin) / (tMax - tMin || 1)) * INNER_H;
-  const yLoss = (v) => MARGIN.top + INNER_H - ((v - lMin) / (lMax - lMin || 1)) * INNER_H;
-  const pathFor = (pts, yFn) => pts.map((p, i) => `${i === 0 ? "M" : "L"} ${xAt(p.date).toFixed(1)} ${yFn(p.v).toFixed(1)}`).join(" ");
+  const yTraffic = (v: number) => MARGIN.top + INNER_H - ((v - tMin) / (tMax - tMin || 1)) * INNER_H;
+  const yLoss = (v: number) => MARGIN.top + INNER_H - ((v - lMin) / (lMax - lMin || 1)) * INNER_H;
+  const pathFor = (pts: { date: Date; v: number }[], yFn: (v: number) => number) => pts.map((p, i) => `${i === 0 ? "M" : "L"} ${xAt(p.date).toFixed(1)} ${yFn(p.v).toFixed(1)}`).join(" ");
 
   const actualTrafficPath = pathFor(points.map((p) => ({ date: p.date, v: p.traffic })), yTraffic);
   const actualLossPath = pathFor(points.map((p) => ({ date: p.date, v: p.loss })), yLoss);
   const baselinePath = pathFor(baselinePoints.map((p) => ({ date: p.date, v: p.traffic })), yTraffic);
   const predictionPath = pathFor(predictionPoints.map((p) => ({ date: p.date, v: p.traffic })), yTraffic);
+
+  const hoverIdx = hover === null ? null : Math.min(hover, points.length - 1);
+  const hoverPoint = hoverIdx === null ? null : points[hoverIdx];
+  const hoverBaseline = hoverPoint && visibility.baseline ? baselinePoints[nearestIndex(baselinePoints, hoverPoint.date.getTime())] : null;
+  const onPointerMove = (e: MouseEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const t = pointerToTime(e.clientX, rect, { chartWidth: CHART_W, marginLeft: MARGIN.left, innerWidth: INNER_W }, tStart, span);
+    setHover(nearestIndex(points, t));
+  };
+  const onChartKeyDown = (e: KeyboardEvent<SVGSVGElement>) => {
+    const last = points.length - 1;
+    const at = hoverIdx ?? last;
+    const next = ({ ArrowLeft: at - 1, ArrowRight: at + 1, Home: 0, End: last } as Record<string, number>)[e.key];
+    if (e.key === "Escape") { setHover(null); return; }
+    if (next === undefined) return;
+    e.preventDefault();
+    setHover(Math.max(0, Math.min(last, next)));
+  };
 
   const rows = [0, 1 / 3, 2 / 3, 1];
   const nTimeLabels = 5;
@@ -168,7 +213,20 @@ function DetailChart({ outputId, rangeKey, onRangeChange, visibility, onToggle, 
   return (
     <div>
       <RangeSelector rangeKey={rangeKey} onRangeChange={onRangeChange} />
-      <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} style={{ width: "100%", height: "auto", display: "block" }}>
+      <svg
+        className="chart-svg"
+        viewBox={`0 0 ${CHART_W} ${CHART_H}`}
+        role="group"
+        tabIndex={0}
+        aria-label={`Trafic et pertes de ${outputId} sur ${range.label}. Flèches gauche et droite : lire les valeurs point par point.`}
+        aria-describedby={`readout-${outputId}`}
+        style={{ width: "100%", height: "auto", display: "block" }}
+        onMouseMove={onPointerMove}
+        onMouseLeave={() => setHover(null)}
+        onFocus={() => setHover((h) => h ?? points.length - 1)}
+        onBlur={() => setHover(null)}
+        onKeyDown={onChartKeyDown}
+      >
         {rows.map((f) => {
           const py = MARGIN.top + f * INNER_H;
           const tVal = tMax - f * (tMax - tMin);
@@ -192,7 +250,7 @@ function DetailChart({ outputId, rangeKey, onRangeChange, visibility, onToggle, 
 
         {timeIdx.map((i) => (
           <text key={i} x={xAt(points[i].date)} y={CHART_H - 6} textAnchor="middle" fontSize="8.5" fill={COLORS.textFaint} fontFamily="JetBrains Mono, monospace">
-            {formatAxisLabel(points[i].date, rangeKey, now)}
+            {formatAxisLabel(points[i].date, rangeKey, points[points.length - 1].date)}
           </text>
         ))}
 
@@ -207,13 +265,25 @@ function DetailChart({ outputId, rangeKey, onRangeChange, visibility, onToggle, 
         )}
         {visibility.loss && <path d={actualLossPath} fill="none" stroke={COLORS.lossTrace} strokeWidth="1.3" strokeLinejoin="round" />}
         {visibility.traffic && <path d={actualTrafficPath} fill="none" stroke={COLORS.trace} strokeWidth="1.6" strokeLinejoin="round" />}
+        {hoverPoint && (
+          <g pointerEvents="none">
+            <line x1={xAt(hoverPoint.date)} x2={xAt(hoverPoint.date)} y1={MARGIN.top} y2={MARGIN.top + INNER_H} stroke={COLORS.text} strokeWidth="1" opacity="0.5" />
+            {visibility.traffic && <circle cx={xAt(hoverPoint.date)} cy={yTraffic(hoverPoint.traffic)} r="3.5" fill={COLORS.trace} />}
+            {visibility.loss && <circle cx={xAt(hoverPoint.date)} cy={yLoss(hoverPoint.loss)} r="3.5" fill={COLORS.lossTrace} />}
+          </g>
+        )}
       </svg>
+      <div id={`readout-${outputId}`} className="chart-readout mono" role="status" aria-live="polite">
+        {hoverPoint
+          ? `${hoverPoint.date.toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })} — trafic ${formatMbps(hoverPoint.traffic)} · pertes ${hoverPoint.loss.toFixed(2)} %${hoverBaseline ? ` · attendu ${formatMbps(hoverBaseline.traffic)}` : ""}`
+          : "Survolez le graphe, ou focalisez-le et utilisez les flèches, pour lire les valeurs."}
+      </div>
       <Legend visibility={visibility} onToggle={onToggle} current={current} />
     </div>
   );
 }
 
-function RangeSelector({ rangeKey, onRangeChange }) {
+function RangeSelector({ rangeKey, onRangeChange }: Pick<DetailChartProps, "rangeKey" | "onRangeChange">) {
   return (
     <div className="range-selector">
       {RANGES.map((r) => (
@@ -231,7 +301,7 @@ function RangeSelector({ rangeKey, onRangeChange }) {
   );
 }
 
-function Legend({ visibility, onToggle, current }) {
+function Legend({ visibility, onToggle, current }: Pick<DetailChartProps, "visibility" | "onToggle" | "current">) {
   return (
     <div className="chart-legend">
       <LegendChip label="Trafic" color={COLORS.trace} active={visibility.traffic} onClick={() => onToggle("traffic")} value={formatMbps(current.traffic)} />
@@ -242,7 +312,9 @@ function Legend({ visibility, onToggle, current }) {
   );
 }
 
-function LegendChip({ label, color, active, onClick, dashed, dotted, value }) {
+function LegendChip({ label, color, active, onClick, dashed, dotted, value }: {
+  label: string; color: string; active: boolean; onClick: () => void; dashed?: boolean; dotted?: boolean; value?: string;
+}) {
   return (
     <button type="button" className={`legend-chip${active ? " active" : ""}`} onClick={onClick} aria-pressed={active}>
       <svg width="14" height="8" aria-hidden="true">
@@ -256,10 +328,12 @@ function LegendChip({ label, color, active, onClick, dashed, dotted, value }) {
 
 // --- Tableau comparatif -------------------------------------------------
 
-const formatGbpsBare = (v) => (v == null ? "—" : (v / 1000).toFixed(2));
-const formatPercentBare = (v) => (v == null ? "—" : v.toFixed(2));
+const formatGbpsBare = (v: number | null | undefined) => (v == null ? "—" : (v / 1000).toFixed(2));
+const formatPercentBare = (v: number | null | undefined) => (v == null ? "—" : v.toFixed(2));
 
-function TrendChip({ current, previous, formatValue, threshold }) {
+function TrendChip({ current, previous, formatValue, threshold }: {
+  current: number | null | undefined; previous: number | null | undefined; formatValue: (v: number) => string; threshold: number;
+}) {
   if (current == null) return <div className="trend-cell"><span className="trend-value mono">—</span></div>;
   if (previous == null) return <div className="trend-cell"><span className="trend-value mono">{formatValue(current)}</span></div>;
   const relative = previous !== 0 ? (current - previous) / Math.abs(previous) : current === 0 ? 0 : 1;
@@ -275,13 +349,13 @@ function TrendChip({ current, previous, formatValue, threshold }) {
   );
 }
 
-async function fetchNearest(outputId, targetDate) {
+async function fetchNearest(outputId: string, targetDate: Date): Promise<TrafficSample | null> {
   const since = new Date(targetDate.getTime() - 35 * 60_000);
   const until = new Date(targetDate.getTime() + 10 * 60_000);
   try {
     const points = await api.history(outputId, since.toISOString(), until.toISOString());
     if (!points.length) return null;
-    let best = null;
+    let best: TrafficSample | null = null;
     let bestDist = Infinity;
     for (const p of points) {
       const d = Math.abs(new Date(p.timestamp).getTime() - targetDate.getTime());
@@ -293,20 +367,25 @@ async function fetchNearest(outputId, targetDate) {
   }
 }
 
-function SummaryTable({ outputIds, thresholds }) {
-  const [rows, setRows] = useState({});
+type CellPair = { key: string; cur: TrafficSample | null; prev: TrafficSample | null };
+
+function SummaryTable({ outputIds, thresholds, serverNow }: { outputIds: string[]; thresholds: Thresholds; serverNow: Date | null }) {
+  const [rows, setRows] = useState<Record<string, CellPair[]>>({});
+  const serverNowRef = useRef(serverNow);
+  serverNowRef.current = serverNow;
 
   const refresh = useCallback(async () => {
-    const now = new Date();
+    const now = serverNowRef.current;
+    if (!now) return;
     const windows = [
       { key: "now", offset: 0 },
       { key: "prev", offset: 5 * 60_000 },
       { key: "day", offset: 24 * 3600_000 },
       { key: "week", offset: 7 * 24 * 3600_000 },
     ];
-    const next = {};
+    const next: Record<string, CellPair[]> = {};
     await Promise.all(
-      outputIds.map(async (id) => {
+      outputIds.map(async (id: string) => {
         const perWindow = await Promise.all(
           windows.map(async (w) => {
             const target = new Date(now.getTime() - w.offset);
@@ -379,7 +458,9 @@ function SummaryTable({ outputIds, thresholds }) {
 
 // --- Panneau de configuration --------------------------------------------
 
-function NumberField({ label, hint, value, onChange, min, max, step }) {
+function NumberField({ label, hint, value, onChange, min, max, step }: {
+  label: string; hint?: string; value: number; onChange: (v: number) => void; min: number; max: number; step: number;
+}) {
   return (
     <label className="settings-field">
       <span className="settings-field-label">{label}</span>
@@ -395,9 +476,29 @@ function NumberField({ label, hint, value, onChange, min, max, step }) {
   );
 }
 
-function SettingsPanel({ config, deltaThresholds, onDeltaThresholdsChange, onSave, saving, saveError }) {
-  const [draft, setDraft] = useState(config.incident);
+function SettingsPanel({ config, deltaThresholds, onDeltaThresholdsChange, onSave, saving, saveError }: {
+  config: AppConfigView; deltaThresholds: Thresholds; onDeltaThresholdsChange: (t: Thresholds) => void;
+  onSave: (draft: IncidentDraft) => void; saving: boolean; saveError: string | null;
+}) {
+  const [draft, setDraft] = useState<IncidentDraft>(config.incident);
   useEffect(() => setDraft(config.incident), [config]);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [session, setSession] = useState<Session | null>(currentSession());
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const submitLogin = async () => {
+    setLoggingIn(true);
+    setLoginError(null);
+    try {
+      setSession(await login(username, password));
+      setPassword(""); // le mot de passe ne reste pas dans l'état
+    } catch (err) {
+      setLoginError(errorMessage(err).includes("429") ? "Trop d'essais : patientez quelques minutes." : "Identifiant ou mot de passe incorrect.");
+    } finally {
+      setLoggingIn(false);
+    }
+  };
 
   const orderIssue = !(draft.close_score < draft.warning_score && draft.warning_score < draft.open_score);
 
@@ -412,7 +513,23 @@ function SettingsPanel({ config, deltaThresholds, onDeltaThresholdsChange, onSav
         <NumberField label="Seuil CLOSED (close_score)" value={draft.close_score} min={0} max={1} step={0.01}
           onChange={(v) => setDraft({ ...draft, close_score: v })} />
         {orderIssue && <p className="settings-warning">Incohérent : il faut close_score &lt; warning_score &lt; open_score. L'enregistrement sera refusé par l'API (§21).</p>}
-        {saveError && <p className="settings-warning">{saveError}</p>}
+        {saveError && <p className="settings-warning" role="alert">{saveError}</p>}
+        {session ? (
+          <p className="settings-field-hint" role="status">
+            Connecté en tant que <strong>{session.username}</strong> (session valable jusqu'à{" "}
+            {session.expiresAt.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}).{" "}
+            <button type="button" className="settings-reset" onClick={() => { logout(); setSession(null); }}>Se déconnecter</button>
+          </p>
+        ) : (
+          <fieldset className="settings-field" aria-describedby="login-hint">
+            <legend className="settings-field-label">Connexion (requise pour enregistrer)</legend>
+            <input aria-label="Identifiant" autoComplete="username" className="settings-input mono" style={{ width: 130 }} value={username} onChange={(e) => setUsername(e.target.value)} />
+            <input aria-label="Mot de passe" type="password" autoComplete="current-password" className="settings-input mono" style={{ width: 150 }} value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && username && password) void submitLogin(); }} />
+            <button type="button" className="settings-reset" disabled={loggingIn || !username || !password} onClick={() => void submitLogin()}>Se connecter</button>
+            {loginError && <span className="settings-warning" role="alert">{loginError}</span>}
+            <span id="login-hint" className="settings-field-hint">Session à durée limitée, gardée en mémoire : effacée au rechargement de la page, jamais écrite dans le navigateur.</span>
+          </fieldset>
+        )}
         <button type="button" className="settings-reset" disabled={saving} onClick={() => onSave(draft)}>
           {saving ? "Envoi à l'API…" : "Envoyer à l'API"}
         </button>
@@ -433,21 +550,22 @@ function SettingsPanel({ config, deltaThresholds, onDeltaThresholdsChange, onSav
 // --- Composant racine -----------------------------------------------------
 
 export default function Dashboard() {
-  const [outputs, setOutputs] = useState([]);
-  const [incidents, setIncidents] = useState([]);
-  const [config, setConfig] = useState(null);
-  const [monitoringStatus, setMonitoringStatus] = useState(null);
-  const [connectionError, setConnectionError] = useState(null);
-  const [expandedCharts, setExpandedCharts] = useState({});
-  const [visibility, setVisibility] = useState({});
-  const [chartRange, setChartRange] = useState({});
+  const [outputs, setOutputs] = useState<OutputSummary[]>([]);
+  const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [config, setConfig] = useState<AppConfigView | null>(null);
+  const [monitoringStatus, setMonitoringStatus] = useState<MonitoringStatus | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [expandedCharts, setExpandedCharts] = useState<Record<string, boolean>>({});
+  const [visibility, setVisibility] = useState<Record<string, Visibility>>({});
+  const [chartRange, setChartRange] = useState<Record<string, string>>({});
   const [tableExpanded, setTableExpanded] = useState(true);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
   const [deltaThresholds, setDeltaThresholds] = useState(DEFAULT_CONFIG_UPDATE_DELTA_THRESHOLDS);
   const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
-  const ensureOutputDefaults = (ids) => {
+  const ensureOutputDefaults = (ids: string[]) => {
     setExpandedCharts((prev) => { const next = { ...prev }; ids.forEach((id) => { if (!(id in next)) next[id] = true; }); return next; });
     setVisibility((prev) => { const next = { ...prev }; ids.forEach((id) => { if (!(id in next)) next[id] = { traffic: true, loss: true, baseline: false, prediction: false }; }); return next; });
     setChartRange((prev) => { const next = { ...prev }; ids.forEach((id) => { if (!(id in next)) next[id] = "12h"; }); return next; });
@@ -455,14 +573,17 @@ export default function Dashboard() {
 
   const refreshTopLevel = useCallback(async () => {
     try {
-      const [outs, incs, status] = await Promise.all([api.outputs(), api.incidents(undefined, 100), api.monitoringStatus()]);
+      const [outs, incs, status, recentAlerts] = await Promise.all([
+        api.outputs(), api.incidents(undefined, 100), api.monitoringStatus(), api.alerts(undefined, 20),
+      ]);
       setOutputs(outs);
       setIncidents(incs);
+      setAlerts(recentAlerts);
       setMonitoringStatus(status);
       setConnectionError(null);
       ensureOutputDefaults(outs.map((o) => o.output_id));
     } catch (err) {
-      setConnectionError(`Impossible de joindre l'API (${err.message}). Vérifiez qu'elle tourne sur l'URL configurée (VITE_API_BASE_URL).`);
+      setConnectionError(`Impossible de joindre l'API (${errorMessage(err)}). Vérifiez qu'elle tourne sur l'URL configurée (VITE_API_BASE_URL).`);
     }
   }, []);
 
@@ -473,7 +594,7 @@ export default function Dashboard() {
     return () => clearInterval(id);
   }, [refreshTopLevel]);
 
-  const saveIncidentConfig = async (draft) => {
+  const saveIncidentConfig = async (draft: IncidentDraft) => {
     setSaving(true);
     setSaveError(null);
     try {
@@ -484,14 +605,14 @@ export default function Dashboard() {
       });
       setConfig(updated);
     } catch (err) {
-      setSaveError("Rejeté par l'API : " + err.message);
+      setSaveError("Rejeté par l'API : " + errorMessage(err));
     } finally {
       setSaving(false);
     }
   };
 
-  const toggleChart = (id) => setExpandedCharts((prev) => ({ ...prev, [id]: !prev[id] }));
-  const toggleSeries = (id, key) => setVisibility((prev) => ({ ...prev, [id]: { ...prev[id], [key]: !prev[id][key] } }));
+  const toggleChart = (id: string) => setExpandedCharts((prev) => ({ ...prev, [id]: !prev[id] }));
+  const toggleSeries = (id: string, key: keyof Visibility) => setVisibility((prev) => ({ ...prev, [id]: { ...prev[id], [key]: !prev[id][key] } }));
 
   if (connectionError) {
     return (
@@ -519,25 +640,27 @@ export default function Dashboard() {
   return (
     <div className="nm-root">
       <style>{BASE_STYLE}</style>
+      <a className="skip-link" href="#nm-main">Aller au contenu</a>
 
-      <div className="nm-header">
-        <div className="nm-title">Signal Room <span>· réseau, branché sur l'API réelle</span></div>
+      <header className="nm-header">
+        <h1 className="nm-title">Signal Room <span>· réseau, branché sur l'API réelle</span></h1>
         <div className="nm-header-meta">
           <div className="nm-live"><span className="nm-live-dot" />{monitoringStatus?.running ? "live" : "arrêté"}</div>
           <div>{outputs.length} sorties · <span className={activeIncidents ? "nm-incident-count" : ""}>{activeIncidents} incident{activeIncidents !== 1 ? "s" : ""} actif{activeIncidents !== 1 ? "s" : ""}</span></div>
           <div className="nm-clock mono">{monitoringStatus ? formatClock(new Date(monitoringStatus.simulated_now)) : "—"}</div>
         </div>
-      </div>
+      </header>
 
-      <div className="nm-channels">
+      <main id="nm-main" tabIndex={-1}>
+      <section className="nm-channels" aria-label="Sorties">
         {outputs.map((output) => {
           const id = output.output_id;
           const style = STATUS_STYLE[output.status] ?? STATUS_STYLE.normal;
           const isActive = output.status === "open" || output.status === "stale";
           const expanded = expandedCharts[id];
           return (
-            <div key={id} className={`nm-channel${isActive ? " is-active" : ""}`} style={{ "--stripe": style.color, borderLeftColor: isActive ? style.color : COLORS.border }}>
-              <div className="nm-channel-head" onClick={() => toggleChart(id)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") toggleChart(id); }}>
+            <div key={id} className={`nm-channel${isActive ? " is-active" : ""}`} style={{ ["--stripe" as string]: style.color, borderLeftColor: isActive ? style.color : COLORS.border }}>
+              <div className="nm-channel-head" onClick={() => toggleChart(id)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggleChart(id); } }}>
                 <div className="nm-channel-id-block">
                   <span className="nm-card-id">{id}</span>
                 </div>
@@ -569,21 +692,21 @@ export default function Dashboard() {
             </div>
           );
         })}
-      </div>
+      </section>
 
-      <div className="nm-panel nm-table-panel">
-        <div className="nm-panel-head" onClick={() => setTableExpanded((v) => !v)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setTableExpanded((v) => !v); }}>
-          <h2>Comparatif temporel</h2>
+      <section className="nm-panel nm-table-panel" aria-labelledby="h-compare">
+        <div className="nm-panel-head" onClick={() => setTableExpanded((v) => !v)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setTableExpanded((v) => !v); } }}>
+          <h2 id="h-compare">Comparatif temporel</h2>
           <button type="button" className="nm-collapse-btn" aria-expanded={tableExpanded} aria-label={tableExpanded ? "Replier le tableau" : "Déplier le tableau"} onClick={(e) => { e.stopPropagation(); setTableExpanded((v) => !v); }}>
             {tableExpanded ? "−" : "+"}
           </button>
         </div>
-        {tableExpanded && <SummaryTable outputIds={outputs.map((o) => o.output_id)} thresholds={deltaThresholds} />}
-      </div>
+        {tableExpanded && <SummaryTable outputIds={outputs.map((o) => o.output_id)} thresholds={deltaThresholds} serverNow={monitoringStatus ? new Date(monitoringStatus.simulated_now) : null} />}
+      </section>
 
-      <div className="nm-panel nm-table-panel">
-        <div className="nm-panel-head" onClick={() => setSettingsExpanded((v) => !v)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setSettingsExpanded((v) => !v); }}>
-          <h2>Configuration</h2>
+      <section className="nm-panel nm-table-panel" aria-labelledby="h-config">
+        <div className="nm-panel-head" onClick={() => setSettingsExpanded((v) => !v)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setSettingsExpanded((v) => !v); } }}>
+          <h2 id="h-config">Configuration</h2>
           <button type="button" className="nm-collapse-btn" aria-expanded={settingsExpanded} aria-label={settingsExpanded ? "Replier la configuration" : "Déplier la configuration"} onClick={(e) => { e.stopPropagation(); setSettingsExpanded((v) => !v); }}>
             {settingsExpanded ? "−" : "+"}
           </button>
@@ -598,11 +721,25 @@ export default function Dashboard() {
             saveError={saveError}
           />
         )}
-      </div>
+      </section>
 
-      <div className="nm-panel">
-        <h2>Incidents (récents et actifs)</h2>
-        <div className="nm-log">
+      <section className="nm-panel" aria-labelledby="h-alerts">
+        <h2 id="h-alerts">Alertes récentes</h2>
+        <div className="nm-log" role="log" aria-live="polite" aria-relevant="additions">
+          {alerts.length === 0 && <div className="nm-log-empty">Aucune alerte pour l'instant.</div>}
+          {alerts.map((a) => (
+            <div className="nm-log-row" key={`${a.incident_id}-${a.timestamp}-${a.event}`}>
+              <span className="nm-log-time mono">{formatClock(new Date(a.timestamp))}</span>
+              <span className="nm-log-dot" style={{ background: a.severity === "critical" ? COLORS.coral : a.severity === "warning" ? COLORS.amber : COLORS.textDim }} />
+              <span className="nm-log-msg">{a.output_id} — {a.event} : {a.message}</span>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="nm-panel" aria-labelledby="h-incidents">
+        <h2 id="h-incidents">Incidents (récents et actifs)</h2>
+        <div className="nm-log" role="log" aria-live="polite" aria-relevant="additions">
           {incidents.length === 0 && <div className="nm-log-empty">Aucun incident pour l'instant.</div>}
           {incidents.map((inc) => (
             <div className="nm-log-row" key={inc.id}>
@@ -612,7 +749,8 @@ export default function Dashboard() {
             </div>
           ))}
         </div>
-      </div>
+      </section>
+      </main>
     </div>
   );
 }
@@ -634,7 +772,7 @@ const BASE_STYLE = `
   .empty-range { color: ${COLORS.textFaint}; font-size: 12px; padding: 30px 10px; text-align: center; border: 1px dashed ${COLORS.border}; margin: 10px 0; }
 
   .nm-header { display: flex; align-items: baseline; justify-content: space-between; border-bottom: 1px solid ${COLORS.border}; padding-bottom: 18px; margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
-  .nm-title { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+  .nm-title { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
   .nm-title span { color: ${COLORS.textDim}; font-weight: 400; }
   .nm-header-meta { display: flex; align-items: center; gap: 22px; font-size: 13px; color: ${COLORS.textDim}; }
   .nm-live { display: flex; align-items: center; gap: 7px; }
@@ -664,6 +802,17 @@ const BASE_STYLE = `
   .range-btn { background: transparent; border: 1px solid ${COLORS.border}; color: ${COLORS.textFaint}; font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 4px 10px; cursor: pointer; }
   .range-btn.active { color: ${COLORS.text}; border-color: ${COLORS.trace}; }
   .range-btn:hover { border-color: ${COLORS.borderBright}; }
+  .range-btn:focus-visible, .legend-chip:focus-visible, .settings-reset:focus-visible, .settings-input:focus-visible, .chart-svg:focus-visible, .skip-link:focus-visible { outline: 2px solid ${COLORS.trace}; outline-offset: 2px; }
+  .skip-link { position: absolute; left: -9999px; top: 8px; background: ${COLORS.panel}; color: ${COLORS.text}; padding: 8px 12px; z-index: 10; }
+  .skip-link:focus { left: 8px; }
+  #nm-main:focus { outline: none; }
+  .chart-readout { min-height: 18px; margin-top: 6px; font-size: 11.5px; color: ${COLORS.textDim}; }
+  @media (max-width: 720px) {
+    .nm-root { padding: 16px 12px; }
+    .nm-header-meta { flex-wrap: wrap; gap: 8px 16px; }
+    .nm-channel-head { gap: 12px; padding: 12px; }
+    .nm-channel-body { padding: 4px 10px 14px; }
+  }
 
   .chart-legend { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
   .legend-chip { display: flex; align-items: center; gap: 6px; background: transparent; border: 1px solid ${COLORS.border}; color: ${COLORS.textFaint}; font-family: 'Space Grotesk', sans-serif; font-size: 11px; padding: 4px 9px; cursor: pointer; }
@@ -672,6 +821,7 @@ const BASE_STYLE = `
 
   .nm-panel { background: ${COLORS.panel}; border: 1px solid ${COLORS.border}; padding: 18px 20px; margin-bottom: 20px; }
   .nm-panel h2 { font-size: 13px; font-weight: 500; color: ${COLORS.textDim}; margin: 0; }
+  .nm-panel-head:focus-visible { outline: 2px solid ${COLORS.trace}; outline-offset: 2px; }
   .nm-panel-head { display: flex; align-items: center; justify-content: space-between; cursor: pointer; margin-bottom: 14px; }
   .nm-table-panel { overflow-x: auto; }
 

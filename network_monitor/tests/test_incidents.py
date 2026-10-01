@@ -65,8 +65,46 @@ def test_full_lifecycle_suspect_open_recovering_closed():
     events = []
     for m, s in [(0, 0.6), (10, 0.85), (20, 0.9), (25, 0.3), (35, 0.1)]:
         events += [a.event for a in mgr.process(_result(m, s))[0]]
-    assert events == ["suspect", "opened", "updated", "recovering", "closed"]
+    # Pas de "updated" : la sévérité n'a pas changé entre 0.85 et 0.9 (§27, anti-spam).
+    assert events == ["suspect", "opened", "recovering", "closed"]
     assert mgr.active_incidents() == []
+
+
+def test_open_incident_does_not_emit_an_alert_per_tick():
+    """Un incident OPEN stable ne doit pas générer une alerte à chaque mesure (§27)."""
+    mgr = _manager()
+    events = []
+    for m in range(0, 120, 5):
+        events += [a.event for a in mgr.process(_result(m, 0.9))[0]]
+    assert events.count("opened") == 1
+    assert len(events) <= 3
+
+
+def test_new_anomaly_within_merge_window_reopens_same_incident():
+    """§22 : un incident intermittent reste un seul incident, pas une suite d'incidents."""
+    mgr = _manager()
+    for m, s in [(0, 0.6), (10, 0.85), (20, 0.9), (25, 0.1), (35, 0.1)]:
+        mgr.process(_result(m, s))
+    assert mgr.active_incidents() == []  # fermé
+    for m, s in [(40, 0.9)]:  # dans merge_window (20 min) après la fermeture à 35
+        _, incident = mgr.process(_result(m, s))
+    assert incident is not None and incident.status == IncidentStatus.OPEN
+    assert incident.opened_at is not None  # même incident, pas un nouveau SUSPECT
+
+
+def test_unconfirmed_suspect_is_not_worth_persisting():
+    """Un signal faible résorbé sans jamais ouvrir n'est que du bruit (§19)."""
+    from network_monitor.incidents.manager import incident_worth_persisting
+
+    mgr = _manager()
+    _, incident = mgr.process(_result(0, 0.6))
+    assert not incident_worth_persisting(incident)
+    _, incident = mgr.process(_result(5, 0.1))
+    assert incident.status == IncidentStatus.CLOSED
+    assert not incident_worth_persisting(incident)
+    for m, s in [(20, 0.6), (30, 0.85)]:
+        _, incident = mgr.process(_result(m, s))
+    assert incident_worth_persisting(incident)  # confirmé (opened_at renseigné)
 
 
 def test_missing_data_suspends_but_does_not_reset_persistence():

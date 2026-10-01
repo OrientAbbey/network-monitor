@@ -15,10 +15,8 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -81,6 +79,7 @@ class IncidentType(str, Enum):
     TRAFFIC_SPIKE = "traffic_spike"
     HIGH_LOSS = "high_loss"
     TRAFFIC_DROP_WITH_HIGH_LOSS = "traffic_drop_with_high_loss"
+    CONGESTION = "congestion"  # trafic en hausse ET pertes en hausse (§25, cas 4)
     PROGRESSIVE_DEGRADATION = "progressive_degradation"
     INTERMITTENT_DEGRADATION = "intermittent_degradation"
 
@@ -140,7 +139,7 @@ class ValidatedSample(BaseModel):
 
     output_id: str
     timestamp: datetime
-    sample: Optional[TrafficSample] = None
+    sample: TrafficSample | None = None
     quality_flags: list[DataQualityFlag] = Field(default_factory=list)
 
     # Drapeaux qui rendent la mesure inutilisable pour le forecasting et
@@ -180,7 +179,7 @@ class ForecastResult(BaseModel):
     model_name: ForecastModelName
 
     @model_validator(mode="after")
-    def bounds_are_consistent(self) -> "ForecastResult":
+    def bounds_are_consistent(self) -> ForecastResult:
         if not (self.lower_bound_mbps <= self.predicted_traffic_mbps <= self.upper_bound_mbps):
             raise ValueError(
                 "l'intervalle prédictif doit vérifier "
@@ -218,14 +217,21 @@ class AnomalyResult(BaseModel):
     persistence_score: float = Field(ge=0, le=1, default=0.0)
     joint_anomaly_score: float = Field(ge=0, le=1)
 
-    traffic_deviation_percent: Optional[float] = None
-    loss_deviation_points: Optional[float] = None
+    traffic_deviation_percent: float | None = None
+    loss_deviation_points: float | None = None
     traffic_out_of_interval: bool = False
 
     data_gap: bool = False
     """Mesure manquante au moment du calcul (§31) : les scores ci-dessus
     reflètent alors une donnée imputée ou une absence de signal, pas une
     observation réelle."""
+
+    features: dict[str, float] = Field(default_factory=dict)
+    """Features calculées pour cette observation (§9) : V1 toujours,
+    étendues si activées."""
+    isolation_score: float | None = Field(default=None, ge=0, le=1)
+    """Score de l'Isolation Forest (§17), si activé. Enrichissement uniquement :
+    il n'entre dans aucun score ci-dessus."""
 
 
 # ---------------------------------------------------------------------------
@@ -243,15 +249,17 @@ class IncidentEvidence(BaseModel):
 
     timestamp: datetime
 
-    traffic_mbps: Optional[float] = None
-    expected_traffic_mbps: Optional[float] = None
-    traffic_deviation_percent: Optional[float] = None
+    traffic_mbps: float | None = None
+    expected_traffic_mbps: float | None = None
+    traffic_deviation_percent: float | None = None
 
-    loss_percent: Optional[float] = None
-    expected_loss_percent: Optional[float] = None
+    loss_percent: float | None = None
+    expected_loss_percent: float | None = None
 
     traffic_anomaly_score: float = Field(ge=0, le=1)
     loss_anomaly_score: float = Field(ge=0, le=1)
+
+    isolation_score: float | None = Field(default=None, ge=0, le=1)
 
     data_gap: bool = False
     """Trou de données pendant un incident OPEN (§31) : le chrono de
@@ -276,10 +284,10 @@ class Incident(BaseModel):
     severity: Severity
     incident_type: IncidentType
 
-    suspected_at: Optional[datetime] = None
-    opened_at: Optional[datetime] = None
+    suspected_at: datetime | None = None
+    opened_at: datetime | None = None
     last_seen_at: datetime
-    closed_at: Optional[datetime] = None
+    closed_at: datetime | None = None
 
     score: float = Field(ge=0, le=1)
 
@@ -290,17 +298,15 @@ class Incident(BaseModel):
     evidence: list[IncidentEvidence] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def timestamps_are_ordered(self) -> "Incident":
-        if self.opened_at is not None and self.suspected_at is not None:
-            if self.opened_at < self.suspected_at:
-                raise ValueError("opened_at ne peut pas précéder suspected_at")
-        if self.closed_at is not None and self.opened_at is not None:
-            if self.closed_at < self.opened_at:
-                raise ValueError("closed_at ne peut pas précéder opened_at")
+    def timestamps_are_ordered(self) -> Incident:
+        if self.opened_at is not None and self.suspected_at is not None and self.opened_at < self.suspected_at:
+            raise ValueError("opened_at ne peut pas précéder suspected_at")
+        if self.closed_at is not None and self.opened_at is not None and self.closed_at < self.opened_at:
+            raise ValueError("closed_at ne peut pas précéder opened_at")
         return self
 
     @property
-    def duration_seconds(self) -> Optional[float]:
+    def duration_seconds(self) -> float | None:
         """Durée depuis l'ouverture effective (opened_at), pas depuis SUSPECT."""
         if self.opened_at is None:
             return None

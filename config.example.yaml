@@ -1,0 +1,43 @@
+# Exemple de configuration (§35). Charger avec : AppConfig.from_yaml("config.yaml")
+# Durées : "5m", "10 minutes", "2h", "30d" ... Tous les champs sont optionnels.
+source:
+  type: mock            # mock | csv (rejeu d'un export) | sql (table en lecture seule)
+  # path: export.csv    # csv : timestamp,output_id,traffic_mbps,loss_percent
+  # url: mysql+pymysql://user:pass@host/db   # sql : jamais renvoyée en clair par GET /config
+  # table: traffic_measurements
+  # columns: {timestamp: ts, output_id: port, traffic_mbps: mbps, loss_percent: loss}
+monitoring:
+  interval: 5m
+history:
+  minimum: 30d          # en dessous, la sortie n'est pas calibrée
+  preferred: 90d
+model_selection:
+  minimum_history: 45d  # en dessous, repli sur la baseline saisonnière
+  validation_window: 7d
+forecast:
+  models: [seasonal_baseline, holt_winters]   # candidats à la sélection automatique
+recalibration:
+  enabled: true
+  interval: 24h         # les plages d'incident actif sont exclues de l'ajustement
+detection:
+  loss:
+    enabled: true
+    loss_std_floor: 0.05
+  isolation_forest:     # confirmation optionnelle (§17), n'ouvre jamais un incident seule
+    enabled: false      # nécessite scikit-learn
+    n_estimators: 100
+    confirm_score: 0.6
+  extended_features:    # §9.2 : calcule et stocke les features étendues
+    enabled: false
+incident:
+  warning_score: 0.50   # doit vérifier close < warning < open
+  open_score: 0.75
+  close_score: 0.40
+  minimum_duration: 15m
+  recovery_duration: 5m
+  min_suspect_steps: 3   # pas au-dessus de warning_score avant de tolérer des creux (intermittents)
+  stale_after: 15m
+  merge_window: 20m     # nouvelle anomalie après fermeture => même incident
+alerts:
+  enabled: true
+  critical_score: 0.80

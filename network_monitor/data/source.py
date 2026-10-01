@@ -12,7 +12,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
 
-from network_monitor.app.models import DataQualityFlag, RawMeasurement, TrafficSample, ValidatedSample
+from network_monitor.app.models import (
+    DataQualityFlag,
+    RawMeasurement,
+    TrafficSample,
+    ValidatedSample,
+)
 
 
 class DataSource(ABC):
@@ -61,6 +66,9 @@ class DataValidator:
         self._late_arrival_tolerance = late_arrival_tolerance or expected_interval
         self._seen_keys: set[tuple[str, datetime]] = set()
         self._last_valid_timestamp: dict[str, datetime] = {}
+        self._missing_emitted_until: dict[str, datetime] = {}
+        """Dernier créneau déjà signalé MISSING par `missing_slots`, pour ne
+        jamais réémettre deux fois le même trou (idempotence, §31)."""
 
     def validate_batch(
         self, raw_measurements: list[RawMeasurement], now: datetime | None = None
@@ -132,6 +140,10 @@ class DataValidator:
         timestamp attendu (au pas `expected_interval`) entre le dernier
         timestamp valide connu pour cette sortie (exclu) et `up_to` (inclus).
 
+        Idempotent : un créneau déjà signalé MISSING lors d'un appel
+        précédent n'est jamais réémis, même si `up_to` recouvre une plage
+        déjà couverte (appelé à chaque tick avec un `up_to` croissant).
+
         Retourne une liste vide si la sortie n'a encore jamais été vue
         (pas de référence temporelle pour détecter un trou).
         """
@@ -139,8 +151,9 @@ class DataValidator:
         if last is None:
             return []
 
+        cursor = max(last, self._missing_emitted_until.get(output_id, last))
         missing: list[ValidatedSample] = []
-        t = last + self._expected_interval
+        t = cursor + self._expected_interval
         while t <= up_to:
             missing.append(
                 ValidatedSample(
@@ -150,6 +163,7 @@ class DataValidator:
                     quality_flags=[DataQualityFlag.MISSING],
                 )
             )
+            self._missing_emitted_until[output_id] = t
             t += self._expected_interval
         return missing
 
