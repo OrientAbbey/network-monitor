@@ -108,3 +108,19 @@ def test_forecasts_and_anomalies_do_not_affect_raw_measurements_table(repo):
         [AnomalyResult(output_id="OUT_001", timestamp=T0, traffic_anomaly_score=0.5, loss_anomaly_score=0.2, joint_anomaly_score=0.5)]
     )
     assert repo.get_history("OUT_001", T0, T0 + timedelta(hours=1)) == []
+
+
+def test_incident_lists_can_skip_evidence_without_altering_what_is_stored(repo):
+    incident = Incident(
+        id="i1", output_id="OUT_001", status=IncidentStatus.OPEN, severity=Severity.WARNING,
+        incident_type=IncidentType.TRAFFIC_DROP, suspected_at=T0, opened_at=T0, last_seen_at=T0 + timedelta(minutes=5),
+        score=0.8, description="d",
+        evidence=[IncidentEvidence(timestamp=T0, traffic_anomaly_score=0.8, loss_anomaly_score=0.1)],
+    )
+    repo.upsert_incident(incident)
+
+    assert repo.list_incidents(with_evidence=False)[0].evidence == []
+    assert repo.list_active_incidents(with_evidence=False)[0].evidence == []
+    assert len(repo.list_incidents()[0].evidence) == 1
+    assert len(repo.list_active_incidents()[0].evidence) == 1
+    assert len(repo.get_incident("i1").evidence) == 1

@@ -43,10 +43,11 @@ def state_running_and_calibrated(client) -> bool:
     return bool(body["running"] and body["calibrated"])
 
 
-def test_health(client):
-    r = client.get("/health")
-    assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+def test_health_ok_while_the_loop_is_ticking(client):
+    _wait_until(lambda: client.get("/health").status_code == 200)
+    body = client.get("/health").json()
+    assert body["status"] == "ok" and body["problems"] == []
+    assert body["seconds_since_last_tick"] is not None
 
 
 def test_monitoring_starts_automatically_via_lifespan(client):
@@ -283,3 +284,96 @@ def test_snapshots_reject_invalid_offsets(client, params):
 
 def test_snapshots_unknown_output_is_404(client):
     assert client.get("/outputs/NOPE/snapshots").status_code == 404
+
+
+# --- /health reflète l'état réel de la boucle --------------------------------
+
+
+def _health_problems(client):
+    r = client.get("/health")
+    assert r.status_code == 503, r.json()
+    assert r.json()["status"] == "unhealthy"
+    return " | ".join(r.json()["problems"])
+
+
+def test_health_is_503_when_monitoring_is_stopped(client):
+    client.post("/monitoring/stop")
+    assert "arrêtée" in _health_problems(client)
+    client.post("/monitoring/start")
+    assert _wait_until(lambda: client.get("/health").status_code == 200)
+
+
+def test_health_is_503_when_no_tick_succeeds_for_too_long(client):
+    _wait_until(lambda: client.get("/health").status_code == 200)
+    api_module.state._last_tick_ok = time.monotonic() - 10_000
+    assert "aucun tick réussi" in _health_problems(client)
+
+
+def test_health_is_503_after_consecutive_tick_failures_then_recovers(client, monkeypatch):
+    _wait_until(lambda: client.get("/health").status_code == 200)
+
+    def boom(now):
+        raise RuntimeError("source indisponible")
+
+    monkeypatch.setattr(api_module.state.loop, "run_tick", boom)
+    assert _wait_until(lambda: api_module.state.consecutive_failures >= api_module.HEALTH_MAX_FAILURES)
+    assert "échecs de tick consécutifs" in _health_problems(client)
+
+    monkeypatch.undo()
+    assert _wait_until(lambda: client.get("/health").status_code == 200)
+
+
+def test_health_is_503_when_the_loop_thread_died(client):
+    _wait_until(lambda: client.get("/health").status_code == 200)
+    thread = api_module.state._thread
+    assert thread is not None
+    api_module.state._stop.set()
+    thread.join(timeout=5)
+    assert "thread de monitoring mort" in _health_problems(client)
+
+
+# --- /incidents : liste sans preuves, détail complet --------------------------
+
+
+def _wait_for_incident(client):
+    def _find():
+        incidents = client.get("/incidents", params={"limit": 200}).json()
+        return next((i for i in incidents if i["output_id"] == "OUT_001" and i["status"] in ("open", "stale")), None)
+
+    return _wait_until(_find)
+
+
+def _inject_long_incident():
+    state = api_module.state
+    start = state.now + timedelta(minutes=5)
+    state.source.add_scenario(
+        AnomalyScenario(
+            scenario_id="LONG", output_id="OUT_001", start_time=start, end_time=start + timedelta(hours=6),
+            type=ScenarioType.TRAFFIC_DROP_HIGH_LOSS, severity=Severity.CRITICAL,
+            traffic_drop_fraction=0.7, loss_offset_points=10.0,
+        )
+    )
+
+
+def test_incident_list_omits_evidence_but_detail_has_it(client):
+    _inject_long_incident()
+    summary = _wait_for_incident(client)
+    assert summary is not None
+    assert "evidence" not in summary
+    detail = _wait_until(lambda: (lambda d: d if len(d["evidence"]) >= 3 else None)(client.get(f"/incidents/{summary['id']}").json()))
+    assert detail is not None
+    assert detail["id"] == summary["id"] and len(detail["evidence"]) >= 3
+
+
+def test_incident_summary_has_every_incident_field_except_evidence():
+    from network_monitor.app.models import Incident
+
+    assert set(api_module.IncidentSummary.model_fields) == set(Incident.model_fields) - {"evidence"}
+
+
+def test_outputs_still_report_the_active_incident_without_loading_evidence(client):
+    _inject_long_incident()
+    summary = _wait_for_incident(client)
+    outputs = _wait_until(lambda: (lambda o: o if o["active_incident_id"] else None)(
+        next(o for o in client.get("/outputs").json() if o["output_id"] == "OUT_001")))
+    assert outputs["active_incident_id"] == summary["id"]

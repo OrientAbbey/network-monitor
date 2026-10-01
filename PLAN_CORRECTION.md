@@ -4,7 +4,7 @@ Suite de `REVUE.md`. Ce document recense ce qui a été corrigé, les défauts t
 
 ## Vérifications
 
-- 146 tests backend, 37 tests frontend, `ruff` et `mypy` sans erreur.
+- 161 tests backend, 37 tests frontend, `ruff` et `mypy` sans erreur.
 - `pip install -e ".[dev]"` et `npm ci` depuis un clone vierge, puis build du frontend.
 - Les tests de non-régression ont été vérifiés en échec sur le code d'origine (backend : 17 échecs et 3 erreurs dans `test_regressions.py` ; frontend : tous les tests dépendant du `Dashboard` échouent sur l'ancien composant).
 - Contrat frontend/backend vérifié contre un vrai serveur `uvicorn`.
@@ -50,6 +50,12 @@ Non vérifié : rendu dans un navigateur réel, Python 3.11 (seul 3.12 était di
 **Horloge du frontend.** Le frontend calculait ses fenêtres avec `new Date()`, alors que le serveur horodate en horloge simulée (300 s par tick de 2 s, soit 150 fois le temps réel). Après 40 s, une fenêtre de 12 h ne renvoyait que 1 point sur 20 disponibles. Les graphes lisent désormais `simulated_now` et omettent `until`.
 
 **Colonne « Actuelle » du tableau comparatif.** Une mesure est datée de son intervalle, donc un pas en retard sur l'horloge : avec l'horloge comme référence, les décalages 0 et 5 min désignaient la même mesure et la tendance était toujours plate. `GET /outputs/{id}/snapshots` prend la dernière mesure comme référence et remplace 24 requêtes par 3.
+
+**Incidents orphelins après redémarrage.** `IncidentManager` démarrait vide : un incident ouvert au moment de l'arrêt restait « actif » en base, jamais suivi ni fermé (1 actif en base, 0 en mémoire après 3 h 20 de fonctionnement normal), et `/outputs` l'affichait ouvert indéfiniment. Chaque redémarrage pendant un incident en laissait un de plus. `IncidentManager.restore()` reprend au premier démarrage l'incident actif le plus récent de chaque sortie (preuves conservées, pas de doublon) et ferme les orphelins déjà présents (`closed_at` = dernière observation). Le délai de récupération repart de zéro : un incident peut rester ouvert un peu plus longtemps après un redémarrage, jamais se fermer trop tôt. Tests : `test_restart.py`.
+
+**`GET /incidents` trop lourd.** Chaque incident embarquait ses preuves (~300 octets par pas de temps) : 25 191 octets pour 8 incidents, rechargés toutes les 4 s par le dashboard (~0,5 Go par jour et par onglet ouvert). La liste renvoie maintenant `IncidentSummary` (sans preuves, et sans même les lire en base) ; `GET /incidents/{id}` les donne. Mesuré après correctif : 2 950 octets pour 7 incidents. Changement d'API : la clé `evidence` n'existe plus dans la liste.
+
+**`/health` aveugle.** Répondait « ok » même boucle arrêtée. Il répond 503 avec la liste des problèmes si la boucle est arrêtée, son thread mort, 3 ticks consécutifs échouent, ou si aucun tick n'a réussi depuis max(3 × `seconds_per_tick`, 60 s). Une boucle arrêtée volontairement via `POST /monitoring/stop` donne donc aussi 503.
 
 **Fichiers annexes WAL non ignorés.** Le mode WAL crée `*.db-wal` et `*.db-shm`, que le `.gitignore` ne couvrait pas (régression introduite par ce travail, corrigée).
 

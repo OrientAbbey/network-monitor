@@ -110,7 +110,22 @@ class MonitoringLoop:
             self._loss_baselines[output_id] = LossBaseline.from_history(
                 history, self._config.detection.loss.loss_std_floor
             )
+        if self._last_calibrated_at is None:
+            self._restore_incidents()  # premier démarrage seulement : une recalibration ne doit pas toucher à l'état
         self._last_calibrated_at = now
+
+    def _restore_incidents(self) -> None:
+        active = self._storage.list_active_incidents()
+        if not active:
+            return
+        superseded = self._incident_manager.restore(active)
+        if superseded:
+            logger.warning(
+                "%d incident(s) actif(s) orphelin(s) fermé(s) : un seul incident actif est suivi par sortie",
+                len(superseded),
+            )
+            self._storage.save_tick([], [], [], superseded)
+        logger.info("%d incident(s) actif(s) repris après redémarrage", len(self._incident_manager.active_incidents()))
 
     def _abnormal_windows(self, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
         """Périodes couvertes par un incident CONFIRMÉ (ouvert au moins une fois), à exclure de la recalibration (§32)."""

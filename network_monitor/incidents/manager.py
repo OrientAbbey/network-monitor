@@ -313,6 +313,39 @@ class IncidentManager:
     def active_incidents(self) -> list[Incident]:
         return [s.incident for s in self._states.values() if s.incident is not None and s.incident.is_active]
 
+    def restore(self, incidents: list[Incident]) -> list[Incident]:
+        """
+        Reprend, après un redémarrage, les incidents actifs enregistrés (SUSPECT, OPEN, STALE) : sans cela
+        l'incident resterait « actif » en base sans que personne ne le fasse évoluer ni ne le ferme.
+
+        Un seul incident actif par sortie peut être suivi : on garde le plus récent. Les plus anciens sont
+        des orphelins (laissés par des redémarrages antérieurs) : ils sont renvoyés fermés (`closed_at` =
+        dernière observation) pour que l'appelant les enregistre.
+
+        Le délai de récupération n'est pas persisté : il repart de zéro. L'incident peut donc rester ouvert
+        un peu plus longtemps, jamais se fermer trop tôt.
+        """
+        by_output: dict[str, list[Incident]] = {}
+        for incident in incidents:
+            if incident.is_active:
+                by_output.setdefault(incident.output_id, []).append(incident)
+
+        superseded: list[Incident] = []
+        for output_id, group in by_output.items():
+            group.sort(key=lambda i: i.last_seen_at)
+            *older, current = group
+            for orphan in older:
+                orphan.status = IncidentStatus.CLOSED
+                orphan.closed_at = orphan.last_seen_at
+                superseded.append(orphan)
+            self._states[output_id] = _OutputState(
+                suspect_since=current.suspected_at or current.last_seen_at,
+                open_since=current.opened_at,
+                incident=current,
+                last_valid_timestamp=current.last_seen_at,
+            )
+        return superseded
+
 
 def _peak(current: float, candidate: float | None) -> float:
     if candidate is None:

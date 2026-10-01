@@ -33,7 +33,7 @@ network_monitor/        Backend Python (le paquet importable)
   incidents/             Moteur d'incidents (machine à états, hystérésis)
   storage/               Persistance SQLite/SQLAlchemy
   evaluation/            Évaluation quantitative (§33) : métriques, banc, CLI
-  tests/                 146 tests (unitaires, scénarios, API, maintenance, évaluation, non-régression)
+  tests/                 161 tests (unitaires, scénarios, API, maintenance, évaluation, non-régression)
 
 frontend/                Dashboard React (Vite), branché sur l'API
   src/
@@ -80,7 +80,7 @@ Ouvrir `http://localhost:5173`.
 
 ```bash
 pip install -e ".[dev]"
-pytest -q                          # 146 tests backend
+pytest -q                          # 161 tests backend
 ruff check network_monitor && mypy network_monitor
 cd frontend && npm test            # 37 tests frontend
 ```

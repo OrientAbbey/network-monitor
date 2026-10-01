@@ -14,16 +14,27 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from network_monitor.app.config import AppConfig, IncidentConfig
 from network_monitor.app.main import MonitoringLoop
-from network_monitor.app.models import Alert, AnomalyResult, ForecastResult, Incident, TrafficSample
+from network_monitor.app.models import (
+    Alert,
+    AnomalyResult,
+    ForecastResult,
+    Incident,
+    IncidentStatus,
+    IncidentType,
+    Severity,
+    TrafficSample,
+)
 from network_monitor.data.mock import MockDataSource
 from network_monitor.storage.repository import Repository, SqlAlchemyRepository
 
@@ -69,6 +80,15 @@ class MonitoringState:
         self._clock_started = False
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        # Santé de la boucle (horloge monotone), lue par /health.
+        self._started_at: float | None = None
+        self._last_tick_ok: float | None = None
+        self.consecutive_failures = 0
+
+    def seconds_since_last_tick(self) -> float | None:
+        """Secondes depuis le dernier tick réussi (ou depuis le démarrage s'il n'y en a pas encore)."""
+        reference = self._last_tick_ok if self._last_tick_ok is not None else self._started_at
+        return None if reference is None else time.monotonic() - reference
 
     def calibrate(self) -> None:
         self.loop.calibrate(self.now)
@@ -84,6 +104,8 @@ class MonitoringState:
                 self.source.start_realtime(self.now)
             self._clock_started = True
         self._stop.clear()
+        self._started_at = time.monotonic()
+        self.consecutive_failures = 0
         self._thread = threading.Thread(target=self._run, name="monitoring-loop", daemon=True)
         self._thread.start()
         self.running = True
@@ -104,7 +126,10 @@ class MonitoringState:
             self.now = self.now + interval
             try:
                 self.loop.run_tick(self.now)
+                self._last_tick_ok = time.monotonic()
+                self.consecutive_failures = 0
             except Exception:  # ne jamais laisser une erreur ponctuelle tuer la boucle
+                self.consecutive_failures += 1
                 logger.exception("Erreur pendant run_tick à %s", self.now)
             # wait plutôt que sleep : stop() réveille le thread immédiatement.
             self._stop.wait(self.seconds_per_tick)
@@ -187,15 +212,50 @@ class ConfigUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# Seuils de /health : échecs de tick consécutifs tolérés, et délai minimal sans tick réussi avant d'alerter
+# (plancher de 60 s : une recalibration peut bloquer la boucle plusieurs secondes).
+HEALTH_MAX_FAILURES = 3
+HEALTH_MIN_STALL_SECONDS = 60.0
+
+
+def _health_problems() -> list[str]:
+    problems = []
+    if not state.calibrated:
+        problems.append("modèles non calibrés")
+    if not state.running:
+        problems.append("boucle de monitoring arrêtée")
+    else:
+        if state._thread is None or not state._thread.is_alive():
+            problems.append("thread de monitoring mort")
+        if state.consecutive_failures >= HEALTH_MAX_FAILURES:
+            problems.append(f"{state.consecutive_failures} échecs de tick consécutifs")
+        age = state.seconds_since_last_tick()
+        if age is not None and age > max(3 * state.seconds_per_tick, HEALTH_MIN_STALL_SECONDS):
+            problems.append(f"aucun tick réussi depuis {age:.0f} s")
+    return problems
+
+
 @app.get("/health")
-def health() -> dict:
-    return {"status": "ok"}
+def health() -> JSONResponse:
+    """
+    200 si la boucle de monitoring tourne et progresse, 503 sinon (avec la liste des problèmes).
+    Une supervision externe (Docker, UptimeRobot…) peut s'y fier : un serveur HTTP vivant dont la
+    boucle est arrêtée ou bloquée ne répond plus « ok ».
+    """
+    problems = _health_problems()
+    age = state.seconds_since_last_tick()
+    body = {
+        "status": "unhealthy" if problems else "ok",
+        "problems": problems,
+        "seconds_since_last_tick": None if age is None else round(age, 1),
+    }
+    return JSONResponse(body, status_code=503 if problems else 200)
 
 
 @app.get("/outputs", response_model=list[OutputSummary])
 def list_outputs() -> list[OutputSummary]:
     interval = state.source.get_interval()
-    active = {i.output_id: i for i in state.storage.list_active_incidents()}
+    active = {i.output_id: i for i in state.storage.list_active_incidents(with_evidence=False)}
     summaries = []
     for output_id in state.source.list_outputs():
         history = state.storage.get_history(output_id, state.now - interval * 3, state.now + interval)
@@ -343,12 +403,35 @@ def output_forecast_ahead(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@app.get("/incidents", response_model=list[Incident])
+class IncidentSummary(BaseModel):
+    """
+    Un incident SANS ses preuves. Les preuves (≈ 300 octets par pas de temps) représentaient l'essentiel
+    d'une liste que le dashboard recharge toutes les 4 s : elles sont servies par `GET /incidents/{id}`.
+    """
+
+    id: str
+    output_id: str
+    status: IncidentStatus
+    severity: Severity
+    incident_type: IncidentType
+    suspected_at: datetime | None
+    opened_at: datetime | None
+    last_seen_at: datetime
+    closed_at: datetime | None
+    score: float
+    current_score: float | None
+    peak_traffic_deviation_percent: float
+    peak_loss_percent: float
+    description: str
+
+
+@app.get("/incidents", response_model=list[IncidentSummary])
 def list_incidents(
     status: list[str] | None = Query(default=None, description="Filtrer par statut : suspect, open, stale, closed"),
     limit: int = Query(default=50, ge=1, le=500),
-) -> list[Incident]:
-    return state.storage.list_incidents(statuses=status, limit=limit)
+) -> list[IncidentSummary]:
+    incidents = state.storage.list_incidents(statuses=status, limit=limit, with_evidence=False)
+    return [IncidentSummary.model_validate(i.model_dump(exclude={"evidence"})) for i in incidents]
 
 
 @app.get("/incidents/{incident_id}", response_model=Incident)

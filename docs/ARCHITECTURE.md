@@ -141,7 +141,7 @@ réellement passée par la boucle de monitoring l'est.
 
 ## 5. Vérifications effectuées
 
-- Suite de tests complète (146 tests backend, 37 tests frontend) exécutée depuis la structure finale
+- Suite de tests complète (161 tests backend, 37 tests frontend) exécutée depuis la structure finale
   du projet (imports vérifiés depuis la racine).
 - `npm run build` du frontend depuis la structure finale.
 - Backend démarré en conditions réelles (`uvicorn`, pas seulement
@@ -174,3 +174,9 @@ réellement passée par la boucle de monitoring l'est.
   applique une migration additive (colonnes nullables uniquement, sinon erreur explicite → Alembic).
 - **`Incident.score`** est le pic du score depuis l'ouverture ; `Incident.current_score` est le dernier
   score (celui dont dérive `severity`).
+- **Reprise après redémarrage** — à la première calibration, `MonitoringLoop` recharge les incidents actifs
+  (`IncidentManager.restore`) : un incident est suivi par sortie, les orphelins plus anciens sont fermés.
+- **Santé** — `GET /health` renvoie 503 si la boucle est arrêtée, bloquée ou en échec répété.
+- **Liste d'incidents** — `GET /incidents` ne renvoie pas les preuves (`IncidentSummary`) ; `GET /incidents/{id}` si.
+  `list_incidents` et `list_active_incidents` acceptent `with_evidence=False` (lecture seule : un incident chargé
+  ainsi ne doit jamais être réécrit par `upsert_incident`).
