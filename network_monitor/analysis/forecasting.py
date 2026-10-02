@@ -22,8 +22,7 @@ from network_monitor.app.models import ForecastModelName, ForecastResult, Traffi
 
 logger = logging.getLogger(__name__)
 
-# Quantile normal à 80% bilatéral, utilisé pour dimensionner l'intervalle
-# prédictif (§13). Valeur fixe et documentée plutôt qu'un choix implicite.
+# Quantile normal à 80 % bilatéral : dimensionne l'intervalle prédictif (§13).
 _Z_80 = 1.2816
 _FORECAST_CONFIDENCE = 0.80
 
@@ -96,12 +95,7 @@ class SeasonalBaselineModel(ForecastModel):
             buckets.setdefault((sample.timestamp.weekday(), slot), []).append(sample.traffic_mbps)
         self._buckets = buckets
         self._slots_per_day = slots_per_day
-        # Dispersion relative globale (§10.A) : avec peu d'historique, un
-        # bucket isolé (peu d'occurrences du même jour/créneau) peut
-        # sous-estimer sa vraie variabilité par pur effet d'échantillonnage.
-        # Ce plancher, mesuré sur l'ensemble des buckets, stabilise
-        # l'estimation locale sans effacer les écarts de dispersion réels
-        # entre créneaux (heures de pointe vs creuses, etc.).
+        # Plancher de dispersion globale (§10.A) : un créneau vu peu de fois sous-estime sa variabilité.
         self._global_relative_mad = self._compute_global_relative_mad(buckets)
 
     @staticmethod
@@ -255,11 +249,6 @@ class HoltWintersModel(ForecastModel):
         return results
 
 
-# ---------------------------------------------------------------------------
-# Sélection de modèle (§11)
-# ---------------------------------------------------------------------------
-
-
 def select_model(
     output_id: str,
     history: list[TrafficSample],
@@ -340,11 +329,6 @@ def _backtest_mae(
     return float(np.mean(errors)) if errors else math.inf
 
 
-# ---------------------------------------------------------------------------
-# Utilitaires internes
-# ---------------------------------------------------------------------------
-
-
 def _infer_interval(history: list[TrafficSample]) -> timedelta:
     """Pas d'échantillonnage : médiane des écarts entre points consécutifs (insensible aux trous)."""
     deltas = sorted(
@@ -363,10 +347,10 @@ def _regular_series(history: list[TrafficSample], interval: timedelta) -> np.nda
     série sans trou : un créneau manquant décalerait toute la saisonnalité qui suit.
     """
     t0 = history[0].timestamp
-    n = int(round((history[-1].timestamp - t0) / interval)) + 1
+    n = round((history[-1].timestamp - t0) / interval) + 1
     values = np.full(n, np.nan)
     for sample in history:
-        idx = int(round((sample.timestamp - t0) / interval))
+        idx = round((sample.timestamp - t0) / interval)
         if 0 <= idx < n:
             values[idx] = sample.traffic_mbps
     missing = np.isnan(values)

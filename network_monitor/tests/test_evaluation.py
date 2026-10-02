@@ -3,6 +3,7 @@
 import json
 import math
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 
 import pytest
 
@@ -182,7 +183,7 @@ def test_default_scenarios_cover_all_types_after_eval_start_without_overlap_per_
     assert all(s.start_time >= T0 + timedelta(hours=3) for s in scenarios)
     for out in {s.output_id for s in scenarios}:
         mine = sorted((s for s in scenarios if s.output_id == out), key=lambda s: s.start_time)
-        assert all(a.end_time <= b.start_time for a, b in zip(mine, mine[1:], strict=False))
+        assert all(a.end_time <= b.start_time for a, b in pairwise(mine))
 
 
 def test_run_evaluation_rejects_scenarios_overlapping_calibration_period():
@@ -232,7 +233,7 @@ def test_evaluation_is_deterministic(small_report):
 def test_cli_writes_json_report(tmp_path, capsys, monkeypatch, small_report):
     import network_monitor.evaluation.__main__ as cli
 
-    monkeypatch.setattr(cli, "run_evaluation", lambda **kwargs: small_report)
+    monkeypatch.setattr(cli, "run_evaluation", lambda **_kwargs: small_report)
     out = tmp_path / "report.json"
     assert cli_main(["--out", str(out), "--json"]) == 0
     data = json.loads(out.read_text(encoding="utf-8"))

@@ -44,9 +44,9 @@ def _record_flags(lp: MonitoringLoop, monkeypatch) -> list[list[DataQualityFlag]
     seen: list[list[DataQualityFlag]] = []
     original = lp._process_validated_sample
 
-    def spy(validated, now):
+    def spy(validated):
         seen.append(list(validated.quality_flags))
-        return original(validated, now)
+        return original(validated)
 
     monkeypatch.setattr(lp, "_process_validated_sample", spy)
     return seen
@@ -95,7 +95,7 @@ def test_duplicate_measurement_is_not_treated_as_data_gap(loop):
     duplicate = validator.validate_batch([m], now=NOW + IV)[0]
     assert DataQualityFlag.DUPLICATE in duplicate.quality_flags
 
-    assert lp._process_validated_sample(duplicate, NOW + IV) == (None, None, None, [])
+    assert lp._process_validated_sample(duplicate) == (None, None, None, [])
     # aucun incident (ni preuve `data_gap`) n'a pu être créé par ce doublon
     assert lp.incident_manager.active_incidents() == []
 

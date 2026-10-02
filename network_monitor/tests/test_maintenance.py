@@ -159,7 +159,7 @@ def test_recalibration_failure_keeps_running_with_previous_models(tmp_path):
     try:
         before = dict(loop._forecast_models)
 
-        def boom(now, exclude_windows=None):
+        def boom(_now, _exclude_windows=None):
             raise RuntimeError("source indisponible")
 
         loop.calibrate = boom

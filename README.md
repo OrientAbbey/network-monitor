@@ -1,9 +1,7 @@
-# Network Monitor — projet complet (backend + frontend)
+# Network Monitor
 
-Système de détection d'anomalies réseau non supervisée : backend Python
-(FastAPI) + dashboard React branché dessus par de vrais appels réseau.
-Aucune simulation côté client — toutes les données affichées viennent du
-backend, qui les génère (source Mock), les analyse et les stocke.
+Détection d'anomalies réseau non supervisée (trafic et pertes) : backend Python (FastAPI) et dashboard React.
+Le backend génère les mesures (source Mock), les analyse, les stocke et les expose ; le dashboard ne fait que les afficher.
 
 ## État du projet
 
@@ -57,13 +55,14 @@ requirements.txt         Dépendances Python (pyproject.toml : idem + outils de 
 **1. Backend :**
 
 ```bash
-pip install -r requirements.txt --break-system-packages
-python -m uvicorn network_monitor.app.api:app --reload
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+python -m uvicorn network_monitor.app.api:app
 ```
 
-L'API calibre automatiquement 3 sorties Mock et lance le monitoring au
-démarrage (compter quelques secondes). Documentation interactive sur
-`http://127.0.0.1:8000/docs`.
+L'API calibre 3 sorties Mock et lance le monitoring au démarrage (quelques secondes).
+Documentation interactive : `http://127.0.0.1:8000/docs`. Un seul processus est supporté (l'état est en
+mémoire) : pas de `--workers` supérieur à 1.
 
 **2. Frontend**, dans un second terminal :
 
@@ -105,45 +104,24 @@ virgules, défaut : `http://localhost:5173,http://127.0.0.1:5173`). Recalibratio
 
 ## Ce que fait le dashboard
 
-Reprend l'identité visuelle "Signal Room" (console façon oscilloscope/radar)
-des maquettes précédentes, mais entièrement branché sur l'API réelle :
+Interface « Signal Room » :
 
-- **Vue par sortie**, repliable : statut courant, graphe détaillé (double
-  axe trafic/pertes, plages 12 h/1 j/1 sem/1 mois), courbes masquables
-  (trafic, pertes, baseline, prédiction — ces deux dernières récupérées
-  via `/outputs/{id}/forecast` et `/outputs/{id}/forecast/ahead`).
-- **Tableau comparatif** : trafic (Gbps) et pertes (%), 4 fenêtres
-  temporelles, variations colorées au-delà d'un seuil ajustable.
-- **Panneau de configuration** : les seuils du moteur d'incidents sont
-  envoyés à l'API via `PUT /config` et s'appliquent réellement à la
-  détection en cours — pas un réglage cosmétique local.
-- **Liste des incidents**, actifs et récents, lue directement depuis
-  `GET /incidents`.
+- **Vue par sortie**, repliable : statut courant et graphe détaillé (double axe trafic/pertes, plages
+  12 h, 1 j, 1 sem, 1 mois) ; courbes masquables : trafic, pertes, baseline, prédiction.
+- **Tableau comparatif** : trafic (Gbps) et pertes (%) sur 4 fenêtres temporelles, variations colorées
+  au-delà d'un seuil ajustable.
+- **Configuration** : les seuils du moteur d'incidents sont envoyés par `PUT /config` et s'appliquent
+  à la détection en cours.
+- **Incidents**, actifs et récents (`GET /incidents`).
 
 ## Point d'attention important : le temps réel du Mock
 
-Le backend n'a de données que depuis son démarrage — il ne peut pas
-fabriquer un mois d'historique à la demande comme le ferait une pure
-simulation cliente. Pour rester utilisable en démonstration, la source
-Mock avance son horloge simulée à un rythme accéléré (2 secondes réelles
-par pas de 5 minutes simulées, voir `MonitoringState.seconds_per_tick`
-dans `app/api.py`) — mais une plage "1 mois" nécessite quand même environ
-5 heures de fonctionnement réel du serveur avant d'avoir de quoi
-l'afficher. Le dashboard gère ce cas proprement (message explicite plutôt
-qu'un graphe vide ou cassé) plutôt que de le cacher. Voir
-`docs/ARCHITECTURE.md` pour le détail.
+Le backend n'a de données que depuis son démarrage. La source Mock fait avancer son horloge simulée
+à un rythme accéléré (2 s réelles pour 5 min simulées, `MonitoringState.seconds_per_tick` dans
+`app/api.py`), mais une plage « 1 mois » demande tout de même environ 5 heures de fonctionnement réel.
+Avant cela, le dashboard affiche un message explicite plutôt qu'un graphe vide. Détail dans
+`docs/ARCHITECTURE.md`.
 
-**Conséquence pour tout client de l'API** : les horodatages sont dans l'horloge *simulée*, qui avance
-150× plus vite que l'horloge réelle. Ne jamais calculer une fenêtre avec `new Date()` : lire
-`simulated_now` (`GET /monitoring/status`), ou omettre `until` (le serveur prend alors sa propre
-horloge). Le dashboard faisait l'erreur — après 40 s, 1 point sur 21 seulement était récupéré.
-
-## Historique du projet
-
-Ce projet a été construit en plusieurs étapes : d'abord le backend seul
-(cahier des charges réseau, `docs/CAHIER_DES_CHARGES_RESEAU.md`), puis des
-maquettes de dashboard purement simulées côté client (utiles pour valider
-le design avant de coder l'intégration réelle), puis l'API FastAPI, et
-enfin ce frontend branché dessus. Les maquettes simulées ne sont pas
-incluses ici : ce projet est la version connectée, destinée à être
-réellement utilisée.
+**Pour tout client de l'API** : les horodatages sont dans l'horloge simulée, 150 fois plus rapide que
+l'horloge réelle. Ne calculez jamais une fenêtre avec l'heure locale : lisez `simulated_now`
+(`GET /monitoring/status`) ou omettez `until`, le serveur prend alors sa propre horloge.

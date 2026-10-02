@@ -186,7 +186,7 @@ class MonitoringLoop:
         tick_incidents: list[Incident] = []
         tick_alerts: list[Alert] = []
         for v in validated:
-            forecast, anomaly, incident, alerts = self._process_validated_sample(v, now)
+            forecast, anomaly, incident, alerts = self._process_validated_sample(v)
             tick_alerts.extend(alerts)
             if forecast is not None:
                 tick_forecasts.append(forecast)
@@ -202,7 +202,7 @@ class MonitoringLoop:
         self._maybe_purge(now)
 
     def _process_validated_sample(
-        self, validated, now: datetime
+        self, validated
     ) -> tuple[ForecastResult | None, AnomalyResult | None, Incident | None, list[Alert]]:
         """Renvoie ce qui doit être persisté pour cette mesure (l'écriture est groupée dans `run_tick`)."""
         output_id = validated.output_id

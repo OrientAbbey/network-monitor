@@ -119,7 +119,7 @@ class IncidentManager:
 
         touched_incident = state.incident
         if state.incident is None:
-            alerts = self._process_no_incident(result, state, min_duration, expected_traffic_mbps, expected_loss_percent, observed_traffic_mbps, observed_loss_percent)
+            alerts = self._process_no_incident(result, state, expected_traffic_mbps, expected_loss_percent, observed_traffic_mbps, observed_loss_percent)
             touched_incident = state.incident
         else:
             # `touched_incident` référence déjà l'objet muté en place, y compris
@@ -131,7 +131,7 @@ class IncidentManager:
     # -- Pas d'incident en cours ------------------------------------------------
 
     def _process_no_incident(
-        self, result, state: _OutputState, min_duration, expected_traffic, expected_loss, observed_traffic, observed_loss
+        self, result, state: _OutputState, expected_traffic, expected_loss, observed_traffic, observed_loss
     ) -> list[Alert]:
         """Aucun incident en cours : seule l'entrée en SUSPECT peut se produire ici."""
         alerts: list[Alert] = []

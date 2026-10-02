@@ -40,22 +40,10 @@ from network_monitor.storage.repository import Repository, SqlAlchemyRepository
 
 logger = logging.getLogger(__name__)
 
-# Configuration par défaut de l'API — distincte de AppConfig.defaults().
-# Avec l'historique "préféré" du cahier des charges (90 jours, au-delà du
-# seuil de 45 jours déclenchant la sélection de modèle), la calibration
-# ajuste Holt-Winters sur chaque sortie : plusieurs secondes, parfois sans
-# converger (cf. avertissements statsmodels rencontrés en développement).
-# Cela bloquerait le démarrage de l'API (le lifespan attend la calibration
-# avant de répondre aux requêtes). En contexte de démonstration/développement
-# avec source Mock, un historique plus court reste sous le seuil et retombe
-# sur la Seasonal Baseline, nettement plus rapide (§11). Un déploiement réel
-# peut toujours passer AppConfig.defaults() explicitement à MonitoringState.
+# Configuration par défaut de l'API, distincte de AppConfig.defaults() : avec 90 jours d'historique,
+# la calibration ajuste Holt-Winters sur chaque sortie (plusieurs secondes) et bloquerait le démarrage.
+# 40 jours restent sous le seuil de sélection de modèle : on retombe sur la baseline saisonnière (§11).
 DEFAULT_API_CONFIG = AppConfig(history={"minimum": "30d", "preferred": "40d"})
-
-
-# ---------------------------------------------------------------------------
-# État du service : configuration, boucle, thread d'exécution
-# ---------------------------------------------------------------------------
 
 
 class MonitoringState:
@@ -167,11 +155,6 @@ app.add_middleware(
 )
 
 
-# ---------------------------------------------------------------------------
-# Schémas de réponse spécifiques à l'API (au-delà des modèles du cœur métier)
-# ---------------------------------------------------------------------------
-
-
 class OutputSummary(BaseModel):
     output_id: str
     latest_sample: TrafficSample | None = None
@@ -180,7 +163,7 @@ class OutputSummary(BaseModel):
 
 
 class Snapshot(BaseModel):
-    """Mesure la plus proche de « dernière mesure − offset », avec sa voisine 5 minutes plus tôt (pour la tendance)."""
+    """Mesure la plus proche de « dernière mesure - offset », avec sa voisine 5 minutes plus tôt (pour la tendance)."""
 
     offset_seconds: int
     current: TrafficSample | None = None
@@ -205,11 +188,6 @@ class ConfigUpdate(BaseModel):
     minimum_duration_seconds: float | None = Field(default=None, gt=0)
     recovery_duration_seconds: float | None = Field(default=None, gt=0)
     critical_score: float | None = Field(default=None, ge=0.0, le=1.0)
-
-
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
 
 
 # Seuils de /health : échecs de tick consécutifs tolérés, et délai minimal sans tick réussi avant d'alerter

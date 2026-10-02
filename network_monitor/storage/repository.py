@@ -249,7 +249,7 @@ class Repository(ABC):
         ...
 
     def dispose(self) -> None:
-        """Libère les ressources de stockage. No-op par défaut (implémentations en mémoire, etc.)."""
+        """Libère les ressources de stockage. Sans effet par défaut."""
         return None
 
     @abstractmethod
@@ -549,7 +549,5 @@ def _incident_from_row(row: IncidentRow, with_evidence: bool = True) -> Incident
         peak_traffic_deviation_percent=row.peak_traffic_deviation_percent,
         peak_loss_percent=row.peak_loss_percent,
         description=row.description,
-        # `model_dump(mode="json")` sérialise les timestamps en ISO 8601 UTC ;
-        # Pydantic les re-parse directement en datetime timezone-aware.
         evidence=[IncidentEvidence.model_validate(e) for e in row.evidence] if with_evidence else [],
     )

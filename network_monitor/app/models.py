@@ -1,14 +1,6 @@
 """
-Modèles de données communs du système de surveillance réseau.
-
-Ce module ne contient aucune logique métier : il définit uniquement les
-contrats de données partagés entre les couches DataSource, ForecastModel,
-AnomalyDetector et IncidentManager (cf. cahier des charges §5, §23, §24).
-
-Choix d'implémentation : Pydantic v2 est utilisé plutôt que des
-dataclasses simples, afin de bénéficier gratuitement de la validation
-d'entrée (contraintes du §3) et d'une compatibilité directe avec FastAPI
-pour l'exposition future d'une API (§37).
+Modèles de données partagés entre DataSource, ForecastModel, AnomalyDetector et IncidentManager
+(cahier des charges §5, §23, §24). Pydantic valide les entrées (§3) et s'intègre directement à FastAPI.
 """
 
 from __future__ import annotations
@@ -17,10 +9,6 @@ from datetime import datetime
 from enum import Enum
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-
-# ---------------------------------------------------------------------------
-# Enums
-# ---------------------------------------------------------------------------
 
 
 class DataQualityFlag(str, Enum):
@@ -81,11 +69,6 @@ class IncidentType(str, Enum):
     TRAFFIC_DROP_WITH_HIGH_LOSS = "traffic_drop_with_high_loss"
     PROGRESSIVE_DEGRADATION = "progressive_degradation"
     INTERMITTENT_DEGRADATION = "intermittent_degradation"
-
-
-# ---------------------------------------------------------------------------
-# Mesures brutes
-# ---------------------------------------------------------------------------
 
 
 class RawMeasurement(BaseModel):
@@ -161,11 +144,6 @@ class ValidatedSample(BaseModel):
         return not self._BLOCKING_FLAGS.intersection(self.quality_flags)
 
 
-# ---------------------------------------------------------------------------
-# Forecasting
-# ---------------------------------------------------------------------------
-
-
 class ForecastResult(BaseModel):
     """Résultat d'une prévision de trafic pour un horizon donné (§13)."""
 
@@ -190,11 +168,6 @@ class ForecastResult(BaseModel):
     def interval_width_mbps(self) -> float:
         """Largeur de l'intervalle attendu, utilisée pour normaliser le score (§16.1)."""
         return self.upper_bound_mbps - self.lower_bound_mbps
-
-
-# ---------------------------------------------------------------------------
-# Détection d'anomalies
-# ---------------------------------------------------------------------------
 
 
 class AnomalyResult(BaseModel):
@@ -224,11 +197,6 @@ class AnomalyResult(BaseModel):
     """Mesure manquante au moment du calcul (§31) : les scores ci-dessus
     reflètent alors une donnée imputée ou une absence de signal, pas une
     observation réelle."""
-
-
-# ---------------------------------------------------------------------------
-# Incidents
-# ---------------------------------------------------------------------------
 
 
 class IncidentEvidence(BaseModel):
@@ -294,12 +262,10 @@ class Incident(BaseModel):
 
     @model_validator(mode="after")
     def timestamps_are_ordered(self) -> Incident:
-        if self.opened_at is not None and self.suspected_at is not None:
-            if self.opened_at < self.suspected_at:
-                raise ValueError("opened_at ne peut pas précéder suspected_at")
-        if self.closed_at is not None and self.opened_at is not None:
-            if self.closed_at < self.opened_at:
-                raise ValueError("closed_at ne peut pas précéder opened_at")
+        if self.opened_at is not None and self.suspected_at is not None and self.opened_at < self.suspected_at:
+            raise ValueError("opened_at ne peut pas précéder suspected_at")
+        if self.closed_at is not None and self.opened_at is not None and self.closed_at < self.opened_at:
+            raise ValueError("closed_at ne peut pas précéder opened_at")
         return self
 
     @property
@@ -314,11 +280,6 @@ class Incident(BaseModel):
     def is_active(self) -> bool:
         """Un incident SUSPECT, OPEN ou STALE nécessite encore un suivi actif."""
         return self.status in (IncidentStatus.SUSPECT, IncidentStatus.OPEN, IncidentStatus.STALE)
-
-
-# ---------------------------------------------------------------------------
-# Alertes
-# ---------------------------------------------------------------------------
 
 
 class AlertEvent(str, Enum):

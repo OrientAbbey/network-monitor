@@ -136,7 +136,7 @@ def test_orphans_from_previous_restarts_are_closed_on_startup(tmp_path):
     seed.upsert_incident(_incident("current", last_seen_min=-10))
     seed.dispose()
 
-    loop, repo = _start(url, NOW)
+    _loop, repo = _start(url, NOW)
     try:
         assert [i.id for i in repo.list_active_incidents()] == ["current"]
         for orphan_id in ("orphan-1", "orphan-2"):

@@ -12,14 +12,9 @@ import {
   niceDomain,
 } from "./lib.js";
 
-/* ---------------------------------------------------------------------
-   "Signal Room" — même identité visuelle que la maquette v2, mais toutes
-   les données viennent maintenant du vrai backend (../../app/api.py) via
-   des appels réseau. Différence structurante par rapport à la maquette :
-   le backend réel n'a de données que depuis son démarrage — impossible de
-   fabriquer un mois d'historique à la demande. Les plages longues peuvent
-   donc légitimement être vides juste après le lancement (voir EmptyRange).
---------------------------------------------------------------------- */
+/* "Signal Room" : toutes les données viennent du backend (network_monitor/app/api.py).
+   Il n'en a que depuis son démarrage : les plages longues peuvent être vides juste après le
+   lancement (voir EmptyRange). */
 
 const COLORS = {
   bg: "#060B0A",

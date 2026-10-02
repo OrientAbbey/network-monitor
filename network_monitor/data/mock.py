@@ -18,10 +18,6 @@ from pydantic import BaseModel, Field
 from network_monitor.app.models import Severity, TrafficSample
 from network_monitor.data.source import DataSource
 
-# ---------------------------------------------------------------------------
-# Profils de sortie
-# ---------------------------------------------------------------------------
-
 
 class OutputProfile(BaseModel):
     """
@@ -76,11 +72,6 @@ DEFAULT_PROFILES: list[OutputProfile] = [
         loss_noise_std=0.015,  # dispersion quasi nulle : exerce loss_std_floor
     ),
 ]
-
-
-# ---------------------------------------------------------------------------
-# Scénarios d'anomalie
-# ---------------------------------------------------------------------------
 
 
 class ScenarioType(str, Enum):
@@ -184,11 +175,6 @@ def _scenario_effect(scenario: AnomalyScenario, elapsed: np.ndarray) -> tuple[np
     return np.ones_like(e), np.zeros_like(e)
 
 
-# ---------------------------------------------------------------------------
-# MockDataSource
-# ---------------------------------------------------------------------------
-
-
 class MockDataSource(DataSource):
     """
     Générateur Mock (§7). Fonctionne immédiatement sans source réelle,
@@ -213,8 +199,6 @@ class MockDataSource(DataSource):
         # Réentrant : get_latest() appelle _generate_range().
         self._lock = threading.RLock()
         self._clock: datetime | None = None
-
-    # -- Contrat DataSource ------------------------------------------------
 
     def list_outputs(self) -> list[str]:
         return list(self._profiles.keys())
@@ -242,8 +226,6 @@ class MockDataSource(DataSource):
             self._clock = window_end
             return self._generate_range(window_start, window_end)
 
-    # -- Scénarios -----------------------------------------------------------
-
     def add_scenario(self, scenario: AnomalyScenario) -> None:
         if scenario.output_id not in self._profiles:
             raise ValueError(f"Sortie inconnue pour le scénario : {scenario.output_id}")
@@ -258,8 +240,6 @@ class MockDataSource(DataSource):
         """
         with self._lock:
             return list(self._scenarios)
-
-    # -- Génération interne ---------------------------------------------------
 
     def _generate_range(self, start: datetime, end: datetime) -> list[TrafficSample]:
         if end <= start:

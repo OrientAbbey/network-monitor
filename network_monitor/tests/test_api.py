@@ -312,7 +312,7 @@ def test_health_is_503_when_no_tick_succeeds_for_too_long(client):
 def test_health_is_503_after_consecutive_tick_failures_then_recovers(client, monkeypatch):
     _wait_until(lambda: client.get("/health").status_code == 200)
 
-    def boom(now):
+    def boom(_now):
         raise RuntimeError("source indisponible")
 
     monkeypatch.setattr(api_module.state.loop, "run_tick", boom)
