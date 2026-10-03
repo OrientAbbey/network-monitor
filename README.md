@@ -36,7 +36,7 @@ network_monitor/        Backend Python (le paquet importable)
   analysis/              Prévision, détection, features (§9), Isolation Forest (§17), évaluation (§33), disponibilité
   incidents/             Moteur d'incidents (machine à états, hystérésis)
   storage/               Persistance SQLite/SQLAlchemy, archive Parquet des mesures purgées
-  tests/                 tests (unitaires, scénarios, API, sources, régressions)
+  tests/                 Tests unitaires, scénarios, API, sources, régressions
 
 frontend/                Dashboard React + TypeScript strict (Vite), branché sur l'API
   src/

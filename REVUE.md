@@ -17,20 +17,20 @@ protocole détaillé dans « Mesures »). Évaluation : `python -m network_monit
 | Cas « trafic ↑ + pertes ↑ » classé en chute | type `congestion` | test |
 | `warning_score` non comparé à `open_score`/`close_score` | validation `close < warning < open` (aussi via `PUT /config`) | 422 |
 | `PUT /config` muait la constante partagée `DEFAULT_API_CONFIG` | copie profonde par instance | test |
-| Aucune authentification ; CORS `*` | jeton `NM_API_TOKEN` sur start/stop/config (503 si non configuré), CORS restreint (`NM_CORS_ORIGINS`), `/docs` masqué hors `development` | 401/422 vérifiés sur un serveur réel |
+| Aucune authentification ; CORS `*` | CORS restreint (`NM_CORS_ORIGINS`), `/docs` masqué hors `development` ; endpoints de contrôle d'abord protégés par `NM_API_TOKEN` (503 s'il est absent), puis par `POST /auth/login` — voir la ligne suivante | 401/422 vérifiés sur un serveur réel |
 | `since` naïf → HTTP 500 ; plage non bornée | 422 si datetime naïf ; plage max 31 jours | tests |
 | Champs de config sans effet (`detection.traffic`, `isolation_forest`, `extended_features`, `forecast.horizon`, `alerts.warning_score`) | supprimés ; `loss.enabled`, `forecast.models`, `history.minimum` câblés | grep : plus aucun champ orphelin |
 | 3 champs d'anomalie perdus à l'écriture ; pas d'index ; pas de purge ; pas de `dispose()` | colonnes ajoutées, index `status`/`last_seen_at`, WAL, `purge_older_than`, `dispose()` | tests de repository |
 | Recalibration (§32) absente ; historique rechargé N fois à la calibration | recalibration périodique excluant les incidents actifs ; un seul chargement | — |
 | Bug clavier : Entrée/Espace sur le bouton interne déclenchait 2 bascules | garde `e.target === e.currentTarget` | lecture du code (non testé en navigateur) |
 | Tests dépendants de `sleep`, de `mktemp`, connexions non fermées | attentes actives, `tmp_path`, `dispose()` | suite 44 s → 19 s |
-| Dépendances inutilisées (polars, scipy, scikit-learn) | retirées | 0 import |
+| Dépendances inutilisées (polars, scipy, scikit-learn) | retirées ; polars revenue plus tard pour le CSV/Parquet et scikit-learn en option pour Isolation Forest (lignes suivantes) | 0 import |
 | Features §9 absentes | `analysis/features.py` (V1) et `features_extended.py` (§9.2, activable) ; V1 stockées avec chaque anomalie | `tests/test_features.py` |
 | Aucun détecteur de confirmation (§17) | `IsolationForestDetector` optionnel : enrichit les preuves, ne décide jamais (mêmes incidents avec et sans) | test comparant deux exécutions |
 | Une seule source (Mock) | `CsvDataSource` (rejeu) et `SqlDataSource` (table en lecture seule, identifiants validés, URL jamais renvoyée en clair) choisies par `source.type` | contrat commun testé sur les 3 sources |
 | 5 commits par tick | `Repository.save_tick` : une transaction, un commit | test qui compte les commits |
-| 39 erreurs mypy, 12 alertes ruff | tables SQLAlchemy en `Mapped[...]`, `Annotated` pour FastAPI | `mypy` et `ruff` sans erreur |
-| Frontend : décimation, infobulle, repères, tests, TypeScript | décimation min/max (pics conservés), graphe lisible à la souris et au clavier, `header`/`main`/`section`, lien d'évitement, zones `aria-live`, panneau d'alertes ; `api.ts`/`types.ts`/`chart.ts` typés ; Vitest + Testing Library | `npm run typecheck && npm test` (16 tests) |
+| 39 erreurs mypy, 12 alertes ruff | tables SQLAlchemy en `Mapped[...]`, `Annotated` pour FastAPI | `ruff` sans erreur ; `mypy` : 0 erreur de code, mais 3 `import-untyped` — les stubs tiers de `yaml`, `statsmodels` et `scikit-learn` ne sont pas installés (`types-PyYAML` faltait) |
+| Frontend : décimation, infobulle, repères, tests, TypeScript | décimation min/max (pics conservés), graphe lisible à la souris et au clavier, `header`/`main`/`section`, lien d'évitement, zones `aria-live`, panneau d'alertes ; `api.ts`/`types.ts`/`chart.ts` typés ; Vitest + Testing Library | `npm run typecheck && npm test` (34 tests) |
 | ~10 faux incidents ouverts par jeu de 3 graines (7 j normaux) | `minimum_duration` 10 → 15 min, `recovery_duration` 10 → 5 min, `min_suspect_steps` = 3, choisis par balayage | tableau « Mesures » : 51 → 7 faux incidents sur 162 sorties-jours |
 | Types `progressive_degradation` / `intermittent_degradation` jamais produits | motif temporel sur la magnitude de l'écart (alternance avec hystérésis, rampe corrélée), réévalué à chaque pas et figé pendant le retour à la normale ; un SUSPECT tolère les creux après `min_suspect_steps` pas actifs, pour qu'un intermittent reste un seul incident | exactitude des types 84/87 (96,6 %) sur 96 scénarios ; `tests/test_incident_patterns.py` |
 | Pertes *inférieures* à l'habitude comptées comme anomalie (une sortie stable écrêtée à 0 % ouvrait un incident sévère) | seule une hausse des pertes est une anomalie (§25) | test |
@@ -38,7 +38,7 @@ protocole détaillé dans « Mesures »). Évaluation : `python -m network_monit
 | Isolation Forest qui ne séparait pas les paliers | deux forêts (niveau, dynamique), score = maximum, calibré sur l'entraînement, garde d'extrapolation | palier soutenu à 1,00 contre 0,05 en moyenne en normal |
 | Source SQL non éprouvée sur MariaDB | testée sur MariaDB 10.11 réel (contrat, boucle de bout en bout, connexion coupée) ; `pool_pre_ping` ajouté (le test échoue sans) | `NM_TEST_MARIADB_URL` |
 | Jeton en mémoire, pas d'authentification d'utilisateur | `POST /auth/login` : mots de passe scrypt (`NM_USERS`), jeton de session signé HMAC à expiration, 5 échecs / 5 min bloquent la connexion, identité journalisée ; jeton machine conservé | `tests/test_auth.py` (expiration, falsification, limitation) |
-| `Dashboard.jsx` hors du typage ; infobulle à la souris non testée | `Dashboard.tsx` en TypeScript strict (`allowJs` retiré) ; calcul du pointeur extrait (`pointerToTime`) et testé, géométrie du SVG simulée | `npm run typecheck`, 24 tests Vitest |
+| `Dashboard.jsx` hors du typage ; infobulle à la souris non testée | `Dashboard.tsx` en TypeScript strict (`allowJs` retiré) ; calcul du pointeur extrait (`pointerToTime`) et testé, géométrie du SVG simulée | `npm run typecheck`, 34 tests Vitest |
 
 | Dashboard : ~66 Ko par cycle de rafraîchissement, aucune compression | gzip (≥ 500 o), ETag + `Cache-Control: no-cache` (304 sans corps), rafraîchissement **incrémental** des graphes (`since` = dernier point connu, fusion par horodatage), polling suspendu quand l'onglet est masqué | 66,0 → 1,7 Ko par cycle (38×), voir « Mesures » |
 | Plusieurs workers = plusieurs boucles sur la même base | verrou de fichier du noyau (`app/lock.py`) : refus de démarrer, y compris sur `--workers 2` (uvicorn s'arrête) et `WEB_CONCURRENCY > 1` ; libéré même après un `kill -9` | `tests/test_http_and_lock.py` (dont deux processus) |
