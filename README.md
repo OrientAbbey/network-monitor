@@ -12,11 +12,12 @@ complète et le suivi des correctifs sont dans **[`REVUE.md`](REVUE.md)**.
 
 Limites connues :
 
-- Sources : Mock (défaut), rejeu d'un export CSV et table SQL en lecture seule (`source.type`, voir `config.example.yaml`). Le contrat commun est vérifié sur le Mock, un CSV, SQLite et **MariaDB 10.11** (`NM_TEST_MARIADB_URL`, voir plus bas), y compris la boucle de monitoring de bout en bout et la reprise après une connexion coupée. Aucune n'a été éprouvée sur un vrai réseau.
-- Authentification : identifiant et mot de passe (`NM_USERS`, mots de passe hachés scrypt) donnent un jeton de session signé à durée limitée, avec limitation des essais. Ce n'est ni un annuaire (pas de SSO/LDAP) ni une gestion de rôles : tout utilisateur connecté peut tout modifier.
-- Les seuils d'incident ont été réglés par mesure sur le Mock seulement (8 jeux, 96 scénarios) : 0,04 faux incident par sortie et par jour, 87 scénarios détectés sur 96 (les 9 manqués sont des intermittents dont un seul échantillon sur trois tombe dans la phase active). Voir `REVUE.md`.
-- Le schéma SQLite est créé au démarrage sans migration : après une évolution du modèle de données, supprimer `network_monitor.db` (aucune donnée à conserver à ce stade).
-- L'Isolation Forest (`detection.isolation_forest.enabled`, désactivé par défaut, nécessite `pip install scikit-learn`) enrichit les preuves d'un incident sans jamais en ouvrir un.
+- Sources : Mock (défaut), rejeu CSV ou Parquet (Polars), table SQL en lecture seule (testée sur SQLite et MariaDB 10.11) et **Prometheus** (`query_range`, validée sur un vrai Prometheus avec node_exporter). Aucune n'a été éprouvée sur un vrai réseau ni sur des compteurs SNMP d'équipements.
+- Alertes : Telegram (groupe), webhook signé et SMS de groupe sont testés contre des serveurs **simulés**, jamais contre les vrais services. Premier essai réel : `POST /notifications/test/{canal}`.
+- Authentification : identifiant et mot de passe (`NM_USERS`, scrypt), session signée à durée limitée, limitation des essais. Ni annuaire, ni rôles : tout utilisateur connecté peut tout modifier.
+- Seuils d'incident réglés par mesure sur le Mock seulement (96 scénarios) : 0,04 faux incident par sortie et par jour, 87 scénarios détectés sur 96 (les 9 manqués sont des intermittents épars). Voir `REVUE.md`.
+- L'image Docker n'a pas pu être construite dans l'environnement de développement (pas de Docker) : ses étapes ont été reproduites à la main, voir `REVUE.md`.
+- Le schéma SQLite est créé au démarrage sans migration : après une évolution du modèle de données, supprimer `network_monitor.db` (rien à conserver à ce stade).
 
 ## Structure
 
@@ -26,12 +27,15 @@ network_monitor/        Backend Python (le paquet importable)
     models.py           Contrats de données (Pydantic)
     config.py           Configuration typée (YAML, sécurisé)
     auth.py             Mots de passe (scrypt), sessions signées, limitation d'essais
+    notify.py           Alertes sortantes : file d'envoi, Telegram, webhook, SMS
+    http_cache.py       ETag / 304 (le gzip vient de Starlette)
+    lock.py             Verrou d'instance unique (un seul worker)
     main.py             Boucle de monitoring (§30 du cahier des charges réseau)
     api.py              API FastAPI — la porte d'entrée du frontend
   data/                  DataSource : Mock, rejeu CSV, table SQL (sources.py)
-  analysis/              Prévision, détection, features (§9), Isolation Forest (§17), évaluation (§33)
+  analysis/              Prévision, détection, features (§9), Isolation Forest (§17), évaluation (§33), disponibilité
   incidents/             Moteur d'incidents (machine à états, hystérésis)
-  storage/               Persistance SQLite/SQLAlchemy
+  storage/               Persistance SQLite/SQLAlchemy, archive Parquet des mesures purgées
   tests/                 tests (unitaires, scénarios, API, sources, régressions)
 
 frontend/                Dashboard React + TypeScript strict (Vite), branché sur l'API
@@ -47,7 +51,9 @@ docs/
   ARCHITECTURE.md                 Documentation technique du projet complet
 
 config.example.yaml      Exemple de configuration (source, seuils, Isolation Forest)
-requirements.txt         Dépendances Python (scikit-learn : optionnel, Isolation Forest)
+requirements.txt         Dépendances d'exécution (optionnel : scikit-learn, pymysql)
+requirements-dev.txt     + pytest, ruff, mypy
+Dockerfile, docker-compose.yml, .env.example   Déploiement en conteneur
 ```
 
 ## Démarrage rapide
@@ -56,7 +62,7 @@ requirements.txt         Dépendances Python (scikit-learn : optionnel, Isolatio
 
 ```bash
 python -m venv .venv && source .venv/bin/activate   # Windows : .venv\Scripts\activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 python -m network_monitor.app.auth hash        # génère le hachage d'un mot de passe
 export NM_USERS='{"alice": "<hachage>"}'        # utilisateurs autorisés (Windows : set NM_USERS=...)
 export NM_AUTH_SECRET=$(python -c "import secrets; print(secrets.token_hex(32))")  # clé de signature des sessions
@@ -70,7 +76,7 @@ démarrage (compter quelques secondes). Documentation interactive sur
 
 Variables d'environnement : `NM_USERS`, `NM_AUTH_SECRET`, `NM_TOKEN_TTL_MINUTES` (60 par défaut), `NM_API_TOKEN` (jeton machine des endpoints de
 contrôle ; sans lui ils répondent 503), `NM_CORS_ORIGINS` (origines
-autorisées, `http://localhost:5173` par défaut), `NM_ENV`, `NM_CONFIG` (chemin d'un
+autorisées, `http://localhost:5173` par défaut), `NM_ENV`, `NM_STATIC_DIR` (sert l'interface compilée), `NM_CONFIG` (chemin d'un
 YAML, voir `config.example.yaml`, pour choisir la source de données et les seuils).
 
 **2. Frontend**, dans un second terminal :
@@ -87,9 +93,43 @@ Ouvrir `http://localhost:5173`.
 **3. Tests :**
 
 ```bash
-python -m pytest network_monitor/tests/ -v      # backend (NM_TEST_MARIADB_URL=mysql+pymysql://user:pass@host/db active aussi les tests MariaDB)
+python -m pytest network_monitor/tests/ -v      # backend ; NM_TEST_MARIADB_URL=mysql+pymysql://u:p@host/db et NM_TEST_PROMETHEUS_URL=http://host:9090 activent les tests contre de vrais services
 cd frontend && npm run typecheck && npm test    # frontend (tsc + Vitest)
 ```
+
+## Docker
+
+```bash
+cp .env.example .env && cp config.example.yaml config.yaml     # puis les adapter
+docker compose up -d --build                                    # http://127.0.0.1:8000
+```
+
+Une seule image : l'API sert aussi l'interface (même origine, pas de CORS). Elle tourne sous un utilisateur sans privilèges, avec **un seul worker** (la boucle de monitoring est dans le processus : un second processus sur la même base est refusé au démarrage, et `uvicorn --workers 2` s'arrête). La base, son verrou et l'archive Parquet vivent dans le volume `/data`. Le TLS et l'exposition publique ne sont pas inclus : l'image écoute sur `127.0.0.1`.
+
+## Alertes sortantes
+
+Dans `config.yaml` (voir `config.example.yaml`) ; les secrets restent dans `.env`, la configuration ne nomme que les variables :
+
+```yaml
+notifications:
+  enabled: true
+  timezone: Africa/Douala
+  channels:
+    - {name: noc, type: telegram, chat_id: "-1001234567890"}                        # NM_TELEGRAM_TOKEN
+    - {name: ops-sms, type: sms, provider: android_gateway,                          # NM_SMS_URL / _USER / _PASSWORD
+       recipients: ["+237690000001", "+237690000002"], min_severity: critical}
+    - {name: ticketing, type: webhook}                                               # NM_WEBHOOK_URL / _SECRET
+```
+
+- **Une alerte, un envoi par canal, écrit dans la même transaction** (file d'envoi) : un redémarrage ne perd rien. Un signal faible jamais confirmé ne notifie personne.
+- **Regroupement** : les alertes rapprochées (`batch_window`) partent dans un seul message ; **plafonds** par minute/heure : au-delà, elles s'accumulent et partent regroupées, rien n'est perdu.
+- **Nouvelles tentatives** à délai croissant (et `retry_after` de Telegram) ; un refus définitif n'est pas retenté ; pour un SMS de groupe, seuls les numéros en échec sont retentés.
+- **SMS** : un seul segment (160 caractères, sans accents). `android_gateway` : un téléphone Android avec une SIM locale ; `orange` : API Orange Developer (forfait SMS à acheter). **Webhook** : JSON signé HMAC-SHA256 (`X-NM-Signature`, `X-NM-Timestamp`) avec un identifiant de livraison stable pour dédupliquer.
+- Vérifier un canal : `POST /notifications/test/{canal}` (connecté) ; état des envois : `GET /notifications`.
+
+## Rapport de disponibilité
+
+`GET /reports/availability?days=30` (ou `start`/`end`), `&format=csv`, `&output_id=…`, et le panneau « Disponibilité » du dashboard. Par sortie : indisponibilité (incidents critiques, union des intervalles), dégradation, couverture des mesures, MTTD, MTTR — calculés sur les dates **rétro-datées** de l'incident (`started_at` : premier signal faible, `ended_at` : premier pas de retour à la normale), pas sur les dates de confirmation et de fermeture. La disponibilité est rapportée sur le temps écoulé ; une couverture basse la rend moins fiable.
 
 ## Ce que fait le dashboard
 

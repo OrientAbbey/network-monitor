@@ -90,7 +90,9 @@ def evaluate(scenarios: list[AnomalyScenario], incidents: list[Incident], observ
     confirmed = [(i, i.opened_at) for i in incidents if i.opened_at is not None]
     matched: set[str] = set()
     delays: list[float] = []
+    onset_errors: list[float] = []
     duration_errors: list[float] = []
+    reported_duration_errors: list[float] = []
     detected = 0
     typed = 0
     typed_ok = 0
@@ -107,8 +109,14 @@ def evaluate(scenarios: list[AnomalyScenario], incidents: list[Incident], observ
         matched.update(i.id for i, _ in hits)
         first, first_open = min(hits, key=lambda h: h[1])
         delays.append(max(0.0, (first_open - sc.start_time).total_seconds() / 60))
-        end = max((i.closed_at or i.last_seen_at) for i, _ in hits)
-        duration_errors.append(abs((end - first_open) - (sc.end_time - sc.start_time)).total_seconds() / 60)
+        real = sc.end_time - sc.start_time
+        # Avant rétro-datage : de l'ouverture à la fermeture. Après : du début à la fin rétro-datés.
+        closed_end = max((i.closed_at or i.last_seen_at) for i, _ in hits)
+        duration_errors.append(abs((closed_end - first_open) - real).total_seconds() / 60)
+        start = first.started_at or first_open
+        end = max((i.ended_at or i.closed_at or i.last_seen_at) for i, _ in hits)
+        onset_errors.append(abs(start - sc.start_time).total_seconds() / 60)
+        reported_duration_errors.append(abs((end - start) - real).total_seconds() / 60)
         expected = EXPECTED_TYPES.get(sc.type)
         if expected is not None:
             typed += 1
@@ -128,6 +136,8 @@ def evaluate(scenarios: list[AnomalyScenario], incidents: list[Incident], observ
         "precision": round(precision, 3), "recall": round(recall, 3), "f1": round(f1, 3),
         "mean_detection_delay_min": round(mean(delays), 1) if delays else None,
         "mean_duration_error_min": round(mean(duration_errors), 1) if duration_errors else None,
+        "mean_onset_error_min": round(mean(onset_errors), 1) if onset_errors else None,
+        "mean_reported_duration_error_min": round(mean(reported_duration_errors), 1) if reported_duration_errors else None,
         "type_accuracy": round(typed_ok / typed, 3) if typed else None,
         "typed": typed, "type_errors": confusion,
     }

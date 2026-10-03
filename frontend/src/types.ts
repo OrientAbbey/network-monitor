@@ -33,6 +33,8 @@ export interface Incident {
   severity: string;
   incident_type: string;
   last_seen_at: string;
+  started_at: string | null;
+  ended_at: string | null;
   score: number;
   description: string;
 }
@@ -51,6 +53,26 @@ export interface Alert {
   traffic_deviation_percent: number | null;
   loss_percent: number | null;
   expected_loss_percent: number | null;
+}
+
+export interface OutputAvailability {
+  output_id: string;
+  period_seconds: number;
+  incidents: number;
+  downtime_seconds: number;
+  degraded_seconds: number;
+  availability_percent: number | null;
+  coverage_percent: number | null;
+  mttd_seconds: number | null;
+  mttr_seconds: number | null;
+  longest_incident_seconds: number | null;
+}
+
+export interface AvailabilityReport {
+  start: string;
+  end: string;
+  downtime_severity: string;
+  outputs: OutputAvailability[];
 }
 
 export interface MonitoringStatus {

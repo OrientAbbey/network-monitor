@@ -80,16 +80,50 @@ def test_open_incident_does_not_emit_an_alert_per_tick():
     assert len(events) <= 3
 
 
-def test_new_anomaly_within_merge_window_reopens_same_incident():
+def test_confirmed_new_episode_within_merge_window_reopens_same_incident():
     """§22 : un incident intermittent reste un seul incident, pas une suite d'incidents."""
     mgr = _manager()
+    first = None
     for m, s in [(0, 0.6), (10, 0.85), (20, 0.9), (25, 0.1), (35, 0.1)]:
-        mgr.process(_result(m, s))
-    assert mgr.active_incidents() == []  # fermé
-    for m, s in [(40, 0.9)]:  # dans merge_window (20 min) après la fermeture à 35
+        _, inc = mgr.process(_result(m, s))
+        first = first or inc
+    assert first is not None and first.opened_at is not None and mgr.active_incidents() == []  # fermé
+    events, incident = [], None
+    for m in (40, 45, 50, 55):  # nouvel épisode, dans merge_window (20 min) après la fin
+        alerts, incident = mgr.process(_result(m, 0.9))
+        events += [a.event for a in alerts]
+    assert incident is not None and incident.id == first.id  # même incident, pas un nouveau
+    assert incident.status == IncidentStatus.OPEN and "reopened" in events
+    assert incident.started_at == first.started_at  # début d'origine conservé
+    assert incident.ended_at is None  # il dure de nouveau
+
+
+def test_noise_right_after_an_incident_does_not_extend_it():
+    """Un pic isolé juste après la fin d'un incident n'est pas un nouvel épisode confirmé."""
+    mgr = _manager()
+    for m, s in [(0, 0.6), (10, 0.85), (20, 0.9), (25, 0.1), (35, 0.1)]:
+        _, inc = mgr.process(_result(m, s))
+    ended = inc.ended_at
+    _, spike = mgr.process(_result(40, 0.9))
+    assert spike is not None and spike.status == IncidentStatus.SUSPECT and spike.opened_at is None
+    for m in (45, 50):
+        _, spike = mgr.process(_result(m, 0.1))
+    assert mgr.active_incidents() == []
+    assert inc.status == IncidentStatus.CLOSED and inc.ended_at == ended  # l'incident d'origine n'a pas bougé
+
+
+def test_incident_dates_are_retro_dated():
+    """Début = premier signal faible ; fin = premier pas de retour à la normale (pas la décision de fermer)."""
+    mgr = _manager()
+    for m, s in [(0, 0.6), (10, 0.85), (20, 0.9), (25, 0.3), (35, 0.1)]:
         _, incident = mgr.process(_result(m, s))
-    assert incident is not None and incident.status == IncidentStatus.OPEN
-    assert incident.opened_at is not None  # même incident, pas un nouveau SUSPECT
+    assert incident is not None and incident.status == IncidentStatus.CLOSED
+    t0 = _result(0, 0).timestamp
+    assert incident.started_at == t0 and incident.suspected_at == t0
+    assert incident.opened_at == _result(10, 0).timestamp  # confirmé 10 min plus tard
+    assert incident.ended_at == _result(25, 0).timestamp  # premier pas sous close_score
+    assert incident.closed_at == _result(35, 0).timestamp  # fermeture décidée après recovery_duration
+    assert incident.duration_seconds == 25 * 60  # 0 → 25 min : durée réelle, pas 10 → 35
 
 
 def test_unconfirmed_suspect_is_not_worth_persisting():

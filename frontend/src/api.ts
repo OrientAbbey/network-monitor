@@ -3,10 +3,11 @@
  * génération de données ici — uniquement des appels réseau vers le vrai backend.
  */
 import type {
-  Alert, AppConfigView, ConfigUpdate, ForecastPoint, Incident, MonitoringStatus, OutputSummary, TrafficSample,
+  Alert, AppConfigView, AvailabilityReport, ConfigUpdate, ForecastPoint, Incident, MonitoringStatus, OutputSummary, TrafficSample,
 } from "./types";
 
-const API_BASE: string = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+// Chaîne vide (image Docker : l'API sert elle-même l'interface) = même origine que la page.
+const API_BASE: string = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 const TIMEOUT_MS = 10_000;
 
 // Jeton des endpoints de contrôle. Obtenu en se connectant (identifiant et mot de passe,
@@ -51,7 +52,7 @@ interface RequestOptions {
 }
 
 async function request<T>(path: string, { method = "GET", params, body }: RequestOptions = {}): Promise<T> {
-  const url = new URL(API_BASE + path);
+  const url = new URL(path, API_BASE || window.location.origin);
   for (const [key, value] of Object.entries(params ?? {})) {
     if (value === undefined || value === null) continue;
     if (Array.isArray(value)) value.forEach((v) => url.searchParams.append(key, v));
@@ -102,6 +103,9 @@ export const api = {
   forecastAhead: (id: string, horizonMinutes: number) =>
     request<ForecastPoint[]>(`${out(id)}/forecast/ahead`, { params: { horizon_minutes: horizonMinutes } }),
   incidents: (status?: string[], limit = 100) => request<Incident[]>("/incidents", { params: { status, limit } }),
+  // `days` : fenêtre calculée par le SERVEUR (son horloge, pas celle du navigateur).
+  availability: (days: number) => request<AvailabilityReport>("/reports/availability", { params: { days } }),
+  availabilityCsvUrl: (days: number) => new URL(`/reports/availability?format=csv&days=${days}`, API_BASE || window.location.origin).toString(),
   alerts: (outputId?: string, limit = 20) => request<Alert[]>("/alerts", { params: { output_id: outputId, limit } }),
   incident: (id: string) => request<Incident>(`/incidents/${encodeURIComponent(id)}`),
   monitoringStatus: () => request<MonitoringStatus>("/monitoring/status"),

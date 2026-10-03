@@ -218,8 +218,8 @@ class MockDataSource(DataSource):
     def get_interval(self) -> timedelta:
         return self._interval
 
-    def load_history(self, start: datetime, end: datetime) -> list[TrafficSample]:
-        return self._generate_range(start, end)
+    def load_history(self, start: datetime, end: datetime, output_id: str | None = None) -> list[TrafficSample]:
+        return self._generate_range(start, end, output_id)
 
     def start_realtime(self, now: datetime) -> None:
         """Initialise le curseur temps réel utilisé par `get_latest`."""
@@ -252,7 +252,7 @@ class MockDataSource(DataSource):
 
     # -- Génération interne ---------------------------------------------------
 
-    def _generate_range(self, start: datetime, end: datetime) -> list[TrafficSample]:
+    def _generate_range(self, start: datetime, end: datetime, output_id: str | None = None) -> list[TrafficSample]:
         if end <= start:
             return []
 
@@ -263,6 +263,8 @@ class MockDataSource(DataSource):
 
         all_samples: list[TrafficSample] = []
         for profile in self._profiles.values():
+            if output_id is not None and profile.output_id != output_id:
+                continue
             traffic, loss = self._simulate_output(profile, timestamps)
             for ts, tr, lo in zip(timestamps, traffic, loss):
                 all_samples.append(

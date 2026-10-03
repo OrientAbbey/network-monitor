@@ -27,6 +27,7 @@ from network_monitor.app.models import (
     RawMeasurement,
     TrafficSample,
 )
+from network_monitor.app.notify import NotificationDispatcher
 from network_monitor.data.source import DataSource, DataValidator
 from network_monitor.incidents.manager import (
     Alert,
@@ -56,7 +57,10 @@ class MonitoringLoop:
     orchestre — c'est le rôle de chacun d'eux (§4).
     """
 
-    def __init__(self, source: DataSource, storage: Repository, config: AppConfig) -> None:
+    def __init__(
+        self, source: DataSource, storage: Repository, config: AppConfig, notifier: NotificationDispatcher | None = None
+    ) -> None:
+        self._notifier = notifier
         self._source = source
         self._storage = storage
         self._config = config
@@ -109,7 +113,11 @@ class MonitoringLoop:
         cfg = self._config.recalibration
         if not cfg.enabled or self._last_calibrated_at is None:
             return
-        if now - self._last_calibrated_at < cfg.interval:
+        # Une sortie sans modèle (historique encore insuffisant au démarrage) est réessayée
+        # chaque heure : sans cela, elle resterait sans détection jusqu'à la recalibration suivante.
+        uncalibrated = any(o not in self._forecast_models for o in self._source.list_outputs())
+        wait = min(cfg.interval, timedelta(hours=1)) if uncalibrated else cfg.interval
+        if now - self._last_calibrated_at < wait:
             return
         self._recompute_models(now, exclude_ranges=self._active_incident_ranges())
         self._last_calibrated_at = now
@@ -129,20 +137,15 @@ class MonitoringLoop:
     def _recompute_models(
         self, now: datetime, exclude_ranges: dict[str, list[tuple[datetime, datetime]]] | None
     ) -> None:
+        """Calibre (ou recalibre) chaque sortie. L'historique est chargé **une sortie à la
+        fois** et libéré avant la suivante : la mémoire de pointe ne dépend plus du nombre
+        de sorties (elle suivait leur nombre quand tout l'historique était chargé d'un coup)."""
         start = now - self._config.history.preferred
-        # Un seul chargement pour toutes les sorties (au lieu d'un par sortie,
-        # qui rechargeait l'historique complet de la source N fois).
-        all_history = self._source.load_history(start, now)
-        by_output: dict[str, list[TrafficSample]] = {}
-        for sample in all_history:
-            if exclude_ranges and any(
-                a <= sample.timestamp <= b for a, b in exclude_ranges.get(sample.output_id, [])
-            ):
-                continue
-            by_output.setdefault(sample.output_id, []).append(sample)
-
         for output_id in self._source.list_outputs():
-            history = by_output.get(output_id, [])
+            history = self._source.load_history(start, now, output_id)
+            if exclude_ranges:
+                skip = exclude_ranges.get(output_id, [])
+                history = [s for s in history if not any(a <= s.timestamp <= b for a, b in skip)]
             if not history:
                 logger.warning("Historique vide pour %s : calibration ignorée", output_id)
                 continue
@@ -154,27 +157,28 @@ class MonitoringLoop:
                 )
                 continue
             try:
-                self._forecast_models[output_id] = select_model(
-                    output_id,
-                    history,
-                    self._config.model_selection.minimum_history,
-                    self._config.model_selection.validation_window,
-                    allowed_models=self._config.forecast.models,
-                )
-                self._loss_baselines[output_id] = LossBaseline.from_history(
-                    history, self._config.detection.loss.loss_std_floor
-                )
-                if self._config.detection.isolation_forest.enabled:
-                    forest = IsolationForestDetector(
-                        output_id, self._source.get_interval(), self._config.detection.isolation_forest.n_estimators
-                    )
-                    forest.fit(history)
-                    self._forests[output_id] = forest
-                if exclude_ranges is None:  # calibration initiale : amorce le tampon glissant
-                    tail = sorted(history, key=lambda x: x.timestamp)[-history_steps(self._source.get_interval()) :]
-                    self._recent[output_id].extend(tail)
-            except Exception:  # pragma: no cover - défensif : ne jamais interrompre le monitoring
+                self._calibrate_output(output_id, history, initial=exclude_ranges is None)
+            except Exception:
                 logger.exception("Échec de calibration pour %s, modèle précédent conservé", output_id)
+
+    def _calibrate_output(self, output_id: str, history: list[TrafficSample], initial: bool) -> None:
+        interval = self._source.get_interval()
+        self._forecast_models[output_id] = select_model(
+            output_id,
+            history,
+            self._config.model_selection.minimum_history,
+            self._config.model_selection.validation_window,
+            allowed_models=self._config.forecast.models,
+        )
+        self._loss_baselines[output_id] = LossBaseline.from_history(history, self._config.detection.loss.loss_std_floor)
+        forest_cfg = self._config.detection.isolation_forest
+        if forest_cfg.enabled:
+            forest = IsolationForestDetector(output_id, interval, forest_cfg.n_estimators)
+            forest.fit(history)
+            self._forests[output_id] = forest
+        if initial:  # calibration initiale : amorce le tampon glissant des features
+            tail = sorted(history, key=lambda x: x.timestamp)[-history_steps(interval) :]
+            self._recent[output_id].extend(tail)
 
     def run_tick(self, now: datetime) -> None:
         """Un pas de la boucle (§30, étapes 1 à 11)."""
@@ -196,12 +200,15 @@ class MonitoringLoop:
         # bruit résorbé seul (§19), voir `incident_worth_persisting`. Un
         # incident tout juste fermé, lui, l'est (il ne réapparaîtrait plus
         # dans active_incidents(), §29).
+        alerts = tick.alerts if self._config.alerts.enabled else []
         self._storage.save_tick(
             tick.samples,
             tick.forecasts,
             tick.anomalies,
             [i for i in tick.incidents.values() if incident_worth_persisting(i)],
-            tick.alerts if self._config.alerts.enabled else [],
+            alerts,
+            # L'envoi est planifié dans la même transaction que l'alerte (outbox) : voir app/notify.py.
+            self._notifier.plan(alerts) if self._notifier else [],
         )
         self.maybe_recalibrate(now)
 

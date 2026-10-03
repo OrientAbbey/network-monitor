@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -21,6 +21,12 @@ vi.mock("./api", () => {
       history: vi.fn(async () => history),
       forecast: vi.fn(async () => []),
       forecastAhead: vi.fn(async () => []),
+      availability: vi.fn(async () => ({
+        start: "2026-08-01T00:00:00Z", end: "2026-09-01T00:00:00Z", downtime_severity: "critical",
+        outputs: [{ output_id: "OUT_001", period_seconds: 2_592_000, incidents: 2, downtime_seconds: 5400, degraded_seconds: 600,
+          availability_percent: 99.8264, coverage_percent: 99.5, mttd_seconds: 900, mttr_seconds: 3000, longest_incident_seconds: 4200 }],
+      })),
+      availabilityCsvUrl: vi.fn((days: number) => `http://api/reports/availability?format=csv&days=${days}`),
     },
   };
 });
@@ -62,6 +68,33 @@ describe("DetailChart", () => {
   });
 });
 
+describe("DetailChart : rafraîchissement incrémental", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("ne redemande à l'API que les points postérieurs au dernier connu", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    render(<DetailChart outputId="OUT_001" rangeKey="12h" onRangeChange={() => {}} visibility={visibility} onToggle={() => {}} current={{ traffic: 1039, loss: 0.1 }} />);
+    await screen.findByRole("group");
+    expect(api.history).toHaveBeenCalledTimes(1);
+    expect(api.history).toHaveBeenLastCalledWith("OUT_001", undefined, undefined, 12); // première charge : toute la fenêtre
+
+    const last = new Date(Date.UTC(2026, 8, 1, 12) + 39 * 300_000).toISOString();
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(api.history).toHaveBeenCalledTimes(2);
+    expect(api.history).toHaveBeenLastCalledWith("OUT_001", last); // ensuite : seulement depuis le dernier point
+    expect(screen.getByRole("group")).toBeTruthy(); // le graphe est toujours là, sans clignotement de chargement
+  });
+
+  it("recharge toute la fenêtre quand on change de plage", async () => {
+    const { rerender } = render(<DetailChart outputId="OUT_001" rangeKey="12h" onRangeChange={() => {}} visibility={visibility} onToggle={() => {}} current={{ traffic: 1, loss: 0 }} />);
+    await screen.findByRole("group");
+    vi.mocked(api.history).mockClear();
+    rerender(<DetailChart outputId="OUT_001" rangeKey="1d" onRangeChange={() => {}} visibility={visibility} onToggle={() => {}} current={{ traffic: 1, loss: 0 }} />);
+    await waitFor(() => expect(api.history).toHaveBeenCalled());
+    expect(api.history).toHaveBeenLastCalledWith("OUT_001", undefined, undefined, 24);
+  });
+});
+
 describe("DetailChart à la souris", () => {
   it("affiche les valeurs du point le plus proche du pointeur, puis les efface à la sortie", async () => {
     const renderChart = () =>
@@ -80,6 +113,31 @@ describe("DetailChart à la souris", () => {
     expect(readout.textContent).toMatch(/1039\.0 Mbps|1\.04 Gbps/);
     fireEvent.mouseLeave(chart);
     expect(readout.textContent).toMatch(/Survolez le graphe/);
+  });
+});
+
+describe("Rapport de disponibilité", () => {
+  it("affiche le tableau, change de période et propose l'export CSV", async () => {
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    const panel = await screen.findByRole("region", { name: /disponibilité/i });
+    const row = await within(panel).findByRole("row", { name: /OUT_001/ });
+    expect(row.textContent).toMatch(/99\.826 %/); // 3 décimales : 99,826 % se distingue de 99,8 %
+    expect(row.textContent).toMatch(/1 h 30/); // 5 400 s d'indisponibilité
+    expect(row.textContent).toMatch(/15 min/); // MTTD 900 s
+    expect(api.availability).toHaveBeenCalledWith(30);
+    await user.click(within(panel).getByRole("button", { name: "7 j" }));
+    await waitFor(() => expect(api.availability).toHaveBeenLastCalledWith(7));
+    const csv = within(panel).getByRole("link", { name: /csv/i });
+    expect(csv.getAttribute("href")).toBe("http://api/reports/availability?format=csv&days=7");
+  });
+
+  it("signale un rapport indisponible sans casser le reste", async () => {
+    vi.mocked(api.availability).mockRejectedValueOnce(new Error("503"));
+    render(<Dashboard />);
+    const panel = await screen.findByRole("region", { name: /disponibilité/i });
+    expect((await within(panel).findByRole("alert")).textContent).toMatch(/indisponible/i);
+    expect(screen.getByRole("main")).toBeTruthy();
   });
 });
 

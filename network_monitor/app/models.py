@@ -289,6 +289,14 @@ class Incident(BaseModel):
     last_seen_at: datetime
     closed_at: datetime | None = None
 
+    started_at: datetime | None = None
+    """Début **réel** de l'incident, rétro-daté : premier signal faible de l'épisode confirmé
+    (`suspected_at`), pas l'instant où la confirmation a été acquise (`opened_at`, plusieurs
+    pas plus tard). C'est la date à rapporter à un client ou à un régulateur."""
+    ended_at: datetime | None = None
+    """Fin **réelle**, rétro-datée : premier pas de retour à la normale, pas l'instant où la
+    fermeture a été décidée (`closed_at`, `recovery_duration` plus tard). None tant que l'incident dure."""
+
     score: float = Field(ge=0, le=1)
 
     peak_traffic_deviation_percent: float = 0.0
@@ -303,15 +311,21 @@ class Incident(BaseModel):
             raise ValueError("opened_at ne peut pas précéder suspected_at")
         if self.closed_at is not None and self.opened_at is not None and self.closed_at < self.opened_at:
             raise ValueError("closed_at ne peut pas précéder opened_at")
+        if self.started_at is not None and self.opened_at is not None and self.started_at > self.opened_at:
+            raise ValueError("started_at ne peut pas suivre opened_at")
+        if self.ended_at is not None and self.started_at is not None and self.ended_at < self.started_at:
+            raise ValueError("ended_at ne peut pas précéder started_at")
         return self
 
     @property
     def duration_seconds(self) -> float | None:
-        """Durée depuis l'ouverture effective (opened_at), pas depuis SUSPECT."""
+        """Durée réelle de l'incident confirmé : du début rétro-daté à la fin rétro-datée (ou,
+        tant qu'il dure, au dernier pas observé). Les incidents jamais confirmés n'ont pas de durée."""
         if self.opened_at is None:
             return None
-        end = self.closed_at or self.last_seen_at
-        return (end - self.opened_at).total_seconds()
+        start = self.started_at or self.opened_at
+        end = self.ended_at or self.closed_at or self.last_seen_at
+        return max(0.0, (end - start).total_seconds())
 
     @property
     def is_active(self) -> bool:

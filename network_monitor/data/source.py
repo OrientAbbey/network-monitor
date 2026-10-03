@@ -24,8 +24,13 @@ class DataSource(ABC):
     """Contrat commun à toute source de données, Mock ou réelle (§6)."""
 
     @abstractmethod
-    def load_history(self, start: datetime, end: datetime) -> list[TrafficSample]:
-        """Retourne l'historique normalisé entre start (inclus) et end (exclu)."""
+    def load_history(self, start: datetime, end: datetime, output_id: str | None = None) -> list[TrafficSample]:
+        """Retourne l'historique normalisé entre start (inclus) et end (exclu).
+
+        `output_id` restreint le résultat à une sortie : la calibration charge
+        ainsi une sortie à la fois, au lieu de garder l'historique de toutes
+        les sorties en mémoire en même temps (§8).
+        """
         raise NotImplementedError
 
     @abstractmethod

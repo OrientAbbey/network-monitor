@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decimate, nearestIndex, pointerToTime, type Point } from "./chart";
+import { decimate, mergeSeries, nearestIndex, pointerToTime, type Point } from "./chart";
 
 const T0 = Date.UTC(2026, 8, 1);
 const series = (n: number, f: (i: number) => number): Point[] =>
@@ -63,5 +63,23 @@ describe("pointerToTime", () => {
   });
   it("ne plante pas si le SVG n'a pas de largeur", () => {
     expect(pointerToTime(10, { left: 0, width: 0 }, geometry, 1000, 2000)).toBe(1000);
+  });
+});
+
+describe("mergeSeries", () => {
+  const at = (min: number, v = 0) => ({ timestamp: new Date(T0 + min * 60_000).toISOString(), v });
+  it("ajoute les nouveaux points, dédoublonne par horodatage et garde l'ordre", () => {
+    const prev = [at(0, 1), at(5, 2), at(10, 3)];
+    const out = mergeSeries(prev, [at(10, 99), at(15, 4)], 3600_000);
+    expect(out.map((p) => [Date.parse(p.timestamp) - T0, p.v])).toEqual([[0, 1], [300_000, 2], [600_000, 99], [900_000, 4]]); // le nouveau 10 min l'emporte
+  });
+  it("abandonne ce qui sort de la fenêtre, mesurée depuis le point le plus récent", () => {
+    const out = mergeSeries([at(0), at(30), at(60)], [at(90)], 60 * 60_000);
+    expect(out.map((p) => Date.parse(p.timestamp) - T0)).toEqual([30 * 60_000, 60 * 60_000, 90 * 60_000]);
+  });
+  it("trie des points reçus en désordre et tolère le vide", () => {
+    expect(mergeSeries([], [at(10), at(0)], 3600_000).map((p) => Date.parse(p.timestamp) - T0)).toEqual([0, 600_000]);
+    expect(mergeSeries([at(0)], [], 3600_000)).toHaveLength(1);
+    expect(mergeSeries([], [], 3600_000)).toEqual([]);
   });
 });

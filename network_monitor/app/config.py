@@ -13,10 +13,12 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+
+from network_monitor.app.models import Severity
 
 _DURATION_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*([a-z]+)$")
 
@@ -205,14 +207,29 @@ class MonitoringConfig(BaseModel):
 _SQL_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+class PrometheusOutput(BaseModel):
+    traffic: str = Field(min_length=1)
+    """Expression PromQL du trafic **en Mbps** (ex. `rate(ifHCInOctets{...}[5m]) * 8 / 1e6`)."""
+    loss: str | None = None
+    """Expression PromQL du taux de perte **en %**. Sans elle, la perte est supposée nulle (la
+    détection sur les pertes n'a alors rien à observer)."""
+
+
 class SourceConfig(BaseModel):
     """Source de données (§6) : Mock (défaut), rejeu CSV, ou table SQL."""
 
-    type: Literal["mock", "csv", "sql"] = "mock"
+    type: Literal["mock", "csv", "parquet", "sql", "prometheus"] = "mock"
     path: str | None = None
     url: SecretStr | None = None
     """URL SQLAlchemy (peut contenir un mot de passe) : jamais renvoyée en
     clair par GET /config."""
+    prometheus: dict[str, PrometheusOutput] = Field(default_factory=dict)
+    """Une entrée par sortie : l'identifiant de la sortie et ses requêtes PromQL."""
+    bearer_token_env: str | None = None
+    """Nom de la variable d'environnement qui porte un jeton porteur pour l'API Prometheus
+    (le jeton lui-même n'est jamais dans la configuration)."""
+    lag: timedelta = timedelta(seconds=30)
+    """Retard laissé aux collecteurs : on n'interroge que jusqu'à `maintenant - lag`."""
     table: str = "traffic_measurements"
     columns: dict[str, str] = Field(
         default_factory=lambda: {
@@ -223,10 +240,17 @@ class SourceConfig(BaseModel):
         }
     )
 
+    @field_validator("lag", mode="before")
+    @classmethod
+    def _parse_lag(cls, v):
+        return _parse_duration(v) if not isinstance(v, timedelta) else v
+
     @model_validator(mode="after")
     def _consistent(self) -> SourceConfig:
-        if self.type == "csv" and not self.path:
-            raise ValueError("source.type=csv exige source.path")
+        if self.type in ("csv", "parquet") and not self.path:
+            raise ValueError(f"source.type={self.type} exige source.path")
+        if self.type == "prometheus" and (self.url is None or not self.prometheus):
+            raise ValueError("source.type=prometheus exige source.url et au moins une sortie dans source.prometheus")
         if self.type == "sql":
             if self.url is None:
                 raise ValueError("source.type=sql exige source.url")
@@ -236,10 +260,140 @@ class SourceConfig(BaseModel):
         return self
 
 
+_ALERT_EVENTS = frozenset({"opened", "updated", "reopened", "closed", "stale"})
+
+
+class _ChannelBase(BaseModel):
+    name: str = Field(pattern=r"^[A-Za-z0-9_-]{1,40}$")
+    min_severity: Severity = Severity.WARNING
+    """Sévérité minimale d'une alerte pour être envoyée sur ce canal."""
+    events: list[str] = Field(default_factory=lambda: ["opened", "updated", "reopened", "closed", "stale"])
+    """Événements notifiés (`suspect` et `recovering` ne le sont jamais : trop bavards)."""
+    max_messages_per_minute: int | None = Field(default=None, ge=1)
+    max_messages_per_hour: int | None = Field(default=None, ge=1)
+    """Plafond de messages (pas d'alertes) : au-delà, les alertes s'accumulent et partent
+    regroupées dans un seul message dès que la fenêtre se libère — rien n'est perdu, mais le
+    coût (SMS) et le bruit sont bornés."""
+
+    @field_validator("events")
+    @classmethod
+    def _known_events(cls, v: list[str]) -> list[str]:
+        unknown = set(v) - _ALERT_EVENTS
+        if unknown:
+            raise ValueError(f"événements inconnus : {sorted(unknown)} (valides : {sorted(_ALERT_EVENTS)})")
+        return v
+
+
+class TelegramChannel(_ChannelBase):
+    """Groupe Telegram : un bot ajouté au groupe, identifiant du groupe (négatif, ex. -1001234567890)."""
+
+    type: Literal["telegram"] = "telegram"
+    chat_id: str = Field(min_length=1)
+    token_env: str = "NM_TELEGRAM_TOKEN"
+    max_messages_per_minute: int | None = Field(default=15, ge=1)  # Telegram : ~20 par minute et par groupe
+
+
+class WebhookChannel(_ChannelBase):
+    """POST JSON signé (HMAC-SHA256) vers n'importe quel système (Slack/Teams via passerelle, ticketing, scripts...)."""
+
+    type: Literal["webhook"] = "webhook"
+    url_env: str = "NM_WEBHOOK_URL"
+    secret_env: str | None = "NM_WEBHOOK_SECRET"
+
+
+class SmsChannel(_ChannelBase):
+    """SMS à un groupe de numéros. `android_gateway` : un téléphone Android avec une SIM locale
+    (application SMS Gateway, gratuit hors forfait de la SIM). `orange` : API Orange Developer
+    (forfait SMS à acheter)."""
+
+    type: Literal["sms"] = "sms"
+    provider: Literal["android_gateway", "orange"] = "android_gateway"
+    recipients: list[str] = Field(min_length=1)
+    base_url_env: str = "NM_SMS_URL"
+    """android_gateway : adresse du téléphone (ex. http://192.168.1.50:8080)."""
+    username_env: str = "NM_SMS_USER"
+    password_env: str = "NM_SMS_PASSWORD"
+    client_id_env: str = "NM_ORANGE_CLIENT_ID"
+    client_secret_env: str = "NM_ORANGE_CLIENT_SECRET"
+    sender: str | None = None
+    """orange : numéro expéditeur autorisé, au format international (ex. +2370000)."""
+    min_severity: Severity = Severity.CRITICAL
+    events: list[str] = Field(default_factory=lambda: ["opened", "closed"])
+    max_messages_per_hour: int | None = Field(default=20, ge=1)
+
+    @field_validator("recipients")
+    @classmethod
+    def _e164(cls, v: list[str]) -> list[str]:
+        bad = [n for n in v if not re.fullmatch(r"\+[1-9][0-9]{7,14}", n)]
+        if bad:
+            raise ValueError(f"numéros au format international attendus (+237...) : {bad}")
+        return v
+
+    @model_validator(mode="after")
+    def _provider_needs(self) -> SmsChannel:
+        if self.provider == "orange" and not self.sender:
+            raise ValueError("sms/orange exige `sender`")
+        return self
+
+
+Channel = Annotated[TelegramChannel | WebhookChannel | SmsChannel, Field(discriminator="type")]
+
+
+class NotificationsConfig(BaseModel):
+    """Alertes sortantes (§27). Les secrets (jetons, mots de passe, URL) ne sont jamais ici :
+    chaque canal nomme la variable d'environnement qui les porte."""
+
+    enabled: bool = False
+    channels: list[Channel] = Field(default_factory=list)
+    batch_window: timedelta = timedelta(seconds=20)
+    """Les alertes qui arrivent à moins de `batch_window` l'une de l'autre partent dans un seul message."""
+    max_attempts: int = Field(default=6, ge=1, le=20)
+    retry_base: timedelta = timedelta(seconds=30)
+    """Délai avant la 2e tentative ; double à chaque échec, plafonné à 15 min."""
+    timezone: str = "UTC"
+    """Fuseau d'affichage des heures dans les messages (ex. Africa/Douala)."""
+
+    @field_validator("batch_window", "retry_base", mode="before")
+    @classmethod
+    def _parse(cls, v):
+        return _parse_duration(v) if not isinstance(v, timedelta) else v
+
+    @field_validator("timezone")
+    @classmethod
+    def _tz(cls, v: str) -> str:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            ZoneInfo(v)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"fuseau inconnu : {v!r}") from exc
+        return v
+
+    @model_validator(mode="after")
+    def _unique_names(self) -> NotificationsConfig:
+        names = [c.name for c in self.channels]
+        if len(names) != len(set(names)):
+            raise ValueError("deux canaux portent le même nom")
+        if self.enabled and not self.channels:
+            raise ValueError("notifications.enabled exige au moins un canal")
+        return self
+
+
+class StorageConfig(BaseModel):
+    database_url: str = "sqlite:///network_monitor.db"
+    lock_file: str | None = None
+    """Verrou d'instance unique (voir app/lock.py). Par défaut : à côté de la base SQLite, sinon
+    `network_monitor.lock` dans le dossier courant."""
+    archive_dir: str | None = None
+    """Dossier d'archive Parquet : les mesures brutes retirées par la purge y sont rangées
+    (un dossier par sortie, un fichier par jour) au lieu d'être perdues."""
+
+
 class AppConfig(BaseModel):
     """Racine de la configuration (§35)."""
 
     source: SourceConfig = SourceConfig()
+    storage: StorageConfig = StorageConfig()
     monitoring: MonitoringConfig = MonitoringConfig()
     history: HistoryConfig = HistoryConfig()
     model_selection: ModelSelectionConfig = ModelSelectionConfig()
@@ -248,6 +402,7 @@ class AppConfig(BaseModel):
     detection: DetectionConfig = DetectionConfig()
     incident: IncidentConfig = IncidentConfig()
     alerts: AlertsConfig = AlertsConfig()
+    notifications: NotificationsConfig = NotificationsConfig()
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> AppConfig:

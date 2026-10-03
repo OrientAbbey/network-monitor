@@ -64,3 +64,19 @@ export function pointerToTime(
   const ratio = Math.min(1, Math.max(0, (x - geometry.marginLeft) / geometry.innerWidth));
   return tStart + ratio * span;
 }
+
+/**
+ * Fusionne de nouveaux points dans une série affichée (rafraîchissement incrémental) : dédoublonne
+ * par horodatage (le nouveau point l'emporte : une valeur peut être corrigée), trie, et abandonne
+ * ce qui sort de la fenêtre `spanMs` mesurée depuis le point le plus récent — l'horloge du
+ * navigateur n'intervient pas (§13).
+ */
+export function mergeSeries<T extends { timestamp: string }>(prev: T[], incoming: T[], spanMs: number): T[] {
+  if (incoming.length === 0 && prev.length === 0) return prev;
+  const byTime = new Map<number, T>();
+  for (const p of prev) byTime.set(Date.parse(p.timestamp), p);
+  for (const p of incoming) byTime.set(Date.parse(p.timestamp), p);
+  const times = [...byTime.keys()].sort((a, b) => a - b);
+  const cutoff = times[times.length - 1] - spanMs;
+  return times.filter((t) => t >= cutoff).map((t) => byTime.get(t) as T);
+}

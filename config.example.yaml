@@ -1,11 +1,39 @@
 # Exemple de configuration (§35). Charger avec : AppConfig.from_yaml("config.yaml")
 # Durées : "5m", "10 minutes", "2h", "30d" ... Tous les champs sont optionnels.
 source:
-  type: mock            # mock | csv (rejeu d'un export) | sql (table en lecture seule)
-  # path: export.csv    # csv : timestamp,output_id,traffic_mbps,loss_percent
-  # url: mysql+pymysql://user:pass@host/db   # sql : jamais renvoyée en clair par GET /config
+  type: mock            # mock | csv | parquet | sql | prometheus
+  # csv / parquet : rejeu d'un export (timestamp, output_id, traffic_mbps, loss_percent). Parquet
+  # accepte aussi l'archive écrite par storage.archive_dir (un dossier par sortie).
+  # path: export.csv
+  # sql : table en lecture seule (url jamais renvoyée en clair par GET /config)
+  # url: mysql+pymysql://user:pass@host/db
   # table: traffic_measurements
   # columns: {timestamp: ts, output_id: port, traffic_mbps: mbps, loss_percent: loss}
+  # prometheus : une entrée par sortie, en PromQL. Le trafic doit sortir EN Mbps, les pertes EN %.
+  # Utiliser des compteurs 64 bits (ifHCInOctets) : un compteur 32 bits boucle en ~34 s à 1 Gbps.
+  # url: http://prometheus:9090
+  # bearer_token_env: NM_SOURCE_BEARER
+  # lag: 30s            # retard laissé aux collecteurs
+  # prometheus:
+  #   LINK_DOUALA_YAOUNDE:
+  #     traffic: 'rate(ifHCInOctets{instance="r1",ifName="Te0/0/1"}[5m]) * 8 / 1e6'
+  #     loss: '100 * rate(ifInDiscards{instance="r1",ifName="Te0/0/1"}[5m]) / rate(ifHCInUcastPkts{instance="r1",ifName="Te0/0/1"}[5m])'
+storage: {}
+  # database_url: sqlite:///network_monitor.db
+  # archive_dir: /data/archive   # les mesures purgées y sont rangées en Parquet (un dossier par sortie)
+notifications:
+  enabled: false
+  timezone: Africa/Douala        # fuseau des heures dans les messages
+  batch_window: 20s              # les alertes rapprochées partent dans un seul message
+  max_attempts: 6
+  channels: []
+  # Les secrets sont dans l'environnement (.env), jamais ici : chaque canal nomme sa variable.
+  # channels:
+  #   - {name: noc, type: telegram, chat_id: "-1001234567890", min_severity: warning}   # groupe Telegram
+  #   - {name: ops-sms, type: sms, provider: android_gateway,                           # SMS de groupe
+  #      recipients: ["+237690000001", "+237690000002"], min_severity: critical,
+  #      events: [opened, closed], max_messages_per_hour: 20}
+  #   - {name: ticketing, type: webhook}                                                # POST JSON signé
 monitoring:
   interval: 5m
 history:

@@ -41,3 +41,8 @@ yarn-error.log*
 *.swp
 .DS_Store
 Thumbs.db
+
+# Verrou d instance unique et archive locale
+*.db.lock
+network_monitor.lock
+archive/

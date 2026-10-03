@@ -161,6 +161,10 @@ class Alert:
     traffic_deviation_percent: float | None = None
     loss_percent: float | None = None
     expected_loss_percent: float | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    confirmed: bool = True
+    """False pour un signal faible résorbé sans jamais avoir été confirmé : à ne notifier à personne."""
 
 
 class IncidentManager:
@@ -239,21 +243,6 @@ class IncidentManager:
         if score < self._config.warning_score:
             return alerts
 
-        reopened = self._try_reopen(state, result.timestamp)
-        if reopened is not None:
-            state.incident = reopened
-            state.open_since = result.timestamp
-            self._append_evidence(reopened, result, expected_traffic, expected_loss, observed_traffic, observed_loss)
-            reopened.last_seen_at = result.timestamp
-            reopened.score = max(reopened.score, score)
-            alerts.append(
-                self._alert(
-                    reopened, "reopened", result.timestamp,
-                    f"Incident ré-ouvert sur {result.output_id} (nouvelle anomalie dans la fenêtre de fusion)",
-                )
-            )
-            return alerts
-
         state.suspect_since = result.timestamp
         state.suspect_steps_above = 1
         state.below_warning_since = None
@@ -264,17 +253,19 @@ class IncidentManager:
         alerts.append(self._alert(incident, "suspect", result.timestamp, f"Signal faible détecté sur {result.output_id}"))
         return alerts
 
-    def _try_reopen(self, state: _OutputState, at: datetime) -> Incident | None:
-        """Rouvre le dernier incident confirmé de cette sortie s'il s'est fermé
-        il y a moins de `merge_window` (§22 : un incident intermittent reste un
-        seul incident, pas une suite d'incidents distincts)."""
+    def _try_reopen(self, state: _OutputState, episode_start: datetime) -> Incident | None:
+        """Rouvre le dernier incident confirmé de cette sortie si le nouvel épisode a commencé
+        moins de `merge_window` après sa fin (§22 : un incident intermittent reste un seul
+        incident, pas une suite d'incidents distincts). N'est appelé qu'à la **confirmation**
+        du nouvel épisode : un pic de bruit juste après la fin d'un incident ne le prolonge pas."""
         closed, closed_at = state.last_closed_incident, state.last_closed_at
-        if closed is None or closed_at is None or at - closed_at > self._config.merge_window:
+        if closed is None or closed_at is None or episode_start - closed_at > self._config.merge_window:
             return None
         state.last_closed_incident = None
         state.last_closed_at = None
         closed.status = IncidentStatus.OPEN
         closed.closed_at = None
+        closed.ended_at = None
         return closed
 
     # -- Incident actif (SUSPECT ou OPEN) ------------------------------------------
@@ -324,8 +315,31 @@ class IncidentManager:
             if score >= self._config.open_score:
                 elapsed = result.timestamp - state.suspect_since
                 if elapsed >= min_duration:
+                    previous = self._try_reopen(state, incident.suspected_at or result.timestamp)
+                    if previous is not None:
+                        # Le nouvel épisode confirmé prolonge l'incident précédent (même identité,
+                        # début d'origine conservé) : on lui verse les preuves du SUSPECT abandonné.
+                        previous.evidence.extend(incident.evidence)
+                        self._trim_evidence(previous)
+                        previous.last_seen_at = result.timestamp
+                        previous.score = max(previous.score, incident.score)
+                        previous.peak_traffic_deviation_percent = _peak(
+                            previous.peak_traffic_deviation_percent, incident.peak_traffic_deviation_percent
+                        )
+                        previous.peak_loss_percent = max(previous.peak_loss_percent, incident.peak_loss_percent)
+                        previous.incident_type = _incident_type(previous.evidence)
+                        state.incident, state.open_since = previous, result.timestamp
+                        alerts.append(
+                            self._alert(
+                                previous, "reopened", result.timestamp,
+                                f"Incident ré-ouvert sur {result.output_id} (nouvel épisode confirmé dans la fenêtre de fusion)",
+                            )
+                        )
+                        return alerts
                     incident.status = IncidentStatus.OPEN
                     incident.opened_at = result.timestamp
+                    # Rétro-daté : l'incident a commencé au premier signal faible de l'épisode.
+                    incident.started_at = incident.suspected_at
                     state.open_since = result.timestamp
                     incident.severity = self._severity_for(score)
                     incident.incident_type = _incident_type(incident.evidence)
@@ -360,6 +374,8 @@ class IncidentManager:
             elif result.timestamp - state.below_close_since >= recovery_duration:
                 incident.status = IncidentStatus.CLOSED
                 incident.closed_at = result.timestamp
+                # Rétro-daté : la fin est le premier pas sous close_score, pas la décision de fermer.
+                incident.ended_at = state.below_close_since
                 alerts.append(self._alert(incident, "closed", result.timestamp, self._describe(incident)))
                 self._reset(state, incident)
             return alerts
@@ -432,6 +448,9 @@ class IncidentManager:
                 data_gap=result.data_gap,
             )
         )
+        self._trim_evidence(incident)
+
+    def _trim_evidence(self, incident: Incident) -> None:
         if len(incident.evidence) > self._MAX_EVIDENCE:
             head = 20
             incident.evidence = incident.evidence[:head] + incident.evidence[-(self._MAX_EVIDENCE - head):]
@@ -454,7 +473,9 @@ class IncidentManager:
     def _alert(self, incident: Incident, event: str, timestamp: datetime, message: str) -> Alert:
         severity = Severity.INFO if event in ("suspect", "recovering") else incident.severity
         ev = incident.evidence[-1] if incident.evidence else None
-        start = incident.opened_at or incident.suspected_at
+        start = incident.started_at or incident.opened_at or incident.suspected_at
+        # Une alerte de fermeture rapporte la durée réelle (début → fin rétro-datés), pas le moment de la décision.
+        end = incident.ended_at if event == "closed" and incident.ended_at else timestamp
         return Alert(
             incident_id=incident.id,
             output_id=incident.output_id,
@@ -463,12 +484,15 @@ class IncidentManager:
             timestamp=timestamp,
             message=message,
             incident_type=incident.incident_type,
-            duration_seconds=(timestamp - start).total_seconds() if start else None,
+            duration_seconds=(end - start).total_seconds() if start else None,
             traffic_mbps=ev.traffic_mbps if ev else None,
             expected_traffic_mbps=ev.expected_traffic_mbps if ev else None,
             traffic_deviation_percent=ev.traffic_deviation_percent if ev else None,
             loss_percent=ev.loss_percent if ev else None,
             expected_loss_percent=ev.expected_loss_percent if ev else None,
+            started_at=incident.started_at,
+            ended_at=incident.ended_at,
+            confirmed=incident.opened_at is not None,
         )
 
     def _reset(self, state: _OutputState, closed_incident: Incident | None = None) -> None:
@@ -476,7 +500,7 @@ class IncidentManager:
             # Incident confirmé (pas un simple signal faible résorbé) :
             # mémorisé pour une éventuelle réouverture (§22, merge_window).
             state.last_closed_incident = closed_incident
-            state.last_closed_at = closed_incident.closed_at
+            state.last_closed_at = closed_incident.ended_at or closed_incident.closed_at
         state.incident = None
         state.below_warning_since = None
         state.suspect_steps_above = 0

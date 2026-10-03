@@ -19,24 +19,34 @@ import logging
 import os
 import threading
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
-from typing import Annotated
+from pathlib import Path
+from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr
 
+from network_monitor.analysis.availability import build_report
 from network_monitor.app import auth
 from network_monitor.app.config import AppConfig, HistoryConfig
+from network_monitor.app.http_cache import ETagMiddleware
+from network_monitor.app.lock import SingleInstanceLock
 from network_monitor.app.main import MonitoringLoop
 from network_monitor.app.models import (
     AnomalyResult,
     ForecastResult,
     Incident,
+    Severity,
     TrafficSample,
 )
-from network_monitor.data.sources import CsvDataSource, build_source
+from network_monitor.app.notify import build_dispatcher
+from network_monitor.data.sources import build_source
 from network_monitor.incidents.manager import Alert
+from network_monitor.storage.archive import ParquetArchive
 from network_monitor.storage.repository import Repository, SqlAlchemyRepository
 
 logger = logging.getLogger(__name__)
@@ -106,20 +116,29 @@ class MonitoringState:
     réelles qu'implique §3 du cahier des charges.
     """
 
-    def __init__(self, config: AppConfig | None = None, db_url: str = "sqlite:///network_monitor.db") -> None:
+    def __init__(self, config: AppConfig | None = None, db_url: str | None = None) -> None:
         # Copie profonde : cette instance ne doit jamais pouvoir muter
         # DEFAULT_API_CONFIG (ni la config passée par l'appelant), qu'elle
         # vienne d'ici ou d'un futur PUT /config (§35).
         self.config = (config or DEFAULT_API_CONFIG).model_copy(deep=True)
-        self.storage: Repository = SqlAlchemyRepository(db_url)
+        archive = ParquetArchive(self.config.storage.archive_dir) if self.config.storage.archive_dir else None
+        db_url = db_url or self.config.storage.database_url
+        self._lock_path = self.config.storage.lock_file or (
+            db_url.removeprefix("sqlite:///") + ".lock" if db_url.startswith("sqlite:///") else "network_monitor.lock"
+        )
+        self.lock = SingleInstanceLock(self._lock_path)
+        self.storage: Repository = SqlAlchemyRepository(db_url, archive)
         self.source = build_source(self.config)
         self.live = bool(getattr(self.source, "live", False))
-        self.loop = MonitoringLoop(self.source, self.storage, self.config)
+        # Un secret manquant lève ici : refuser de démarrer vaut mieux que découvrir pendant
+        # un incident qu'aucune alerte ne part.
+        self.notifier = build_dispatcher(self.config.notifications, self.storage)
+        self.loop = MonitoringLoop(self.source, self.storage, self.config, self.notifier)
         interval = self.config.monitoring.interval
         # Source « live » (SQL) : horloge réelle, un tick par intervalle. Rejeu CSV :
         # horloge simulée qui démarre à la bascule historique → rejeu du fichier.
         # Mock : horloge simulée accélérée, calée sur l'heure actuelle.
-        if isinstance(self.source, CsvDataSource):
+        if hasattr(self.source, "default_start"):  # rejeu d'un fichier (CSV, Parquet)
             self.now = self.source.default_start()
         else:
             self.now = _aligned_now(interval)
@@ -197,10 +216,16 @@ state = MonitoringState(_initial_config())
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    state.lock.acquire()  # refuse de démarrer si une autre instance tient déjà la base
     state.calibrate()
     state.start()
+    if state.notifier:
+        state.notifier.start()
     yield
     state.stop()
+    if state.notifier:
+        state.notifier.stop()
+    state.lock.release()
 
 
 _throttle = auth.LoginThrottle()
@@ -222,6 +247,9 @@ app = FastAPI(
 _default_origins = "http://localhost:5173,http://127.0.0.1:5173"
 _cors_origins = [o.strip() for o in os.environ.get("NM_CORS_ORIGINS", _default_origins).split(",") if o.strip()]
 
+# Ordre : le dernier ajouté est le plus extérieur. ETag (corps non compressé) → gzip → CORS.
+app.add_middleware(ETagMiddleware)
+app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -344,6 +372,12 @@ def list_outputs() -> list[OutputSummary]:
     return summaries
 
 
+def _require_aware(*values: datetime | None) -> None:
+    for value in values:
+        if value is not None and value.tzinfo is None:
+            raise HTTPException(status_code=422, detail="les dates doivent inclure un fuseau horaire (suffixe Z ou +00:00)")
+
+
 def _parse_window(
     since: datetime | None, until: datetime | None, default_span: timedelta
 ) -> tuple[datetime, datetime]:
@@ -463,6 +497,53 @@ def list_alerts(
     return [AlertOut.from_alert(a) for a in state.storage.list_alerts(output_id=output_id, limit=limit)]
 
 
+_MAX_REPORT_SPAN = timedelta(days=366)
+
+
+@app.get("/reports/availability")
+def availability_report(
+    start: Annotated[datetime | None, Query()] = None,
+    end: Annotated[datetime | None, Query()] = None,
+    output_id: Annotated[str | None, Query()] = None,
+    downtime_severity: Annotated[Severity, Query()] = Severity.CRITICAL,
+    format: Annotated[Literal["json", "csv"], Query()] = "json",
+    days: Annotated[float | None, Query(gt=0, le=366)] = None,
+):
+    """
+    Rapport de disponibilité par sortie sur une période (30 jours se terminant maintenant par
+    défaut ; `days` donne les N derniers jours selon l'horloge du **serveur**, ce que doit utiliser
+    un client dont l'horloge n'est pas celle du serveur) : indisponibilité, dégradation, couverture des mesures, MTTD et MTTR, calculés sur les
+    dates **rétro-datées** des incidents (début réel, fin réelle). `format=csv` pour un tableur.
+    """
+    _require_aware(start, end)
+    if days is not None and (start is not None or end is not None):
+        raise HTTPException(status_code=422, detail="`days` est exclusif avec `start` et `end`")
+    horizon = state.now
+    stop = end or horizon
+    begin = start or (stop - timedelta(days=days or 30))
+    if begin >= stop:
+        raise HTTPException(status_code=400, detail="`start` doit être antérieur à `end`")
+    if stop - begin > _MAX_REPORT_SPAN:
+        raise HTTPException(status_code=400, detail="période limitée à 366 jours")
+    if output_id is not None:
+        _ensure_known_output(output_id)
+    outputs = [output_id] if output_id else state.source.list_outputs()
+    # Les mesures brutes sont purgées au-delà de `history.preferred` : la couverture n'est jugée que sur ce qui est conservé.
+    retained_from = horizon - state.config.history.preferred
+    counts = state.storage.count_samples(max(begin, retained_from), min(stop, horizon + state.source.get_interval()))
+    report = build_report(
+        state.storage.list_incidents_between(begin, stop), outputs, begin, stop, horizon,
+        state.source.get_interval(), counts, downtime_severity, coverage_start=retained_from,
+    )
+    if format == "csv":
+        stamp = f"{begin:%Y%m%d}-{stop:%Y%m%d}"
+        return Response(
+            report.to_csv(), media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="disponibilite-{stamp}.csv"'},
+        )
+    return asdict(report)
+
+
 @app.get("/monitoring/status", response_model=MonitoringStatus)
 def monitoring_status() -> MonitoringStatus:
     return MonitoringStatus(
@@ -474,6 +555,44 @@ def monitoring_status() -> MonitoringStatus:
         seconds_per_tick=state.seconds_per_tick,
         outputs=state.source.list_outputs(),
     )
+
+
+class NotificationOut(BaseModel):
+    id: str
+    channel: str
+    status: str
+    attempts: int
+    created_at: datetime
+    sent_at: datetime | None
+    last_error: str | None
+    summary: str
+
+
+@app.get("/notifications", response_model=list[NotificationOut])
+def list_notifications(
+    _subject: Annotated[str, Depends(require_token)],
+    status: Annotated[Literal["pending", "sent", "failed"] | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> list[NotificationOut]:
+    """État des envois (réservé aux utilisateurs connectés : les erreurs peuvent citer le service distant)."""
+    return [
+        NotificationOut(
+            id=n.id, channel=n.channel, status=n.status, attempts=n.attempts, created_at=n.created_at,
+            sent_at=n.sent_at, last_error=n.last_error,
+            summary=f"{n.alert['output_id']} {n.alert['event']} ({n.alert['incident_type']})",
+        )
+        for n in state.storage.list_notifications(status, limit)
+    ]
+
+
+@app.post("/notifications/test/{channel}")
+def test_notification(channel: str, subject: Annotated[str, Depends(require_token)]) -> dict:
+    """Envoie un message d'essai immédiat sur un canal (vérifier un groupe Telegram, un numéro, un webhook)."""
+    if state.notifier is None or channel not in state.notifier.channels:
+        raise HTTPException(status_code=404, detail=f"Canal inconnu ou notifications désactivées : {channel}")
+    logger.info("Message d'essai sur %s demandé par %s", channel, subject)
+    results = state.notifier.send_test(channel)
+    return {"channel": channel, "ok": all(v is None for v in results.values()), "results": results}
 
 
 @app.post("/auth/login", response_model=LoginResponse)
@@ -555,3 +674,11 @@ def update_config(update: ConfigUpdate, subject: Annotated[str, Depends(require_
     state.loop.incident_manager.update_config(validated.incident, critical_score=validated.alerts.critical_score)
 
     return state.config
+
+
+# Interface web servie par l'API elle-même (image Docker : une seule origine, donc pas de CORS à
+# régler, et un seul processus à déployer). Doit rester **après** toutes les routes : ce montage
+# répond à tout ce qu'aucune route n'a reconnu.
+_static_dir = os.environ.get("NM_STATIC_DIR")
+if _static_dir and Path(_static_dir).is_dir():
+    app.mount("/", StaticFiles(directory=_static_dir, html=True), name="frontend")

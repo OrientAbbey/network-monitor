@@ -11,7 +11,8 @@ sérialisation des `evidence` utilise JSON via Pydantic, jamais `pickle`.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import (
@@ -23,6 +24,7 @@ from sqlalchemy import (
     String,
     create_engine,
     event,
+    func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -38,10 +40,27 @@ from network_monitor.app.models import (
     TrafficSample,
 )
 from network_monitor.incidents.manager import Alert
+from network_monitor.storage.archive import ParquetArchive
 
 
 class Base(DeclarativeBase):
     pass
+
+
+@dataclass
+class Notification:
+    """Un envoi à faire (ou fait) : une alerte vers un canal. Voir `NotificationRow`."""
+
+    id: str
+    channel: str
+    alert: dict[str, Any]
+    created_at: datetime
+    next_attempt_at: datetime
+    status: str = "pending"
+    attempts: int = 0
+    sent_at: datetime | None = None
+    last_error: str | None = None
+    pending_targets: list[str] | None = None
 
 
 def _to_utc(dt: datetime) -> datetime:
@@ -111,6 +130,8 @@ class IncidentRow(Base):
     opened_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
     last_seen_at: Mapped[datetime] = mapped_column(_TS, index=True)
     closed_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
     score: Mapped[float] = mapped_column(Float)
     peak_traffic_deviation_percent: Mapped[float] = mapped_column(Float)
     peak_loss_percent: Mapped[float] = mapped_column(Float)
@@ -143,6 +164,27 @@ class AlertRow(Base):
     traffic_deviation_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
     loss_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
     expected_loss_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    confirmed: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class NotificationRow(Base):
+    """File d'envoi (« outbox ») : une ligne par alerte et par canal, écrite dans la même
+    transaction que l'alerte. Un envoi qui échoue est retenté ; un redémarrage ne perd rien."""
+
+    __tablename__ = "notifications"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    channel: Mapped[str] = mapped_column(String, index=True)
+    status: Mapped[str] = mapped_column(String, index=True)  # pending | sent | failed
+    attempts: Mapped[int] = mapped_column(default=0)
+    created_at: Mapped[datetime] = mapped_column(_TS)
+    next_attempt_at: Mapped[datetime] = mapped_column(_TS, index=True)
+    sent_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String, nullable=True)
+    pending_targets: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    """Destinataires restant à servir (SMS de groupe : seuls ceux qui ont échoué sont retentés)."""
+    alert: Mapped[dict[str, Any]] = mapped_column(JSON)
 
 
 class Repository(ABC):
@@ -168,10 +210,23 @@ class Repository(ABC):
         anomalies: list[AnomalyResult],
         incidents: list[Incident],
         alerts: list[Alert],
+        notifications: list[Notification] | None = None,
     ) -> None:
         """Écrit tous les résultats d'un tick en une seule transaction : un
-        seul commit (donc un seul fsync) au lieu d'un par type de donnée."""
+        seul commit (donc un seul fsync) au lieu d'un par type de donnée. Les
+        notifications y sont incluses : une alerte et son envoi ne se séparent jamais."""
         ...
+
+    @abstractmethod
+    def due_notifications(self, channel: str, now: datetime, limit: int = 200) -> list[Notification]:
+        """Envois en attente d'un canal, dont l'heure de (re)tentative est venue."""
+        ...
+
+    @abstractmethod
+    def update_notifications(self, items: list[Notification]) -> None: ...
+
+    @abstractmethod
+    def list_notifications(self, status: str | None = None, limit: int = 100) -> list[Notification]: ...
 
     @abstractmethod
     def save_alerts(self, alerts: list[Alert]) -> None: ...
@@ -198,8 +253,19 @@ class Repository(ABC):
     def get_incident(self, incident_id: str) -> Incident | None: ...
 
     @abstractmethod
+    def list_incidents_between(self, start: datetime, end: datetime) -> list[Incident]:
+        """Incidents confirmés qui chevauchent [start, end[ (début rétro-daté avant `end`, dernier pas vu après `start`)."""
+        ...
+
+    @abstractmethod
+    def count_samples(self, start: datetime, end: datetime) -> dict[str, int]:
+        """Nombre de mesures brutes reçues par sortie sur [start, end[."""
+        ...
+
+    @abstractmethod
     def purge_older_than(self, cutoff: datetime) -> None:
-        """Supprime les mesures/prévisions/anomalies antérieures à `cutoff`.
+        """Supprime les mesures/prévisions/anomalies antérieures à `cutoff` (les mesures sont
+        d'abord archivées si une archive Parquet est configurée).
         Les incidents et les alertes ne sont jamais purgés ici : ce sont des
         événements, pas des séries qui croissent indéfiniment au même rythme."""
         ...
@@ -216,7 +282,8 @@ class SqlAlchemyRepository(Repository):
     sans dépendance externe — adapté à un environnement contraint).
     """
 
-    def __init__(self, url: str = "sqlite:///network_monitor.db") -> None:
+    def __init__(self, url: str = "sqlite:///network_monitor.db", archive: ParquetArchive | None = None) -> None:
+        self._archive = archive
         # `check_same_thread=False` : l'API fait tourner la boucle de monitoring
         # dans un thread dédié pendant que les requêtes HTTP arrivent sur un
         # autre thread. Chaque appel garde une session courte (`with self._session()`),
@@ -309,6 +376,8 @@ class SqlAlchemyRepository(Repository):
                     opened_at=_opt_utc(incident.opened_at),
                     last_seen_at=_to_utc(incident.last_seen_at),
                     closed_at=_opt_utc(incident.closed_at),
+                    started_at=_opt_utc(incident.started_at),
+                    ended_at=_opt_utc(incident.ended_at),
                     score=incident.score,
                     peak_traffic_deviation_percent=incident.peak_traffic_deviation_percent,
                     peak_loss_percent=incident.peak_loss_percent,
@@ -337,8 +406,55 @@ class SqlAlchemyRepository(Repository):
                     traffic_deviation_percent=a.traffic_deviation_percent,
                     loss_percent=a.loss_percent,
                     expected_loss_percent=a.expected_loss_percent,
+                    started_at=_opt_utc(a.started_at),
+                    ended_at=_opt_utc(a.ended_at),
+                    confirmed=a.confirmed,
                 )
             )
+
+    @staticmethod
+    def _merge_notifications(session: Session, items: list[Notification]) -> None:
+        for n in items:
+            session.merge(
+                NotificationRow(
+                    id=n.id, channel=n.channel, status=n.status, attempts=n.attempts,
+                    created_at=_to_utc(n.created_at), next_attempt_at=_to_utc(n.next_attempt_at),
+                    sent_at=_opt_utc(n.sent_at), last_error=n.last_error,
+                    pending_targets=n.pending_targets, alert=n.alert,
+                )
+            )
+
+    @staticmethod
+    def _notification(r: NotificationRow) -> Notification:
+        return Notification(
+            id=r.id, channel=r.channel, alert=r.alert, created_at=_as_utc(r.created_at),
+            next_attempt_at=_as_utc(r.next_attempt_at), status=r.status, attempts=r.attempts,
+            sent_at=_opt_as_utc(r.sent_at), last_error=r.last_error, pending_targets=r.pending_targets,
+        )
+
+    def due_notifications(self, channel: str, now: datetime, limit: int = 200) -> list[Notification]:
+        with self._session() as session:
+            rows = (
+                session.query(NotificationRow)
+                .filter(NotificationRow.channel == channel, NotificationRow.status == "pending",
+                        NotificationRow.next_attempt_at <= _to_utc(now))
+                .order_by(NotificationRow.created_at)
+                .limit(limit)
+                .all()
+            )
+            return [self._notification(r) for r in rows]
+
+    def update_notifications(self, items: list[Notification]) -> None:
+        with self._session() as session:
+            self._merge_notifications(session, items)
+            session.commit()
+
+    def list_notifications(self, status: str | None = None, limit: int = 100) -> list[Notification]:
+        with self._session() as session:
+            query = session.query(NotificationRow)
+            if status:
+                query = query.filter(NotificationRow.status == status)
+            return [self._notification(r) for r in query.order_by(NotificationRow.created_at.desc()).limit(limit).all()]
 
     def save_samples(self, samples: list[TrafficSample]) -> None:
         with self._session() as session:
@@ -372,6 +488,7 @@ class SqlAlchemyRepository(Repository):
         anomalies: list[AnomalyResult],
         incidents: list[Incident],
         alerts: list[Alert],
+        notifications: list[Notification] | None = None,
     ) -> None:
         with self._session() as session:
             self._merge_samples(session, samples)
@@ -379,6 +496,7 @@ class SqlAlchemyRepository(Repository):
             self._merge_anomalies(session, anomalies)
             self._merge_incidents(session, incidents)
             self._merge_alerts(session, alerts)
+            self._merge_notifications(session, notifications or [])
             session.commit()
 
     # -- Lectures ------------------------------------------------------------
@@ -404,6 +522,9 @@ class SqlAlchemyRepository(Repository):
                     traffic_deviation_percent=r.traffic_deviation_percent,
                     loss_percent=r.loss_percent,
                     expected_loss_percent=r.expected_loss_percent,
+                    started_at=_opt_as_utc(r.started_at),
+                    ended_at=_opt_as_utc(r.ended_at),
+                    confirmed=r.confirmed,
                 )
                 for r in rows
             ]
@@ -504,13 +625,68 @@ class SqlAlchemyRepository(Repository):
             row = session.query(IncidentRow).filter(IncidentRow.id == incident_id).one_or_none()
             return _incident_from_row(row) if row is not None else None
 
+    def list_incidents_between(self, start: datetime, end: datetime) -> list[Incident]:
+        with self._session() as session:
+            rows = (
+                session.query(IncidentRow)
+                .filter(
+                    IncidentRow.opened_at.is_not(None),
+                    IncidentRow.last_seen_at >= _to_utc(start),
+                    func.coalesce(IncidentRow.started_at, IncidentRow.opened_at) < _to_utc(end),
+                )
+                .order_by(IncidentRow.opened_at)
+                .all()
+            )
+            return [_incident_from_row(r) for r in rows]
+
+    def count_samples(self, start: datetime, end: datetime) -> dict[str, int]:
+        with self._session() as session:
+            rows = (
+                session.query(RawMeasurementRow.output_id, func.count())
+                .filter(RawMeasurementRow.timestamp >= _to_utc(start), RawMeasurementRow.timestamp < _to_utc(end))
+                .group_by(RawMeasurementRow.output_id)
+                .all()
+            )
+            return {output_id: int(n) for output_id, n in rows}
+
     def purge_older_than(self, cutoff: datetime) -> None:
         cutoff_utc = _to_utc(cutoff)
+        if self._archive is not None:
+            self._archive_raw_before(cutoff_utc)
         with self._session() as session:
-            session.query(RawMeasurementRow).filter(RawMeasurementRow.timestamp < cutoff_utc).delete()
-            session.query(ForecastRow).filter(ForecastRow.timestamp < cutoff_utc).delete()
-            session.query(AnomalyRow).filter(AnomalyRow.timestamp < cutoff_utc).delete()
+            session.query(RawMeasurementRow).filter(RawMeasurementRow.timestamp < cutoff_utc).delete(synchronize_session=False)
+            session.query(ForecastRow).filter(ForecastRow.timestamp < cutoff_utc).delete(synchronize_session=False)
+            session.query(AnomalyRow).filter(AnomalyRow.timestamp < cutoff_utc).delete(synchronize_session=False)
             session.commit()
+
+    def _archive_raw_before(self, cutoff: datetime) -> None:
+        """Archive puis supprime les mesures brutes antérieures à `cutoff`, un jour à la fois
+        (la mémoire reste bornée à une journée de mesures, quel que soit le retard accumulé).
+        Une archive qui échoue interrompt la purge : mieux vaut garder la donnée que la perdre."""
+        assert self._archive is not None
+        while True:
+            with self._session() as session:
+                first = session.query(func.min(RawMeasurementRow.timestamp)).scalar()
+                if first is None or _as_utc(first) >= cutoff:
+                    return
+                day_start = _as_utc(first).replace(hour=0, minute=0, second=0, microsecond=0)
+                day_end = min(day_start + timedelta(days=1), cutoff)
+                rows = (
+                    session.query(RawMeasurementRow)
+                    .filter(RawMeasurementRow.timestamp >= day_start, RawMeasurementRow.timestamp < day_end)
+                    .all()
+                )
+                self._archive.write(
+                    TrafficSample(
+                        timestamp=_as_utc(r.timestamp), output_id=r.output_id,
+                        traffic_mbps=r.traffic_mbps, loss_percent=r.loss_percent,
+                    )
+                    for r in rows
+                )
+                session.query(RawMeasurementRow).filter(
+                    RawMeasurementRow.timestamp >= day_start, RawMeasurementRow.timestamp < day_end
+                ).delete(synchronize_session=False)
+                session.commit()
 
 
 def _incident_from_row(row: IncidentRow) -> Incident:
@@ -524,6 +700,8 @@ def _incident_from_row(row: IncidentRow) -> Incident:
         opened_at=_opt_as_utc(row.opened_at),
         last_seen_at=_as_utc(row.last_seen_at),
         closed_at=_opt_as_utc(row.closed_at),
+        started_at=_opt_as_utc(row.started_at),
+        ended_at=_opt_as_utc(row.ended_at),
         score=row.score,
         peak_traffic_deviation_percent=row.peak_traffic_deviation_percent,
         peak_loss_percent=row.peak_loss_percent,

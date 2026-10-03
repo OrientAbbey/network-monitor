@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback, type KeyboardEvent, type MouseEvent } from "react";
 import { api, currentSession, login, logout, type Session } from "./api";
-import { decimate, nearestIndex, pointerToTime, type Point } from "./chart";
-import type { Alert, AppConfigView, ForecastPoint, Incident, MonitoringStatus, OutputSummary, TrafficSample } from "./types";
+import { decimate, mergeSeries, nearestIndex, pointerToTime, type Point } from "./chart";
+import { usePolling } from "./polling";
+import type { Alert, AppConfigView, AvailabilityReport, ForecastPoint, Incident, MonitoringStatus, OutputSummary, TrafficSample } from "./types";
 
 type Visibility = { traffic: boolean; loss: boolean; baseline: boolean; prediction: boolean };
 type Current = { traffic: number | null | undefined; loss: number | null | undefined };
@@ -116,33 +117,58 @@ export function DetailChart({ outputId, rangeKey, onRangeChange, visibility, onT
   const [hover, setHover] = useState<number | null>(null); // indice du point survolé / focalisé (dans la série affichée)
   const range = RANGES.find((r) => r.key === rangeKey) ?? RANGES[0];
 
+  // Séries affichées, aussi tenues dans des refs : un rafraîchissement ne demande à l'API que les
+  // points postérieurs au dernier connu (quelques octets) au lieu de re-télécharger toute la fenêtre.
+  const historyRef = useRef<TrafficSample[]>([]);
+  const baselineRef = useRef<ForecastPoint[]>([]);
+  const generation = useRef(0); // invalide les réponses en vol d'une fenêtre ou d'une sortie abandonnée
+
+  useEffect(() => {
+    generation.current += 1;
+    historyRef.current = [];
+    baselineRef.current = [];
+    setHistory([]);
+    setBaseline([]);
+    setLoading(true);
+  }, [outputId, rangeKey]);
+
+  useEffect(() => {
+    if (!visibility.baseline) {
+      baselineRef.current = [];
+      setBaseline([]);
+    }
+  }, [visibility.baseline]);
+
   const refresh = useCallback(async () => {
-    // Fenêtres relatives à l'horloge du SERVEUR (`span_hours`) : l'horloge
-    // simulée du backend n'est pas celle du navigateur, construire since/until
-    // avec `new Date()` ne retrouvait presque aucun échantillon.
+    // Fenêtres relatives à l'horloge du SERVEUR (`span_hours`, ou `since` = dernier point connu) :
+    // l'horloge simulée du backend n'est pas celle du navigateur, construire since/until avec
+    // `new Date()` ne retrouvait presque aucun échantillon.
+    const gen = generation.current;
     const spanHours = range.spanMs / 3600_000;
+    const lastHistory = historyRef.current.at(-1)?.timestamp;
+    const lastBaseline = baselineRef.current.at(-1)?.timestamp;
     try {
       const [hist, fc, ahead] = await Promise.all([
-        api.history(outputId, undefined, undefined, spanHours),
-        visibility.baseline ? api.forecast(outputId, undefined, undefined, spanHours) : Promise.resolve([]),
+        lastHistory ? api.history(outputId, lastHistory) : api.history(outputId, undefined, undefined, spanHours),
+        !visibility.baseline
+          ? Promise.resolve([])
+          : lastBaseline ? api.forecast(outputId, lastBaseline) : api.forecast(outputId, undefined, undefined, spanHours),
         visibility.prediction ? api.forecastAhead(outputId, 35) : Promise.resolve([]),
       ]);
-      setHistory(hist);
-      setBaseline(fc);
+      if (gen !== generation.current) return; // la fenêtre a changé pendant la requête
+      historyRef.current = mergeSeries(historyRef.current, hist, range.spanMs);
+      baselineRef.current = mergeSeries(baselineRef.current, fc, range.spanMs);
+      setHistory(historyRef.current);
+      setBaseline(baselineRef.current);
       setPrediction(ahead);
     } catch (err) {
       console.error("Échec du rafraîchissement du graphe", outputId, err);
     } finally {
-      setLoading(false);
+      if (gen === generation.current) setLoading(false);
     }
   }, [outputId, rangeKey, visibility.baseline, visibility.prediction]);
 
-  useEffect(() => {
-    setLoading(true);
-    refresh();
-    const id = setInterval(refresh, 5000);
-    return () => clearInterval(id);
-  }, [refresh]);
+  usePolling(refresh, 5000, [refresh]);
 
   if (loading && history.length === 0) {
     return <div className="chart-loading">Chargement…</div>;
@@ -400,11 +426,7 @@ function SummaryTable({ outputIds, thresholds, serverNow }: { outputIds: string[
     setRows(next);
   }, [outputIds.join(",")]);
 
-  useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, 15000);
-    return () => clearInterval(id);
-  }, [refresh]);
+  usePolling(refresh, 15000, [refresh]);
 
   const windowMeta = [
     { key: "now", label: "Act", full: "Actuelle" },
@@ -473,6 +495,79 @@ function NumberField({ label, hint, value, onChange, min, max, step }: {
       />
       {hint && <span className="settings-field-hint">{hint}</span>}
     </label>
+  );
+}
+
+const PERIODS = [7, 30, 90];
+
+function formatDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined) return "—";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m ? `${h} h ${String(m).padStart(2, "0")}` : `${h} h`;
+}
+
+function AvailabilityPanel() {
+  const [days, setDays] = useState(30);
+  const [report, setReport] = useState<AvailabilityReport | null>(null);
+  const [failed, setFailed] = useState(false);
+  const refresh = useCallback(async () => {
+    try {
+      setReport(await api.availability(days));
+      setFailed(false);
+    } catch {
+      setFailed(true);
+    }
+  }, [days]);
+  usePolling(refresh, 60_000, [refresh]);
+
+  return (
+    <section className="nm-panel nm-table-panel" aria-labelledby="h-availability">
+      <h2 id="h-availability">Disponibilité</h2>
+      <div className="range-selector" role="group" aria-label="Période du rapport">
+        {PERIODS.map((d) => (
+          <button key={d} type="button" className={`range-btn${d === days ? " active" : ""}`} aria-pressed={d === days} onClick={() => setDays(d)}>
+            {d} j
+          </button>
+        ))}
+        <a className="range-btn" href={api.availabilityCsvUrl(days)} download>Exporter en CSV</a>
+      </div>
+      {failed && <p className="settings-warning" role="alert">Rapport indisponible.</p>}
+      {report && (
+        <div style={{ overflowX: "auto" }}>
+          <table className="nm-table">
+            <caption style={{ position: "absolute", left: -9999 }}>Disponibilité par sortie sur les {days} derniers jours</caption>
+            <thead>
+              <tr>
+                <th scope="col">Sortie</th><th scope="col">Disponibilité</th><th scope="col">Indisponible</th>
+                <th scope="col">Dégradé</th><th scope="col">Incidents</th><th scope="col">Détection</th>
+                <th scope="col">Durée moy.</th><th scope="col">Couverture</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.outputs.map((o) => (
+                <tr key={o.output_id}>
+                  <th scope="row">{o.output_id}</th>
+                  <td className="mono">{o.availability_percent === null ? "—" : `${o.availability_percent.toFixed(3)} %`}</td>
+                  <td className="mono">{formatDuration(o.downtime_seconds)}</td>
+                  <td className="mono">{formatDuration(o.degraded_seconds)}</td>
+                  <td className="mono">{o.incidents}</td>
+                  <td className="mono">{formatDuration(o.mttd_seconds)}</td>
+                  <td className="mono">{formatDuration(o.mttr_seconds)}</td>
+                  <td className="mono">{o.coverage_percent === null ? "—" : `${o.coverage_percent.toFixed(1)} %`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="settings-field-hint">
+            Indisponibilité = incidents critiques, du début réel à la fin réelle. Couverture = part des mesures attendues
+            effectivement reçues (une couverture basse rend la disponibilité moins fiable).
+          </p>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -589,10 +684,8 @@ export default function Dashboard() {
 
   useEffect(() => {
     api.getConfig().then(setConfig).catch(() => {});
-    refreshTopLevel();
-    const id = setInterval(refreshTopLevel, 4000);
-    return () => clearInterval(id);
-  }, [refreshTopLevel]);
+  }, []);
+  usePolling(refreshTopLevel, 4000, [refreshTopLevel]);
 
   const saveIncidentConfig = async (draft: IncidentDraft) => {
     setSaving(true);
@@ -722,6 +815,8 @@ export default function Dashboard() {
           />
         )}
       </section>
+
+      <AvailabilityPanel />
 
       <section className="nm-panel" aria-labelledby="h-alerts">
         <h2 id="h-alerts">Alertes récentes</h2>

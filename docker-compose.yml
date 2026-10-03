@@ -1,0 +1,23 @@
+# Démarrage : cp .env.example .env && cp config.example.yaml config.yaml  (puis les adapter)
+#             docker compose up -d --build
+services:
+  monitor:
+    build: .
+    image: network-monitor:local
+    restart: unless-stopped
+    # Local uniquement : le TLS et l'exposition publique sont l'affaire d'un proxy (non inclus).
+    ports: ["127.0.0.1:8000:8000"]
+    env_file: [.env]
+    environment:
+      NM_CONFIG: /config/config.yaml
+    volumes:
+      - data:/data
+      - ./config.yaml:/config/config.yaml:ro
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 20s
+
+volumes:
+  data: {}
