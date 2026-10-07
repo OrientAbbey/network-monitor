@@ -28,6 +28,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
+from network_monitor.analysis.availability import SampleStats
 from network_monitor.app.models import (
     AnomalyResult,
     ForecastModelName,
@@ -232,7 +233,7 @@ class Repository(ABC):
     def save_alerts(self, alerts: list[Alert]) -> None: ...
 
     @abstractmethod
-    def list_alerts(self, output_id: str | None = None, limit: int = 100) -> list[Alert]: ...
+    def list_alerts(self, output_id: str | None = None, limit: int = 100, notable_only: bool = False) -> list[Alert]: ...
 
     @abstractmethod
     def get_history(self, output_id: str, start: datetime, end: datetime) -> list[TrafficSample]: ...
@@ -258,8 +259,8 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    def count_samples(self, start: datetime, end: datetime) -> dict[str, int]:
-        """Nombre de mesures brutes reçues par sortie sur [start, end[."""
+    def sample_stats(self, start: datetime, end: datetime) -> dict[str, SampleStats]:
+        """Nombre de mesures brutes conservées et date de la première, par sortie, sur [start, end[."""
         ...
 
     @abstractmethod
@@ -501,9 +502,11 @@ class SqlAlchemyRepository(Repository):
 
     # -- Lectures ------------------------------------------------------------
 
-    def list_alerts(self, output_id: str | None = None, limit: int = 100) -> list[Alert]:
+    def list_alerts(self, output_id: str | None = None, limit: int = 100, notable_only: bool = False) -> list[Alert]:
         with self._session() as session:
             query = session.query(AlertRow)
+            if notable_only:
+                query = query.filter(AlertRow.confirmed.is_(True), AlertRow.event.not_in(("suspect", "recovering")))
             if output_id is not None:
                 query = query.filter(AlertRow.output_id == output_id)
             rows = query.order_by(AlertRow.timestamp.desc()).limit(limit).all()
@@ -639,15 +642,15 @@ class SqlAlchemyRepository(Repository):
             )
             return [_incident_from_row(r) for r in rows]
 
-    def count_samples(self, start: datetime, end: datetime) -> dict[str, int]:
+    def sample_stats(self, start: datetime, end: datetime) -> dict[str, SampleStats]:
         with self._session() as session:
             rows = (
-                session.query(RawMeasurementRow.output_id, func.count())
+                session.query(RawMeasurementRow.output_id, func.count(), func.min(RawMeasurementRow.timestamp))
                 .filter(RawMeasurementRow.timestamp >= _to_utc(start), RawMeasurementRow.timestamp < _to_utc(end))
                 .group_by(RawMeasurementRow.output_id)
                 .all()
             )
-            return {output_id: int(n) for output_id, n in rows}
+            return {output_id: SampleStats(int(n), _as_utc(first)) for output_id, n, first in rows}
 
     def purge_older_than(self, cutoff: datetime) -> None:
         cutoff_utc = _to_utc(cutoff)

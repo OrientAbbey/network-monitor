@@ -28,7 +28,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Res
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, ValidationError
 
 from network_monitor.analysis.availability import build_report
 from network_monitor.app import auth
@@ -217,6 +217,11 @@ state = MonitoringState(_initial_config())
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     state.lock.acquire()  # refuse de démarrer si une autre instance tient déjà la base
+    if not _is_development and state.config.source.type == "mock":
+        logger.warning(
+            "NM_ENV=%s mais la source de données est « mock » : le dashboard affichera des données SIMULÉES. "
+            "Fournir une vraie configuration (NM_CONFIG, source.type).", os.environ.get("NM_ENV")
+        )
     state.calibrate()
     state.start()
     if state.notifier:
@@ -490,11 +495,14 @@ def get_incident(incident_id: str) -> Incident:
 def list_alerts(
     output_id: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    all: Annotated[bool, Query(description="inclut les signaux faibles (suspect, retour à la normale, non confirmés)")] = False,
 ) -> list[AlertOut]:
-    """Historique des alertes émises (§27), les plus récentes d'abord."""
+    """Historique des alertes émises (§27), les plus récentes d'abord. Par défaut, seulement les
+    alertes qui ont compté : un signal faible résorbé sans jamais avoir été confirmé n'en est pas une
+    (`all=true` pour tout voir : audit, mise au point des seuils)."""
     if output_id is not None:
         _ensure_known_output(output_id)
-    return [AlertOut.from_alert(a) for a in state.storage.list_alerts(output_id=output_id, limit=limit)]
+    return [AlertOut.from_alert(a) for a in state.storage.list_alerts(output_id=output_id, limit=limit, notable_only=not all)]
 
 
 _MAX_REPORT_SPAN = timedelta(days=366)
@@ -528,12 +536,12 @@ def availability_report(
     if output_id is not None:
         _ensure_known_output(output_id)
     outputs = [output_id] if output_id else state.source.list_outputs()
-    # Les mesures brutes sont purgées au-delà de `history.preferred` : la couverture n'est jugée que sur ce qui est conservé.
-    retained_from = horizon - state.config.history.preferred
-    counts = state.storage.count_samples(max(begin, retained_from), min(stop, horizon + state.source.get_interval()))
+    # Les mesures brutes sont purgées au-delà de `history.preferred` : la période observée ne remonte
+    # pas plus loin que la première mesure conservée (voir analysis/availability.py).
+    stats = state.storage.sample_stats(begin, min(stop, horizon + state.source.get_interval()))
     report = build_report(
         state.storage.list_incidents_between(begin, stop), outputs, begin, stop, horizon,
-        state.source.get_interval(), counts, downtime_severity, coverage_start=retained_from,
+        state.source.get_interval(), stats, downtime_severity,
     )
     if format == "csv":
         stamp = f"{begin:%Y%m%d}-{stop:%Y%m%d}"
@@ -661,8 +669,11 @@ def update_config(update: ConfigUpdate, subject: Annotated[str, Depends(require_
 
     try:
         validated = AppConfig.model_validate(candidate)
-    except Exception as exc:  # ValidationError Pydantic
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValidationError as exc:
+        # Messages de validation structurés, sans la valeur saisie ni l'URL de documentation Pydantic.
+        raise HTTPException(
+            status_code=422, detail=exc.errors(include_url=False, include_input=False, include_context=False)
+        ) from exc
 
     # Mutation en place des sous-modèles (pas remplacement de `state.config`
     # lui-même) : `state.loop._config` et `state.config` restent le même

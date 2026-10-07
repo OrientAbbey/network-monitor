@@ -46,3 +46,11 @@ Thumbs.db
 *.db.lock
 network_monitor.lock
 archive/
+
+# Playwright
+frontend/dist-e2e/
+frontend/test-results/
+frontend/playwright-report/
+dist-e2e/
+test-results/
+playwright-report/

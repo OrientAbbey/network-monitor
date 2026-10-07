@@ -51,6 +51,15 @@ protocole détaillé dans « Mesures »). Évaluation : `python -m network_monit
 | Pas d'image de déploiement | `Dockerfile` (front + API, utilisateur non privilégié, 1 worker), `docker-compose.yml`, `requirements.txt` d'exécution séparé de `requirements-dev.txt` | **image non construite ici (pas de Docker)** : étapes reproduites à la main, voir « Mesures » |
 
 
+| Interface jamais vue dans un vrai navigateur | Playwright + Chromium contre le vrai backend (incident injecté) : 12 scénarios, dont infobulle à la souris, gzip/304/incrémental, onglet masqué, connexion, CSV téléchargé | `npm run e2e` ; les tests échouent quand on remet les défauts qu'ils gardent (vérifié) |
+| Libellés d'axe tronqués (« .22 Gbps »), « maintenant » sur un libellé | marge gauche 50 → 68, libellé à gauche du trait | tests e2e de géométrie réelle |
+| axe-core : bouton imbriqué dans un « bouton » (sérieux), contrastes 4,07:1 et 2,27:1 (sérieux) | un seul contrôle clavier par en-tête, `textDim`/`textFaint` éclaircis (≥ 4,5:1) | audit axe WCAG A/AA : aucune violation sérieuse ou critique |
+| Polices chargées depuis Google | `@fontsource`, sous-ensemble latin, auto-hébergées (le dashboard garde son apparence sans Internet) | e2e : aucune requête hors origine |
+| **Disponibilité de 99,456 % affichée pour 25 min d'observation** (calculée sur 30 jours) | période observée = depuis la première mesure conservée ; colonne « Observé » ; couverture recalculée | `tests/test_availability.py`, e2e (3 h 50 d'indisponibilité = la chute injectée) |
+| Panneau d'alertes noyé de signaux faibles | `GET /alerts` ne rend que les alertes notables (`all=true` pour l'audit) | test API + e2e |
+| Données Mock prises pour un vrai réseau | bandeau « Données simulées » + avertissement au démarrage hors développement | test unitaire, e2e |
+| `PUT /config` renvoyait le texte brut de l'exception | erreurs structurées sans valeur saisie ni URL | `tests/test_api.py` |
+
 ## Mesures (Mock ; à refaire sur données réelles)
 
 Protocole : `python -m network_monitor.analysis.evaluation --sweep`. Les anomalies de chaque exécution sont enregistrées une fois, puis rejouées à travers le moteur d'incidents avec chaque réglage (le score des anomalies ne dépend pas des seuils d'incident : le rejeu est exact). 8 jeux : 6 graines × 7 jours avec 12 scénarios chacune (8 types, 4 par sortie), plus 2 variantes de 6 jours (amplitude plus faible, période et rapport cyclique différents) — 96 scénarios, 162 sorties-jours. Réglage sur les graines 1-3 ; les graines 4-6 et les variantes ont servi à vérifier qu'un réglage ne colle pas à un seul jeu.
@@ -109,12 +118,7 @@ Image : sans Docker dans cet environnement, j'ai reproduit les étapes du `Docke
 
 ## Non fait, ou à faire
 
-- **Seuils** : `warning_score` non balayé ; réglages mesurés sur le Mock seulement, qui ne contient ni dérive lente, ni panne partielle, ni saisonnalité changeante. Le bruit du Mock vient d'un générateur à état : deux `load_history` de la même plage ne rendent pas les mêmes valeurs.
-- **Intermittents épars** : un seul échantillon actif sur trois n'est pas détecté par défaut ; un pas de mesure plus fin le résoudrait.
-- **Notifications** : aucun envoi n'a été fait vers les vrais services (Telegram, API Orange, passerelle Android) : formats de requête vérifiés dans leur documentation et testés contre des serveurs simulés, un vrai serveur HTTP local pour le webhook. Premier essai réel : `POST /notifications/test/{canal}`. Garantie « au moins une fois » : une coupure entre l'envoi et son enregistrement peut doubler un message. Pas d'accusé de lecture, pas d'escalade, pas d'acquittement.
-- **Prometheus** : validé sur un Prometheus 2.45 local avec node_exporter (compteurs d'interface de la machine), pas sur des compteurs SNMP d'équipements réels (`ifHCInOctets`) : les requêtes PromQL de la configuration sont à écrire et à vérifier pour chaque équipement.
-- **Sources SQL** : MariaDB 10.11 local seulement ; ni PostgreSQL, ni un vrai Zabbix (connecteur non écrit : schéma `history_uint` connu par la documentation, pas essayé).
-- **Rapport de disponibilité** : « indisponibilité » = incident de sévérité critique (réglable) ; pas de fenêtres de maintenance planifiée à exclure, pas de PDF, pas de rapport programmé par e-mail. Les indicateurs exacts exigés par le régulateur n'ont pas été vérifiés.
-- **Authentification** : un seul niveau de droits, pas d'annuaire (SSO/LDAP), pas de révocation d'une session avant son expiration, limiteur d'essais en mémoire (réinitialisé au redémarrage, global derrière un proxy : lancer uvicorn avec `--proxy-headers` et `--forwarded-allow-ips`).
-- **Image Docker** : non construite ici (voir ci-dessus). Pas de TLS ni de reverse proxy (volontairement laissés au plan de déploiement), pas de CI, pas de sauvegarde automatique de la base, pas de migrations (Alembic) : la base reste jetable à ce stade.
-- **Frontend** : pas de test dans un vrai navigateur (jsdom : la géométrie est simulée, pas mesurée) ; pas d'audit d'accessibilité automatisé (axe).
+La liste complète — limites connues, ce qui est vérifié ou non, fonctionnalités proposées mais non réalisées, décisions reportées (plan de
+déploiement, phase 6), prochaines étapes avec leur critère de sortie — est dans **`docs/LIMITES_ET_FEUILLE_DE_ROUTE.md`**. Les trois points
+à retenir avant toute exploitation réelle : (1) les alertes Telegram, SMS et webhook n'ont jamais été envoyées à de vrais services (webhook
+seulement contre un vrai serveur local), (2) l'image Docker n'a jamais été construite, (3) tous les réglages viennent du Mock.

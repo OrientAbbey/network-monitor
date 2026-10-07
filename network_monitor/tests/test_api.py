@@ -100,6 +100,14 @@ def test_config_rejects_warning_score_above_open_score(client):
     assert client.get("/config").json()["incident"]["open_score"] == 0.75
 
 
+def test_config_validation_errors_are_structured_and_do_not_echo_input(client):
+    r = client.put("/config", json={"open_score": 0.7, "warning_score": 0.9}, headers=AUTH)
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert isinstance(detail, list) and all(set(e) <= {"type", "loc", "msg"} for e in detail)  # pas de `input`, pas de `url`
+    assert "warning_score" in detail[0]["msg"] and "0.9" not in str(detail[0].get("loc", ""))
+
+
 def test_control_endpoints_require_authentication(client):
     assert client.put("/config", json={"open_score": 0.6}).status_code == 401
     assert client.post("/monitoring/start").status_code == 401
@@ -193,3 +201,44 @@ def _wait_until(condition, timeout=20.0):
             return
         time.sleep(0.1)
     raise AssertionError("condition non remplie avant le délai maximal")
+
+
+def test_alerts_endpoint_hides_weak_signals_unless_asked(client):
+    from datetime import datetime, timezone
+
+    from network_monitor.app.models import IncidentType
+    from network_monitor.incidents.manager import Alert
+
+    t = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+    def alert(event, confirmed, minute):
+        return Alert(
+            incident_id=f"i{minute}", output_id="OUT_001", severity=Severity.INFO if not confirmed else Severity.CRITICAL,
+            event=event, timestamp=t + timedelta(minutes=minute), message="m",
+            incident_type=IncidentType.TRAFFIC_DROP,
+            confirmed=confirmed,
+        )
+
+    api_module.state.storage.save_alerts([
+        alert("suspect", False, 0), alert("closed", False, 5),        # bruit résorbé sans confirmation
+        alert("suspect", True, 10), alert("recovering", True, 12),    # états intermédiaires d'un vrai incident
+        alert("opened", True, 15), alert("closed", True, 50),         # ce qui compte
+    ])
+    kept = client.get("/alerts").json()
+    assert sorted(a["event"] for a in kept) == ["closed", "opened"] and all(a["incident_id"] in ("i15", "i50") for a in kept)
+    assert len(client.get("/alerts", params={"all": "true"}).json()) == 6
+
+
+def test_mock_source_in_production_logs_a_warning(tmp_path, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr(api_module, "_is_development", False)
+    state = api_module.MonitoringState(
+        config=AppConfig.model_validate({"history": {"minimum": "30d", "preferred": "40d"}}),
+        db_url=f"sqlite:///{tmp_path / 'w.db'}",
+    )
+    api_module.state = state
+    with caplog.at_level(logging.WARNING, logger=api_module.logger.name), TestClient(api_module.app):
+        state.stop()
+    state.storage.dispose()
+    assert any("SIMULÉES" in r.message for r in caplog.records)

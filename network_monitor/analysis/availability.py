@@ -8,9 +8,13 @@ Définitions (volontairement simples et explicites, car un rapport se discute) :
   `downtime_severity` (critique par défaut). Les incidents qui se chevauchent sur une même sortie
   ne sont comptés qu'une fois (union des intervalles) ;
 - *dégradation* : temps couvert par des incidents confirmés moins sévères, hors indisponibilité ;
-- *couverture* : part des mesures attendues effectivement reçues. Un trou de collecte n'est ni
-  de la disponibilité ni de l'indisponibilité : la disponibilité est rapportée sur le temps
-  couvert, et la couverture est donnée à côté pour que le lecteur juge de sa fiabilité ;
+- *période observée* : un rapport sur 30 jours d'un système qui ne surveille que depuis une heure
+  ne dit rien du reste du mois. La période rapportée commence à la **première mesure conservée**
+  (`monitored_from`), pas au début demandé : la disponibilité se calcule sur ce qui a réellement
+  été observé, et `monitored_seconds` dit combien cela représente ;
+- *couverture* : part des mesures attendues effectivement reçues sur la période observée. Un trou
+  de collecte n'est ni de la disponibilité ni de l'indisponibilité : la couverture est donnée à côté
+  pour que le lecteur juge de la fiabilité ;
 - *MTTD* : délai moyen entre le début réel et la confirmation ; *MTTR* : durée moyenne d'un incident.
 """
 
@@ -27,9 +31,19 @@ _RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
 
 
 @dataclass
+class SampleStats:
+    """Mesures conservées d'une sortie sur la période : leur nombre et la date de la première."""
+
+    count: int
+    first: datetime | None
+
+
+@dataclass
 class OutputAvailability:
     output_id: str
     period_seconds: float
+    monitored_from: datetime | None
+    monitored_seconds: float
     incidents: int
     downtime_seconds: float
     degraded_seconds: float
@@ -54,7 +68,7 @@ class AvailabilityReport:
         writer.writerow(columns)
         for o in self.outputs:
             row = asdict(o)
-            writer.writerow(["" if row[c] is None else row[c] for c in columns])
+            writer.writerow(["" if row[c] is None else (row[c].isoformat() if isinstance(row[c], datetime) else row[c]) for c in columns])
         return buf.getvalue()
 
 
@@ -95,14 +109,12 @@ def build_report(
     end: datetime,
     now: datetime,
     interval: timedelta,
-    samples_received: dict[str, int],
+    samples: dict[str, SampleStats],
     downtime_severity: Severity = Severity.CRITICAL,
-    coverage_start: datetime | None = None,
 ) -> AvailabilityReport:
-    """Rapport sur [start, end[. `now` borne les incidents encore ouverts ; `samples_received`
-    donne, par sortie, le nombre de mesures reçues depuis `coverage_start` (début de la période
-    si omis) : les mesures brutes les plus anciennes sont purgées, la couverture ne peut donc
-    être jugée que sur la part encore conservée."""
+    """Rapport sur [start, end[. `now` borne les incidents encore ouverts ; `samples` donne, par
+    sortie, les mesures conservées sur la période (les plus anciennes sont purgées : la période
+    observée ne peut pas remonter plus loin que la première mesure conservée)."""
     if end <= start:
         raise ValueError("la fin de période doit suivre son début")
     horizon = min(end, now)
@@ -110,24 +122,25 @@ def build_report(
     report = AvailabilityReport(start, end, downtime_severity.value)
 
     for output_id in outputs:
+        stats = samples.get(output_id, SampleStats(0, None))
+        # Période réellement observée : de la première mesure conservée (au plus tôt `start`) à `horizon`.
+        observed_from = max(start, stats.first) if stats.first else horizon
         mine = []
         for i in incidents:
             if i.output_id != output_id or i.opened_at is None:
                 continue  # jamais confirmé : pas un incident
             lo = i.started_at or i.opened_at
             hi = i.ended_at or i.closed_at or (now if i.is_active else i.last_seen_at)
-            lo, hi = max(lo, start), min(hi, horizon)
+            lo, hi = max(lo, observed_from), min(hi, horizon)
             if lo < hi:
                 mine.append((i, lo, hi))
 
         down = _union([(lo, hi) for i, lo, hi in mine if _RANK[i.severity] >= _RANK[downtime_severity]])
         degraded = _minus(_union([(lo, hi) for i, lo, hi in mine]), down)
 
-        observed = max((horizon - start).total_seconds(), 0.0)  # période déjà écoulée
-        covered_from = max(start, coverage_start) if coverage_start else start
-        expected = max((horizon - covered_from).total_seconds(), 0.0) / interval.total_seconds()
-        received = samples_received.get(output_id, 0)
-        coverage = min(100.0, 100.0 * received / expected) if expected >= 1 else None
+        observed = max((horizon - observed_from).total_seconds(), 0.0)
+        expected = observed / interval.total_seconds() + 1  # une mesure à chaque borne de la période
+        coverage = min(100.0, 100.0 * stats.count / expected) if stats.first else 0.0
         down_s = _seconds(down)
         availability = max(0.0, 100.0 * (1 - down_s / observed)) if observed > 0 else None
 
@@ -137,6 +150,8 @@ def build_report(
             OutputAvailability(
                 output_id=output_id,
                 period_seconds=period,
+                monitored_from=observed_from if stats.first else None,
+                monitored_seconds=round(observed, 1),
                 incidents=len(mine),
                 downtime_seconds=round(down_s, 1),
                 degraded_seconds=round(_seconds(degraded), 1),

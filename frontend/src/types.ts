@@ -58,6 +58,8 @@ export interface Alert {
 export interface OutputAvailability {
   output_id: string;
   period_seconds: number;
+  monitored_from: string | null;
+  monitored_seconds: number;
   incidents: number;
   downtime_seconds: number;
   degraded_seconds: number;
@@ -88,6 +90,7 @@ export interface MonitoringStatus {
 export interface AppConfigView {
   incident: { open_score: number; close_score: number; warning_score: number };
   alerts: { enabled: boolean; critical_score: number };
+  source?: { type: string };
   [section: string]: unknown;
 }
 

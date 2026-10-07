@@ -10,7 +10,7 @@ backend, qui les génère (source Mock), les analyse et les stocke.
 Projet de démonstration (source de données Mock uniquement). La revue
 complète et le suivi des correctifs sont dans **[`REVUE.md`](REVUE.md)**.
 
-Limites connues :
+Limites connues (liste complète, avec ce qui est vérifié ou non : `docs/LIMITES_ET_FEUILLE_DE_ROUTE.md`) :
 
 - Sources : Mock (défaut), rejeu CSV ou Parquet (Polars), table SQL en lecture seule (testée sur SQLite et MariaDB 10.11) et **Prometheus** (`query_range`, validée sur un vrai Prometheus avec node_exporter). Aucune n'a été éprouvée sur un vrai réseau ni sur des compteurs SNMP d'équipements.
 - Alertes : Telegram (groupe), webhook signé et SMS de groupe sont testés contre des serveurs **simulés**, jamais contre les vrais services. Premier essai réel : `POST /notifications/test/{canal}`.
@@ -43,12 +43,15 @@ frontend/                Dashboard React + TypeScript strict (Vite), branché su
     api.ts, types.ts     Client HTTP typé vers le backend — aucune génération de données
     chart.ts             Décimation et recherche du point le plus proche (fonctions pures)
     Dashboard.tsx        Interface "Signal Room"
+    main.tsx             Point d'entrée, polices auto-hébergées (@fontsource)
     *.test.ts(x)         Tests Vitest + Testing Library
+  e2e/                   Tests Playwright (navigateur réel) et serveur de test déterministe
   .env.example            VITE_API_BASE_URL à copier en .env
 
 docs/
   CAHIER_DES_CHARGES_RESEAU.md   Spécifications du système de détection
   ARCHITECTURE.md                 Documentation technique du projet complet
+  LIMITES_ET_FEUILLE_DE_ROUTE.md  Limites, fonctionnalités proposées, décisions reportées
 
 config.example.yaml      Exemple de configuration (source, seuils, Isolation Forest)
 requirements.txt         Dépendances d'exécution (optionnel : scikit-learn, pymysql)
@@ -94,8 +97,15 @@ Ouvrir `http://localhost:5173`.
 
 ```bash
 python -m pytest network_monitor/tests/ -v      # backend ; NM_TEST_MARIADB_URL=mysql+pymysql://u:p@host/db et NM_TEST_PROMETHEUS_URL=http://host:9090 activent les tests contre de vrais services
-cd frontend && npm run typecheck && npm test    # frontend (tsc + Vitest)
+cd frontend && npm run typecheck && npm test    # frontend (tsc + Vitest, jsdom)
+cd frontend && npx playwright install chromium   # une fois
+cd frontend && npm run e2e                        # navigateur réel + vrai backend (voir ci-dessous)
 ```
+
+`npm run e2e` (Playwright) construit l'interface en mode « e2e » (même origine, comme l'image Docker), lance le **vrai** backend
+avec un incident injecté (`frontend/e2e/server.py`) et pilote Chromium : infobulle à la souris, libellés d'axe, gzip/304/incrémental,
+onglet masqué, connexion, rapport de disponibilité, téléchargement CSV, audit d'accessibilité axe-core. Dans un environnement qui ne
+peut pas télécharger les navigateurs : `PW_CHROMIUM_PATH=/chemin/vers/chromium` (et `PW_NO_SANDBOX=1` sous root).
 
 ## Docker
 

@@ -25,8 +25,9 @@ const COLORS = {
   border: "#1C2E28",
   borderBright: "#2A423A",
   text: "#DCEAE3",
-  textDim: "#5E7C72",
-  textFaint: "#3C544D",
+  // Contrastes WCAG AA (≥ 4,5:1) sur les fonds de panneau : #5E7C72 (4,07) et #3C544D (2,27) échouaient (axe-core).
+  textDim: "#7C9A90",
+  textFaint: "#718C81",
   trace: "#7FE7C4",
   lossTrace: "#5FB3E8",
   amber: "#E8A33D",
@@ -77,7 +78,8 @@ function formatAxisLabel(date: Date, rangeKey: string, now: Date): string {
 
 const CHART_W = 640;
 const CHART_H = 230;
-const MARGIN = { top: 12, right: 52, bottom: 26, left: 50 };
+// `left` laisse la place au libellé le plus long de l'axe (« 1.22 Gbps » en 9 px) : à 50 il était tronqué.
+const MARGIN = { top: 12, right: 52, bottom: 26, left: 68 };
 const INNER_W = CHART_W - MARGIN.left - MARGIN.right;
 const INNER_H = CHART_H - MARGIN.top - MARGIN.bottom;
 
@@ -281,7 +283,8 @@ export function DetailChart({ outputId, rangeKey, onRangeChange, visibility, onT
         ))}
 
         <line x1={nowX} x2={nowX} y1={MARGIN.top} y2={MARGIN.top + INNER_H} stroke={COLORS.borderBright} strokeWidth="1" strokeDasharray="2 3" />
-        <text x={nowX} y={MARGIN.top - 2} textAnchor="middle" fontSize="8.5" fill={COLORS.textFaint}>maintenant</text>
+        {/* À gauche du trait (textAnchor="end") : centré, il recouvrait le premier libellé de l'axe des pertes. */}
+        <text x={nowX - 5} y={MARGIN.top - 2} textAnchor="end" fontSize="8.5" fill={COLORS.textFaint}>maintenant</text>
 
         {visibility.baseline && baselinePoints.length > 1 && (
           <path d={baselinePath} fill="none" stroke={COLORS.trace} strokeWidth="1" strokeDasharray="4 3" opacity="0.55" />
@@ -541,7 +544,7 @@ function AvailabilityPanel() {
             <caption style={{ position: "absolute", left: -9999 }}>Disponibilité par sortie sur les {days} derniers jours</caption>
             <thead>
               <tr>
-                <th scope="col">Sortie</th><th scope="col">Disponibilité</th><th scope="col">Indisponible</th>
+                <th scope="col">Sortie</th><th scope="col">Observé</th><th scope="col">Disponibilité</th><th scope="col">Indisponible</th>
                 <th scope="col">Dégradé</th><th scope="col">Incidents</th><th scope="col">Détection</th>
                 <th scope="col">Durée moy.</th><th scope="col">Couverture</th>
               </tr>
@@ -550,6 +553,7 @@ function AvailabilityPanel() {
               {report.outputs.map((o) => (
                 <tr key={o.output_id}>
                   <th scope="row">{o.output_id}</th>
+                  <td className="mono">{formatDuration(o.monitored_seconds)}</td>
                   <td className="mono">{o.availability_percent === null ? "—" : `${o.availability_percent.toFixed(3)} %`}</td>
                   <td className="mono">{formatDuration(o.downtime_seconds)}</td>
                   <td className="mono">{formatDuration(o.degraded_seconds)}</td>
@@ -562,8 +566,9 @@ function AvailabilityPanel() {
             </tbody>
           </table>
           <p className="settings-field-hint">
-            Indisponibilité = incidents critiques, du début réel à la fin réelle. Couverture = part des mesures attendues
-            effectivement reçues (une couverture basse rend la disponibilité moins fiable).
+            Calculé sur la période <strong>observée</strong> (depuis la première mesure conservée, au plus tôt le début de la
+            période choisie), pas sur la période demandée. Indisponibilité = incidents critiques, du début réel à la fin réelle.
+            Couverture = part des mesures attendues effectivement reçues (une couverture basse rend la disponibilité moins fiable).
           </p>
         </div>
       )}
@@ -744,6 +749,13 @@ export default function Dashboard() {
         </div>
       </header>
 
+      {config?.source?.type === "mock" && (
+        <div role="status" className="nm-sim-banner">
+          Données simulées (source « mock ») : ce que vous voyez n'est pas votre réseau. Choisissez une vraie source dans la
+          configuration du serveur (<code>source.type</code>).
+        </div>
+      )}
+
       <main id="nm-main" tabIndex={-1}>
       <section className="nm-channels" aria-label="Sorties">
         {outputs.map((output) => {
@@ -753,7 +765,7 @@ export default function Dashboard() {
           const expanded = expandedCharts[id];
           return (
             <div key={id} className={`nm-channel${isActive ? " is-active" : ""}`} style={{ ["--stripe" as string]: style.color, borderLeftColor: isActive ? style.color : COLORS.border }}>
-              <div className="nm-channel-head" onClick={() => toggleChart(id)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggleChart(id); } }}>
+              <div className="nm-channel-head" onClick={() => toggleChart(id)}>
                 <div className="nm-channel-id-block">
                   <span className="nm-card-id">{id}</span>
                 </div>
@@ -788,7 +800,7 @@ export default function Dashboard() {
       </section>
 
       <section className="nm-panel nm-table-panel" aria-labelledby="h-compare">
-        <div className="nm-panel-head" onClick={() => setTableExpanded((v) => !v)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setTableExpanded((v) => !v); } }}>
+        <div className="nm-panel-head" onClick={() => setTableExpanded((v) => !v)}>
           <h2 id="h-compare">Comparatif temporel</h2>
           <button type="button" className="nm-collapse-btn" aria-expanded={tableExpanded} aria-label={tableExpanded ? "Replier le tableau" : "Déplier le tableau"} onClick={(e) => { e.stopPropagation(); setTableExpanded((v) => !v); }}>
             {tableExpanded ? "−" : "+"}
@@ -798,7 +810,7 @@ export default function Dashboard() {
       </section>
 
       <section className="nm-panel nm-table-panel" aria-labelledby="h-config">
-        <div className="nm-panel-head" onClick={() => setSettingsExpanded((v) => !v)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setSettingsExpanded((v) => !v); } }}>
+        <div className="nm-panel-head" onClick={() => setSettingsExpanded((v) => !v)}>
           <h2 id="h-config">Configuration</h2>
           <button type="button" className="nm-collapse-btn" aria-expanded={settingsExpanded} aria-label={settingsExpanded ? "Replier la configuration" : "Déplier la configuration"} onClick={(e) => { e.stopPropagation(); setSettingsExpanded((v) => !v); }}>
             {settingsExpanded ? "−" : "+"}
@@ -851,7 +863,6 @@ export default function Dashboard() {
 }
 
 const BASE_STYLE = `
-  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
   .nm-root {
     background: ${COLORS.bg};
@@ -898,6 +909,7 @@ const BASE_STYLE = `
   .range-btn.active { color: ${COLORS.text}; border-color: ${COLORS.trace}; }
   .range-btn:hover { border-color: ${COLORS.borderBright}; }
   .range-btn:focus-visible, .legend-chip:focus-visible, .settings-reset:focus-visible, .settings-input:focus-visible, .chart-svg:focus-visible, .skip-link:focus-visible { outline: 2px solid ${COLORS.trace}; outline-offset: 2px; }
+  .nm-sim-banner { margin: 0 0 16px; padding: 8px 12px; border: 1px solid ${COLORS.amber}; border-radius: 4px; color: ${COLORS.amber}; font-size: 12.5px; }
   .skip-link { position: absolute; left: -9999px; top: 8px; background: ${COLORS.panel}; color: ${COLORS.text}; padding: 8px 12px; z-index: 10; }
   .skip-link:focus { left: 8px; }
   #nm-main:focus { outline: none; }

@@ -23,7 +23,7 @@ vi.mock("./api", () => {
       forecastAhead: vi.fn(async () => []),
       availability: vi.fn(async () => ({
         start: "2026-08-01T00:00:00Z", end: "2026-09-01T00:00:00Z", downtime_severity: "critical",
-        outputs: [{ output_id: "OUT_001", period_seconds: 2_592_000, incidents: 2, downtime_seconds: 5400, degraded_seconds: 600,
+        outputs: [{ output_id: "OUT_001", period_seconds: 2_592_000, monitored_from: "2026-08-20T00:00:00Z", monitored_seconds: 864_000, incidents: 2, downtime_seconds: 5400, degraded_seconds: 600,
           availability_percent: 99.8264, coverage_percent: 99.5, mttd_seconds: 900, mttr_seconds: 3000, longest_incident_seconds: 4200 }],
       })),
       availabilityCsvUrl: vi.fn((days: number) => `http://api/reports/availability?format=csv&days=${days}`),
@@ -116,6 +116,24 @@ describe("DetailChart à la souris", () => {
   });
 });
 
+describe("Données simulées", () => {
+  it("avertit visiblement quand la source est le Mock, et seulement dans ce cas", async () => {
+    vi.mocked(api.getConfig).mockResolvedValueOnce({
+      incident: { open_score: 0.75, close_score: 0.4, warning_score: 0.5 }, alerts: { enabled: true, critical_score: 0.8 }, source: { type: "mock" },
+    });
+    const { unmount } = render(<Dashboard />);
+    expect((await screen.findByText(/données simulées/i)).textContent).toMatch(/pas votre réseau/);
+    unmount();
+    vi.mocked(api.getConfig).mockResolvedValueOnce({
+      incident: { open_score: 0.75, close_score: 0.4, warning_score: 0.5 }, alerts: { enabled: true, critical_score: 0.8 }, source: { type: "prometheus" },
+    });
+    render(<Dashboard />);
+    await screen.findByRole("heading", { level: 1 });
+    await waitFor(() => expect(api.getConfig).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText(/données simulées/i)).toBeNull();
+  });
+});
+
 describe("Rapport de disponibilité", () => {
   it("affiche le tableau, change de période et propose l'export CSV", async () => {
     const user = userEvent.setup();
@@ -152,15 +170,28 @@ describe("Dashboard", () => {
     expect(alertsLog.textContent).toMatch(/chute de trafic/);
   });
 
-  it("Entrée sur l'en-tête d'une sortie la replie une seule fois", async () => {
+  it("le bouton de repli est le seul contrôle clavier de l'en-tête (pas de bouton imbriqué), et replie une seule fois", async () => {
     const user = userEvent.setup();
     render(<Dashboard />);
     const toggle = await screen.findByRole("button", { name: /replier out_001/i });
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    const head = screen.getAllByRole("button").find((b) => b.classList.contains("nm-channel-head"))!;
-    head.focus();
+    // Aucun rôle « bouton » sur l'en-tête lui-même : axe-core signale les contrôles interactifs imbriqués.
+    expect(screen.getAllByRole("button").some((b) => b.classList.contains("nm-channel-head"))).toBe(false);
+    toggle.focus();
     await user.keyboard("{Enter}");
     expect(screen.getByRole("button", { name: /déplier out_001/i }).getAttribute("aria-expanded")).toBe("false");
+    await user.keyboard(" ");
+    expect(screen.getByRole("button", { name: /replier out_001/i }).getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("un clic sur l'en-tête (souris) replie aussi, sans double bascule avec le bouton", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<Dashboard />);
+    await screen.findByRole("button", { name: /replier out_001/i });
+    await user.click(container.querySelector(".nm-channel-head") as HTMLElement);
+    expect(screen.getByRole("button", { name: /déplier out_001/i })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: /déplier out_001/i }));
+    expect(screen.getByRole("button", { name: /replier out_001/i })).toBeTruthy(); // une bascule par clic, pas deux
   });
 
   it("ouvre une session par identifiant et mot de passe, sans rien écrire dans le navigateur", async () => {
