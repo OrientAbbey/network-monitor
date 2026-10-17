@@ -1,6 +1,6 @@
 -r requirements.txt
 pytest>=8.0
-ruff>=0.6
+ruff==0.16.9  # épinglé : les règles par défaut de ruff changent d'une version à l'autre (0.17 en ajoute, ex. UP017)
 mypy>=1.10
 scikit-learn>=1.4
 pymysql>=1.1

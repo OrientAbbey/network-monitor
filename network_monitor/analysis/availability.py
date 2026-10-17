@@ -8,6 +8,10 @@ Définitions (volontairement simples et explicites, car un rapport se discute) :
   `downtime_severity` (critique par défaut). Les incidents qui se chevauchent sur une même sortie
   ne sont comptés qu'une fois (union des intervalles) ;
 - *dégradation* : temps couvert par des incidents confirmés moins sévères, hors indisponibilité ;
+- *maintenance planifiée* : le temps couvert par une fenêtre de maintenance de la sortie est retiré de
+  l'indisponibilité **et** du temps observé (convention des rapports SLA) ; `maintenance_seconds` le dit ;
+- *faux positifs* : un incident jugé « faux positif » par un opérateur n'est pas compté (`false_positives_excluded`
+  dit combien) sauf demande contraire ;
 - *période observée* : un rapport sur 30 jours d'un système qui ne surveille que depuis une heure
   ne dit rien du reste du mois. La période rapportée commence à la **première mesure conservée**
   (`monitored_from`), pas au début demandé : la disponibilité se calcule sur ce qui a réellement
@@ -25,7 +29,12 @@ import io
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 
-from network_monitor.app.models import Incident, Severity
+from network_monitor.app.models import (
+    Incident,
+    IncidentVerdict,
+    MaintenanceWindow,
+    Severity,
+)
 
 _RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
 
@@ -44,6 +53,8 @@ class OutputAvailability:
     period_seconds: float
     monitored_from: datetime | None
     monitored_seconds: float
+    maintenance_seconds: float
+    false_positives_excluded: int
     incidents: int
     downtime_seconds: float
     degraded_seconds: float
@@ -111,6 +122,8 @@ def build_report(
     interval: timedelta,
     samples: dict[str, SampleStats],
     downtime_severity: Severity = Severity.CRITICAL,
+    maintenance: list[MaintenanceWindow] | None = None,
+    include_false_positives: bool = False,
 ) -> AvailabilityReport:
     """Rapport sur [start, end[. `now` borne les incidents encore ouverts ; `samples` donne, par
     sortie, les mesures conservées sur la période (les plus anciennes sont purgées : la période
@@ -126,23 +139,35 @@ def build_report(
         # Période réellement observée : de la première mesure conservée (au plus tôt `start`) à `horizon`.
         observed_from = max(start, stats.first) if stats.first else horizon
         mine = []
+        excluded_fp = 0
         for i in incidents:
             if i.output_id != output_id or i.opened_at is None:
                 continue  # jamais confirmé : pas un incident
+            if i.verdict == IncidentVerdict.FALSE_POSITIVE and not include_false_positives:
+                excluded_fp += 1
+                continue
             lo = i.started_at or i.opened_at
             hi = i.ended_at or i.closed_at or (now if i.is_active else i.last_seen_at)
             lo, hi = max(lo, observed_from), min(hi, horizon)
             if lo < hi:
                 mine.append((i, lo, hi))
 
-        down = _union([(lo, hi) for i, lo, hi in mine if _RANK[i.severity] >= _RANK[downtime_severity]])
-        degraded = _minus(_union([(lo, hi) for i, lo, hi in mine]), down)
+        planned = _union([
+            (max(w.start, observed_from), min(w.end, horizon))
+            for w in (maintenance or [])
+            if w.cancelled_at is None and (w.output_id is None or w.output_id == output_id)
+            and max(w.start, observed_from) < min(w.end, horizon)
+        ])
+        down = _minus(_union([(lo, hi) for i, lo, hi in mine if _RANK[i.severity] >= _RANK[downtime_severity]]), planned)
+        degraded = _minus(_minus(_union([(lo, hi) for i, lo, hi in mine]), down), planned)
 
+        maintenance_s = _seconds(planned)
         observed = max((horizon - observed_from).total_seconds(), 0.0)
         expected = observed / interval.total_seconds() + 1  # une mesure à chaque borne de la période
         coverage = min(100.0, 100.0 * stats.count / expected) if stats.first else 0.0
         down_s = _seconds(down)
-        availability = max(0.0, 100.0 * (1 - down_s / observed)) if observed > 0 else None
+        effective = observed - maintenance_s  # la maintenance planifiée n'est pas du temps « dû »
+        availability = max(0.0, 100.0 * (1 - down_s / effective)) if effective > 0 else None
 
         durations = [(hi - lo).total_seconds() for _i, lo, hi in mine]
         detect = [(i.opened_at - max(i.started_at or i.opened_at, start)).total_seconds() for i, _lo, _hi in mine if i.opened_at]
@@ -152,6 +177,8 @@ def build_report(
                 period_seconds=period,
                 monitored_from=observed_from if stats.first else None,
                 monitored_seconds=round(observed, 1),
+                maintenance_seconds=round(maintenance_s, 1),
+                false_positives_excluded=excluded_fp,
                 incidents=len(mine),
                 downtime_seconds=round(down_s, 1),
                 degraded_seconds=round(_seconds(degraded), 1),

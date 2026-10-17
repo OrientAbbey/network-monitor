@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -40,6 +41,8 @@ from network_monitor.app.models import (
     AnomalyResult,
     ForecastResult,
     Incident,
+    IncidentVerdict,
+    MaintenanceWindow,
     Severity,
     TrafficSample,
 )
@@ -328,6 +331,9 @@ class AlertOut(BaseModel):
     traffic_deviation_percent: float | None = None
     loss_percent: float | None = None
     expected_loss_percent: float | None = None
+    suppressed: str | None = None
+    root_cause_incident_id: str | None = None
+    impacted_outputs: list[str] = Field(default_factory=list)
 
     @classmethod
     def from_alert(cls, alert: Alert) -> AlertOut:
@@ -345,6 +351,9 @@ class AlertOut(BaseModel):
             traffic_deviation_percent=alert.traffic_deviation_percent,
             loss_percent=alert.loss_percent,
             expected_loss_percent=alert.expected_loss_percent,
+            suppressed=alert.suppressed,
+            root_cause_incident_id=alert.root_cause_incident_id,
+            impacted_outputs=alert.impacted_outputs,
         )
 
 
@@ -491,6 +500,156 @@ def get_incident(incident_id: str) -> Incident:
     return incident
 
 
+class FeedbackIn(BaseModel):
+    verdict: IncidentVerdict | None
+    """`null` retire le jugement."""
+    note: str | None = Field(default=None, max_length=500)
+
+
+@app.put("/incidents/{incident_id}/feedback", response_model=Incident)
+def set_incident_feedback(
+    incident_id: str, body: FeedbackIn, subject: Annotated[str, Depends(require_token)]
+) -> Incident:
+    """Un opérateur juge un incident confirmé : vrai ou faux positif. C'est la seule vérité terrain disponible
+    en exploitation : elle alimente la précision mesurée (`/reports/precision`), exclut les faux positifs du
+    rapport de disponibilité et sert à re-régler les seuils (`analysis.evaluation --from-db`)."""
+    incident = state.storage.get_incident(incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail=f"Incident inconnu : {incident_id}")
+    if incident.opened_at is None:
+        raise HTTPException(status_code=409, detail="Seul un incident confirmé peut être jugé")
+    state.storage.set_feedback(incident_id, body.verdict, subject, state.now, body.note)
+    logger.info("Incident %s jugé %s par %s", incident_id, body.verdict, subject)
+    return state.storage.get_incident(incident_id) or incident
+
+
+@app.get("/reports/precision")
+def precision_report(
+    days: Annotated[float, Query(gt=0, le=366)] = 30,
+    output_id: Annotated[str | None, Query()] = None,
+) -> dict:
+    """Précision **mesurée** : parmi les incidents confirmés des N derniers jours (horloge du serveur) que des
+    opérateurs ont jugés, quelle part était de vrais incidents. Les incidents sans verdict ne comptent pas :
+    `judged_share` dit quelle part a été jugée, donc à quel point la précision est représentative."""
+    if output_id is not None:
+        _ensure_known_output(output_id)
+    stop = state.now
+    incidents = [
+        i for i in state.storage.list_incidents_between(stop - timedelta(days=days), stop)
+        if output_id is None or i.output_id == output_id
+    ]
+
+    def summary(items: list[Incident]) -> dict:
+        tp = sum(i.verdict == IncidentVerdict.TRUE_POSITIVE for i in items)
+        fp = sum(i.verdict == IncidentVerdict.FALSE_POSITIVE for i in items)
+        return {
+            "confirmed": len(items), "true_positives": tp, "false_positives": fp, "unjudged": len(items) - tp - fp,
+            "precision_percent": round(100 * tp / (tp + fp), 1) if tp + fp else None,
+            "judged_share_percent": round(100 * (tp + fp) / len(items), 1) if items else None,
+        }
+
+    groups: dict[str, dict[str, list[Incident]]] = {"by_output": {}, "by_type": {}}
+    for i in incidents:
+        groups["by_output"].setdefault(i.output_id, []).append(i)
+        groups["by_type"].setdefault(i.incident_type.value, []).append(i)
+    return {
+        "days": days, **summary(incidents),
+        "by_output": {k: summary(v) for k, v in sorted(groups["by_output"].items())},
+        "by_type": {k: summary(v) for k, v in sorted(groups["by_type"].items())},
+    }
+
+
+class MaintenanceOut(BaseModel):
+    id: str
+    output_id: str | None
+    start: datetime
+    end: datetime
+    reason: str
+    created_by: str
+    cancelled_at: datetime | None
+    state: Literal["upcoming", "active", "past", "cancelled"]
+
+
+class MaintenanceIn(BaseModel):
+    """Soit `start` et `end` (avec fuseau), soit `starts_in_minutes` et `duration_minutes` (relatifs à
+    l'horloge du **serveur**, pour un client dont l'horloge n'est pas la sienne)."""
+
+    output_id: str | None = None
+    """None = toutes les sorties."""
+    reason: str = Field(min_length=1, max_length=200)
+    start: datetime | None = None
+    end: datetime | None = None
+    starts_in_minutes: float | None = Field(default=None, ge=0, le=60 * 24 * 30)
+    duration_minutes: float | None = Field(default=None, gt=0, le=60 * 24 * 14)
+
+
+def _maintenance_out(w: MaintenanceWindow, now: datetime) -> MaintenanceOut:
+    status: Literal["upcoming", "active", "past", "cancelled"] = (
+        "cancelled" if w.cancelled_at else "past" if w.end <= now else "upcoming" if w.start > now else "active"
+    )
+    return MaintenanceOut(
+        id=w.id, output_id=w.output_id, start=w.start, end=w.end, reason=w.reason,
+        created_by=w.created_by, cancelled_at=w.cancelled_at, state=status,
+    )
+
+
+@app.get("/maintenance", response_model=list[MaintenanceOut])
+def list_maintenance(days: Annotated[float, Query(gt=0, le=366)] = 7) -> list[MaintenanceOut]:
+    """Fenêtres en cours, à venir, et terminées ou annulées depuis `days` jours (horloge du serveur)."""
+    now = state.now
+    windows = state.storage.list_maintenance(now - timedelta(days=days), now + timedelta(days=366), include_cancelled=True)
+    return [_maintenance_out(w, now) for w in windows]
+
+
+@app.post("/maintenance", response_model=MaintenanceOut, status_code=201)
+def create_maintenance(body: MaintenanceIn, subject: Annotated[str, Depends(require_token)]) -> MaintenanceOut:
+    """Planifie une maintenance : pendant la fenêtre, les incidents de la sortie sont enregistrés mais ne
+    notifient personne ; son temps est exclu de la disponibilité ; la recalibration l'ignore."""
+    _require_aware(body.start, body.end)
+    absolute = body.start is not None or body.end is not None
+    relative = body.starts_in_minutes is not None or body.duration_minutes is not None
+    if absolute == relative:
+        raise HTTPException(status_code=422, detail="Donner soit `start` et `end`, soit `starts_in_minutes` et `duration_minutes`")
+    now = state.now
+    if absolute:
+        if body.start is None or body.end is None:
+            raise HTTPException(status_code=422, detail="`start` et `end` vont ensemble")
+        start, end = body.start, body.end
+    else:
+        if body.duration_minutes is None:
+            raise HTTPException(status_code=422, detail="`duration_minutes` est requis")
+        start = now + timedelta(minutes=body.starts_in_minutes or 0)
+        end = start + timedelta(minutes=body.duration_minutes)
+    if end <= start:
+        raise HTTPException(status_code=422, detail="la fin doit suivre le début")
+    if end - start > timedelta(days=14):
+        raise HTTPException(status_code=422, detail="une fenêtre ne dépasse pas 14 jours (en planifier plusieurs)")
+    if end <= now:
+        raise HTTPException(status_code=422, detail="cette fenêtre est déjà terminée")
+    if body.output_id is not None:
+        _ensure_known_output(body.output_id)
+    window = MaintenanceWindow(
+        id=str(uuid.uuid4()), output_id=body.output_id, start=start, end=end, reason=body.reason,
+        created_by=subject, created_at=now,
+    )
+    state.storage.add_maintenance(window)
+    logger.info("Maintenance %s sur %s de %s à %s créée par %s : %s", window.id, body.output_id or "toutes les sorties", start, end, subject, body.reason)
+    return _maintenance_out(window, now)
+
+
+@app.delete("/maintenance/{window_id}", response_model=MaintenanceOut)
+def cancel_maintenance(window_id: str, subject: Annotated[str, Depends(require_token)]) -> MaintenanceOut:
+    """Annule une fenêtre (conservée pour l'audit). Un incident en cours qui était retenu par elle
+    est annoncé au tick suivant."""
+    now = state.now
+    if not state.storage.cancel_maintenance(window_id, now):
+        raise HTTPException(status_code=404, detail=f"Fenêtre inconnue ou déjà annulée : {window_id}")
+    logger.info("Maintenance %s annulée par %s", window_id, subject)
+    window = next((w for w in state.storage.list_maintenance(now - timedelta(days=366), now + timedelta(days=366), include_cancelled=True) if w.id == window_id), None)
+    assert window is not None
+    return _maintenance_out(window, now)
+
+
 @app.get("/alerts", response_model=list[AlertOut])
 def list_alerts(
     output_id: Annotated[str | None, Query()] = None,
@@ -514,6 +673,7 @@ def availability_report(
     end: Annotated[datetime | None, Query()] = None,
     output_id: Annotated[str | None, Query()] = None,
     downtime_severity: Annotated[Severity, Query()] = Severity.CRITICAL,
+    include_false_positives: Annotated[bool, Query()] = False,
     format: Annotated[Literal["json", "csv"], Query()] = "json",
     days: Annotated[float | None, Query(gt=0, le=366)] = None,
 ):
@@ -542,6 +702,7 @@ def availability_report(
     report = build_report(
         state.storage.list_incidents_between(begin, stop), outputs, begin, stop, horizon,
         state.source.get_interval(), stats, downtime_severity,
+        maintenance=state.storage.list_maintenance(begin, stop), include_false_positives=include_false_positives,
     )
     if format == "csv":
         stamp = f"{begin:%Y%m%d}-{stop:%Y%m%d}"

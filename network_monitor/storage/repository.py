@@ -37,6 +37,8 @@ from network_monitor.app.models import (
     IncidentEvidence,
     IncidentStatus,
     IncidentType,
+    IncidentVerdict,
+    MaintenanceWindow,
     Severity,
     TrafficSample,
 )
@@ -137,6 +139,9 @@ class IncidentRow(Base):
     peak_traffic_deviation_percent: Mapped[float] = mapped_column(Float)
     peak_loss_percent: Mapped[float] = mapped_column(Float)
     description: Mapped[str] = mapped_column(String)
+    maintenance: Mapped[bool] = mapped_column(Boolean, default=False)
+    root_cause_incident_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    inhibited: Mapped[bool] = mapped_column(Boolean, default=False)
     # Les preuves sont propres à l'incident (résumés, pas les mesures brutes,
     # §29) : un JSON compact est plus simple qu'une table de jointure pour
     # un volume par incident qui reste faible (plafonné, cf. IncidentManager).
@@ -168,6 +173,33 @@ class AlertRow(Base):
     started_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
     confirmed: Mapped[bool] = mapped_column(Boolean, default=True)
+    suppressed: Mapped[str | None] = mapped_column(String, nullable=True)
+    root_cause_incident_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    impacted_outputs: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
+class IncidentFeedbackRow(Base):
+    """Jugement d'un opérateur, **hors** de la table des incidents : le moteur réécrit la ligne d'un incident
+    à chaque pas, un verdict stocké dans cette ligne serait écrasé."""
+
+    __tablename__ = "incident_feedback"
+    incident_id: Mapped[str] = mapped_column(String, primary_key=True)
+    verdict: Mapped[str] = mapped_column(String)
+    by: Mapped[str] = mapped_column(String)
+    at: Mapped[datetime] = mapped_column(_TS)
+    note: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class MaintenanceRow(Base):
+    __tablename__ = "maintenance_windows"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    output_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    start: Mapped[datetime] = mapped_column(_TS, index=True)
+    end: Mapped[datetime] = mapped_column(_TS, index=True)
+    reason: Mapped[str] = mapped_column(String)
+    created_by: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(_TS)
+    cancelled_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
 
 
 class NotificationRow(Base):
@@ -252,6 +284,28 @@ class Repository(ABC):
 
     @abstractmethod
     def get_incident(self, incident_id: str) -> Incident | None: ...
+
+    @abstractmethod
+    def set_feedback(
+        self, incident_id: str, verdict: IncidentVerdict | None, by: str, at: datetime, note: str | None = None
+    ) -> None:
+        """Enregistre (ou, avec `verdict=None`, retire) le jugement d'un opérateur sur un incident."""
+        ...
+
+    @abstractmethod
+    def add_maintenance(self, window: MaintenanceWindow) -> None: ...
+
+    @abstractmethod
+    def cancel_maintenance(self, window_id: str, at: datetime) -> bool:
+        """Annule une fenêtre (conservée pour l'audit). False si elle n'existe pas ou l'était déjà."""
+        ...
+
+    @abstractmethod
+    def list_maintenance(
+        self, start: datetime, end: datetime, include_cancelled: bool = False
+    ) -> list[MaintenanceWindow]:
+        """Fenêtres qui chevauchent [start, end[."""
+        ...
 
     @abstractmethod
     def list_incidents_between(self, start: datetime, end: datetime) -> list[Incident]:
@@ -383,6 +437,9 @@ class SqlAlchemyRepository(Repository):
                     peak_traffic_deviation_percent=incident.peak_traffic_deviation_percent,
                     peak_loss_percent=incident.peak_loss_percent,
                     description=incident.description,
+                    maintenance=incident.maintenance,
+                    root_cause_incident_id=incident.root_cause_incident_id,
+                    inhibited=incident.inhibited,
                     # `mode="json"` produit des types déjà sérialisables (dates en ISO 8601).
                     evidence=[e.model_dump(mode="json") for e in incident.evidence],
                 )
@@ -410,6 +467,9 @@ class SqlAlchemyRepository(Repository):
                     started_at=_opt_utc(a.started_at),
                     ended_at=_opt_utc(a.ended_at),
                     confirmed=a.confirmed,
+                    suppressed=a.suppressed,
+                    root_cause_incident_id=a.root_cause_incident_id,
+                    impacted_outputs=a.impacted_outputs,
                 )
             )
 
@@ -528,6 +588,9 @@ class SqlAlchemyRepository(Repository):
                     started_at=_opt_as_utc(r.started_at),
                     ended_at=_opt_as_utc(r.ended_at),
                     confirmed=r.confirmed,
+                    suppressed=r.suppressed,
+                    root_cause_incident_id=r.root_cause_incident_id,
+                    impacted_outputs=list(r.impacted_outputs or []),
                 )
                 for r in rows
             ]
@@ -613,7 +676,7 @@ class SqlAlchemyRepository(Repository):
         active_statuses = ["suspect", "open", "stale"]
         with self._session() as session:
             rows = session.query(IncidentRow).filter(IncidentRow.status.in_(active_statuses)).all()
-            return [_incident_from_row(r) for r in rows]
+            return self._with_feedback(session, [_incident_from_row(r) for r in rows])
 
     def list_incidents(self, statuses: list[str] | None = None, limit: int = 50) -> list[Incident]:
         with self._session() as session:
@@ -621,12 +684,76 @@ class SqlAlchemyRepository(Repository):
             if statuses:
                 query = query.filter(IncidentRow.status.in_(statuses))
             rows = query.order_by(IncidentRow.last_seen_at.desc()).limit(limit).all()
-            return [_incident_from_row(r) for r in rows]
+            return self._with_feedback(session, [_incident_from_row(r) for r in rows])
 
     def get_incident(self, incident_id: str) -> Incident | None:
         with self._session() as session:
             row = session.query(IncidentRow).filter(IncidentRow.id == incident_id).one_or_none()
-            return _incident_from_row(row) if row is not None else None
+            return self._with_feedback(session, [_incident_from_row(row)])[0] if row is not None else None
+
+    @staticmethod
+    def _with_feedback(session: Session, incidents: list[Incident]) -> list[Incident]:
+        """Joint le jugement de l'opérateur (table à part) aux incidents lus."""
+        if not incidents:
+            return incidents
+        rows = session.query(IncidentFeedbackRow).filter(IncidentFeedbackRow.incident_id.in_([i.id for i in incidents])).all()
+        by_id = {r.incident_id: r for r in rows}
+        for incident in incidents:
+            fb = by_id.get(incident.id)
+            if fb is not None:
+                incident.verdict = IncidentVerdict(fb.verdict)
+                incident.verdict_by, incident.verdict_at, incident.verdict_note = fb.by, _as_utc(fb.at), fb.note
+        return incidents
+
+    def set_feedback(
+        self, incident_id: str, verdict: IncidentVerdict | None, by: str, at: datetime, note: str | None = None
+    ) -> None:
+        with self._session() as session:
+            if verdict is None:
+                session.query(IncidentFeedbackRow).filter(IncidentFeedbackRow.incident_id == incident_id).delete()
+            else:
+                session.merge(
+                    IncidentFeedbackRow(incident_id=incident_id, verdict=verdict.value, by=by, at=_to_utc(at), note=note)
+                )
+            session.commit()
+
+    @staticmethod
+    def _window(r: MaintenanceRow) -> MaintenanceWindow:
+        return MaintenanceWindow(
+            id=r.id, output_id=r.output_id, start=_as_utc(r.start), end=_as_utc(r.end), reason=r.reason,
+            created_by=r.created_by, created_at=_as_utc(r.created_at), cancelled_at=_opt_as_utc(r.cancelled_at),
+        )
+
+    def add_maintenance(self, window: MaintenanceWindow) -> None:
+        with self._session() as session:
+            session.merge(
+                MaintenanceRow(
+                    id=window.id, output_id=window.output_id, start=_to_utc(window.start), end=_to_utc(window.end),
+                    reason=window.reason, created_by=window.created_by, created_at=_to_utc(window.created_at),
+                    cancelled_at=_opt_utc(window.cancelled_at),
+                )
+            )
+            session.commit()
+
+    def cancel_maintenance(self, window_id: str, at: datetime) -> bool:
+        with self._session() as session:
+            row = session.query(MaintenanceRow).filter(MaintenanceRow.id == window_id).one_or_none()
+            if row is None or row.cancelled_at is not None:
+                return False
+            row.cancelled_at = _to_utc(at)
+            session.commit()
+            return True
+
+    def list_maintenance(
+        self, start: datetime, end: datetime, include_cancelled: bool = False
+    ) -> list[MaintenanceWindow]:
+        with self._session() as session:
+            query = session.query(MaintenanceRow).filter(
+                MaintenanceRow.start < _to_utc(end), MaintenanceRow.end > _to_utc(start)
+            )
+            if not include_cancelled:
+                query = query.filter(MaintenanceRow.cancelled_at.is_(None))
+            return [self._window(r) for r in query.order_by(MaintenanceRow.start).all()]
 
     def list_incidents_between(self, start: datetime, end: datetime) -> list[Incident]:
         with self._session() as session:
@@ -640,7 +767,7 @@ class SqlAlchemyRepository(Repository):
                 .order_by(IncidentRow.opened_at)
                 .all()
             )
-            return [_incident_from_row(r) for r in rows]
+            return self._with_feedback(session, [_incident_from_row(r) for r in rows])
 
     def sample_stats(self, start: datetime, end: datetime) -> dict[str, SampleStats]:
         with self._session() as session:
@@ -709,6 +836,9 @@ def _incident_from_row(row: IncidentRow) -> Incident:
         peak_traffic_deviation_percent=row.peak_traffic_deviation_percent,
         peak_loss_percent=row.peak_loss_percent,
         description=row.description,
+        maintenance=row.maintenance,
+        root_cause_incident_id=row.root_cause_incident_id,
+        inhibited=row.inhibited,
         # `model_dump(mode="json")` sérialise les timestamps en ISO 8601 UTC ;
         # Pydantic les re-parse directement en datetime timezone-aware.
         evidence=[IncidentEvidence.model_validate(e) for e in row.evidence],

@@ -24,6 +24,7 @@ from network_monitor.app.models import (
     AnomalyResult,
     ForecastResult,
     Incident,
+    MaintenanceWindow,
     RawMeasurement,
     TrafficSample,
 )
@@ -71,6 +72,13 @@ class MonitoringLoop:
             critical_score=config.alerts.critical_score,
             isolation_confirm_score=forest_cfg.confirm_score if forest_cfg.enabled else 1.01,
         )
+        outputs = set(source.list_outputs())
+        unknown = {o for pair in config.topology.parents.items() for o in pair} - outputs
+        if unknown:
+            logger.warning("topology.parents cite des sorties inconnues de la source : %s", sorted(unknown))
+        self._incident_manager.set_topology(config.topology.parents, config.topology.correlation_window)
+        self._maintenance: list[MaintenanceWindow] = []
+        self._incident_manager.set_maintenance_check(self._under_maintenance)
         self._persistence = PersistenceTracker(interval_seconds=source.get_interval().total_seconds())
         self._forecast_models: dict[str, ForecastModel] = {}
         self._loss_baselines: dict[str, LossBaseline] = {}
@@ -119,14 +127,24 @@ class MonitoringLoop:
         wait = min(cfg.interval, timedelta(hours=1)) if uncalibrated else cfg.interval
         if now - self._last_calibrated_at < wait:
             return
-        self._recompute_models(now, exclude_ranges=self._active_incident_ranges())
+        self._recompute_models(now, exclude_ranges=self._active_incident_ranges(now))
         self._last_calibrated_at = now
         # Rétention (Perf-5) : réutilise ce même rythme périodique plutôt que
         # d'ajouter un second ordonnanceur pour une seule tâche de ménage.
         self._storage.purge_older_than(now - self._config.history.preferred)
 
-    def _active_incident_ranges(self) -> dict[str, list[tuple[datetime, datetime]]]:
+    def _under_maintenance(self, output_id: str, at: datetime) -> bool:
+        return any(w.covers(output_id, at) for w in self._maintenance)
+
+    def _active_incident_ranges(self, now: datetime | None = None) -> dict[str, list[tuple[datetime, datetime]]]:
+        """Plages à exclure de la recalibration : incidents en cours et maintenances (un comportement
+        anormal ou volontairement perturbé ne doit pas devenir le « normal » appris)."""
         ranges: dict[str, list[tuple[datetime, datetime]]] = {}
+        if now is not None:
+            window_start = now - self._config.history.preferred
+            for w in self._storage.list_maintenance(window_start, now):
+                for output_id in [w.output_id] if w.output_id else self._source.list_outputs():
+                    ranges.setdefault(output_id, []).append((w.start, w.end))
         for incident in self._incident_manager.active_incidents():
             start = incident.opened_at or incident.suspected_at
             if start is None:
@@ -182,6 +200,9 @@ class MonitoringLoop:
 
     def run_tick(self, now: datetime) -> None:
         """Un pas de la boucle (§30, étapes 1 à 11)."""
+        # Fenêtres de maintenance : relues à chaque pas (quelques lignes) pour qu'une fenêtre créée ou
+        # annulée par l'API s'applique au tick suivant, sans redémarrage.
+        self._maintenance = self._storage.list_maintenance(now - timedelta(days=1), now + timedelta(days=1))
         # 1. récupérer les nouvelles données
         raw = [RawMeasurement(**s.model_dump()) for s in self._source.get_latest()]
 

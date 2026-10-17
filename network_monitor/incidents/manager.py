@@ -7,8 +7,9 @@ détection particulier (§4).
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
-from datetime import datetime
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 import numpy as np
 
@@ -165,6 +166,11 @@ class Alert:
     ended_at: datetime | None = None
     confirmed: bool = True
     """False pour un signal faible résorbé sans jamais avoir été confirmé : à ne notifier à personne."""
+    suppressed: str | None = None
+    """« maintenance » ou « inhibited » : l'alerte est enregistrée mais jamais envoyée."""
+    root_cause_incident_id: str | None = None
+    impacted_outputs: list[str] = field(default_factory=list)
+    """Sorties aval déjà touchées par ce même incident amont (alerte d'ouverture seulement)."""
 
 
 class IncidentManager:
@@ -182,6 +188,21 @@ class IncidentManager:
         # > 1 par défaut : sans Isolation Forest activé, aucun score ne l'atteint.
         self._isolation_confirm_score = isolation_confirm_score
         self._states: dict[str, _OutputState] = {}
+        self._parents: dict[str, str] = {}
+        self._correlation_window = timedelta(minutes=15)
+        self._in_maintenance: Callable[[str, datetime], bool] = lambda _output, _at: False
+        # Incidents dont les alertes sont retenues (aucun envoi) : id → « maintenance » | « inhibited ».
+        self._silenced: dict[str, str] = {}
+        self._open_ids: set[str] = set()  # incidents confirmés et pas encore fermés (cause amont encore active ?)
+
+    def set_topology(self, parents: dict[str, str], correlation_window: timedelta) -> None:
+        """Dépendances amont/aval (`topology.parents`, clé = aval, valeur = amont)."""
+        self._parents = dict(parents)
+        self._correlation_window = correlation_window
+
+    def set_maintenance_check(self, check: Callable[[str, datetime], bool]) -> None:
+        """Fonction `(sortie, instant) -> bool` : la sortie est-elle en maintenance planifiée à cet instant ?"""
+        self._in_maintenance = check
 
     def update_config(self, config: IncidentConfig, critical_score: float | None = None) -> None:
         """
@@ -214,7 +235,7 @@ class IncidentManager:
 
         if result.data_gap:
             alerts = self._handle_data_gap(result, state)
-            return alerts, state.incident
+            return self._finalize(result, state.incident, alerts), state.incident
 
         state.last_valid_timestamp = result.timestamp
         min_duration = self._config.minimum_duration_for(result.output_id)
@@ -229,7 +250,94 @@ class IncidentManager:
             # si state.incident a été remis à None (fermeture) pendant l'appel.
             alerts = self._process_active_incident(result, state, min_duration, recovery_duration, expected_traffic_mbps, expected_loss_percent, observed_traffic_mbps, observed_loss_percent)
 
-        return alerts, touched_incident
+        return self._finalize(result, touched_incident, alerts), touched_incident
+
+    # -- Maintenance et dépendances entre sorties -------------------------------------
+
+    def _descendants(self, output_id: str) -> list[str]:
+        out, frontier = [], [output_id]
+        while frontier:
+            node = frontier.pop()
+            kids = [c for c, p in self._parents.items() if p == node]
+            out += kids
+            frontier += kids
+        return out
+
+    def _active(self, output_id: str) -> Incident | None:
+        state = self._states.get(output_id)
+        inc = state.incident if state else None
+        return inc if inc is not None and inc.status == IncidentStatus.OPEN else None
+
+    def _related(self, a: Incident, b: Incident) -> bool:
+        """Débuts réels assez proches pour être une seule cause (`correlation_window`)."""
+        start_a, start_b = a.started_at or a.opened_at, b.started_at or b.opened_at
+        return start_a is not None and start_b is not None and abs(start_a - start_b) <= self._correlation_window
+
+    def _correlate(self, incident: Incident, at: datetime) -> tuple[str | None, list[str]]:
+        """À la confirmation d'un incident : retenu par une maintenance ? rattaché à une cause amont ?
+        quelles sorties aval déjà touchées explique-t-il ? Renvoie (raison de retenue, sorties aval)."""
+        silenced: str | None = None
+        if self._in_maintenance(incident.output_id, at):
+            incident.maintenance, silenced = True, "maintenance"
+        ancestor = self._parents.get(incident.output_id)
+        while ancestor is not None:
+            root = self._active(ancestor)
+            if root is not None and root.id != incident.id and self._related(root, incident):
+                incident.root_cause_incident_id = root.id
+                if silenced is None:
+                    incident.inhibited, silenced = True, "inhibited"
+                break
+            ancestor = self._parents.get(ancestor)
+        impacted = []
+        for child in self._descendants(incident.output_id):
+            other = self._active(child)
+            if other is not None and other.root_cause_incident_id is None and self._related(incident, other):
+                other.root_cause_incident_id = incident.id
+                impacted.append(child)
+        return silenced, impacted
+
+    def _finalize(self, result: AnomalyResult, incident: Incident | None, alerts: list[Alert]) -> list[Alert]:
+        """Applique aux alertes du pas la maintenance et l'inhibition (retenir, jamais supprimer : une
+        alerte retenue reste enregistrée et visible, elle n'est simplement pas envoyée), et libère
+        ce qui doit l'être (maintenance terminée, cause amont résolue)."""
+        extra: list[Alert] = []
+        for alert in alerts:  # suivi des incidents confirmés encore actifs, toutes sorties confondues
+            if alert.confirmed and alert.event in ("opened", "reopened"):
+                self._open_ids.add(alert.incident_id)
+            elif alert.confirmed and alert.event == "closed":
+                self._open_ids.discard(alert.incident_id)
+        if incident is not None and incident.opened_at is not None:
+            for alert in alerts:
+                if alert.incident_id == incident.id and alert.event in ("opened", "reopened"):
+                    silenced, impacted = self._correlate(incident, result.timestamp)
+                    if silenced:
+                        self._silenced[incident.id] = silenced
+                    alert.impacted_outputs = impacted
+                    break
+            held = self._silenced.get(incident.id)
+            state = self._states.get(incident.output_id)
+            still_open = incident.status == IncidentStatus.OPEN
+            if held == "maintenance" and still_open and not self._in_maintenance(incident.output_id, result.timestamp):
+                # La maintenance est terminée et l'incident dure : c'est maintenant une vraie alerte.
+                del self._silenced[incident.id]
+                extra.append(
+                    self._alert(incident, "opened", result.timestamp, f"Incident persistant après la fin de la maintenance sur {incident.output_id}")
+                )
+            elif (
+                held == "inhibited" and still_open
+                and incident.root_cause_incident_id not in self._open_ids
+                and state is not None and state.below_close_since is None  # pas en cours de retour à la normale
+            ):
+                # La cause amont est résolue et cette sortie est toujours en panne : elle n'est plus « expliquée ».
+                del self._silenced[incident.id]
+                extra.append(self._alert(incident, "opened", result.timestamp, "Incident persistant après la résolution de la cause amont"))
+            alerts_for_incident = [a for a in alerts + extra if a.incident_id == incident.id]
+            for alert in alerts_for_incident:
+                alert.suppressed = self._silenced.get(incident.id)
+                alert.root_cause_incident_id = incident.root_cause_incident_id
+            if any(a.event == "closed" and a.confirmed for a in alerts_for_incident):
+                self._silenced.pop(incident.id, None)
+        return alerts + extra
 
     # -- Pas d'incident en cours ------------------------------------------------
 

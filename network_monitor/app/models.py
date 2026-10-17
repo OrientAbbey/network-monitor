@@ -266,6 +266,44 @@ class IncidentEvidence(BaseModel):
     persistance est alors suspendu, pas réinitialisé, pour ce point."""
 
 
+class IncidentVerdict(str, Enum):
+    """Jugement d'un opérateur sur un incident confirmé : seule vérité terrain disponible en exploitation."""
+
+    TRUE_POSITIVE = "true_positive"
+    FALSE_POSITIVE = "false_positive"
+
+
+class MaintenanceWindow(BaseModel):
+    """Fenêtre de maintenance planifiée : pendant qu'elle court, les incidents de la sortie ne notifient
+    personne, et son temps est exclu de la disponibilité (convention des rapports SLA)."""
+
+    id: str
+    output_id: str | None = None
+    """None = toutes les sorties."""
+    start: datetime
+    end: datetime
+    reason: str = Field(min_length=1, max_length=200)
+    created_by: str = ""
+    created_at: datetime
+    cancelled_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def _ordered_and_aware(self) -> MaintenanceWindow:
+        for name in ("start", "end", "created_at"):
+            if getattr(self, name).tzinfo is None:
+                raise ValueError(f"{name} doit inclure un fuseau horaire (§3)")
+        if self.end <= self.start:
+            raise ValueError("la fin d'une fenêtre de maintenance doit suivre son début")
+        return self
+
+    def covers(self, output_id: str, at: datetime) -> bool:
+        return (
+            self.cancelled_at is None
+            and (self.output_id is None or self.output_id == output_id)
+            and self.start <= at < self.end
+        )
+
+
 class Incident(BaseModel):
     """
     Cycle de vie complet d'un incident (§19-§23).
@@ -304,6 +342,19 @@ class Incident(BaseModel):
 
     description: str = ""
     evidence: list[IncidentEvidence] = Field(default_factory=list)
+
+    maintenance: bool = False
+    """Confirmé pendant une fenêtre de maintenance de sa sortie (aucune notification tant qu'elle dure)."""
+    root_cause_incident_id: str | None = None
+    """Incident d'une sortie amont qui explique celui-ci (topologie, `topology.parents`)."""
+    inhibited: bool = False
+    """Vrai si ses alertes ont été retenues parce que la cause amont était déjà signalée."""
+
+    verdict: IncidentVerdict | None = None
+    verdict_by: str | None = None
+    verdict_at: datetime | None = None
+    verdict_note: str | None = None
+    """Renseignés depuis la table des retours (`PUT /incidents/{id}/feedback`), jamais par le moteur."""
 
     @model_validator(mode="after")
     def timestamps_are_ordered(self) -> Incident:

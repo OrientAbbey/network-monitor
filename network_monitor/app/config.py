@@ -379,6 +379,34 @@ class NotificationsConfig(BaseModel):
         return self
 
 
+class TopologyConfig(BaseModel):
+    """Dépendances entre sorties : la clé dépend de la valeur (« la sortie aval a pour parent la sortie amont »)."""
+
+    parents: dict[str, str] = Field(default_factory=dict)
+    """Ex. `{LINK_DOUALA_BAFOUSSAM: LINK_DOUALA_YAOUNDE}` : une panne de la seconde explique celle de la première."""
+    correlation_window: timedelta = timedelta(minutes=15)
+    """Deux incidents de sorties dépendantes dont les débuts réels sont distants de moins que cela sont
+    rattachés à la même cause : l'aval ne notifie pas, l'amont dit qui d'autre il touche."""
+
+    @field_validator("correlation_window", mode="before")
+    @classmethod
+    def _parse(cls, v):
+        return _parse_duration(v) if not isinstance(v, timedelta) else v
+
+    @model_validator(mode="after")
+    def _acyclic(self) -> TopologyConfig:
+        for child, parent in self.parents.items():
+            if child == parent:
+                raise ValueError(f"{child} ne peut pas être son propre parent")
+            seen, node = {child}, parent
+            while node in self.parents:
+                if node in seen:
+                    raise ValueError(f"cycle dans la topologie autour de {child}")
+                seen.add(node)
+                node = self.parents[node]
+        return self
+
+
 class StorageConfig(BaseModel):
     database_url: str = "sqlite:///network_monitor.db"
     lock_file: str | None = None
@@ -403,6 +431,7 @@ class AppConfig(BaseModel):
     incident: IncidentConfig = IncidentConfig()
     alerts: AlertsConfig = AlertsConfig()
     notifications: NotificationsConfig = NotificationsConfig()
+    topology: TopologyConfig = TopologyConfig()
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> AppConfig:

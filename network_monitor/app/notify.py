@@ -124,6 +124,8 @@ def format_text(alerts: list[dict[str, Any]], tz: ZoneInfo, limit: int = 4000) -
                 lines.append(f"Trafic : {a['traffic_mbps']:.0f} Mbps (attendu {a['expected_traffic_mbps']:.0f}" + (f", {dev:+.0f} %)" if dev is not None else ")"))
             if a.get("loss_percent") is not None:
                 lines.append(f"Pertes : {a['loss_percent']:.2f} %")
+            if a.get("impacted_outputs"):
+                lines.append(f"Explique aussi : {', '.join(a['impacted_outputs'])}")
         return "\n".join(lines)[:limit]
     shown = [_line(a, tz) for a in alerts[:12]]
     if len(alerts) > 12:
@@ -147,7 +149,8 @@ def format_sms(alerts: list[dict[str, Any]], tz: ZoneInfo) -> str:
         sev = "CRIT" if a["severity"] == "critical" else "ALERTE"
         started = _hm(_dt(a.get("started_at")) or _dt(a["timestamp"]), tz)
         dev = a.get("traffic_deviation_percent")
-        return f"{sev} {a['output_id']} {label} depuis {started}" + (f" ({dev:+.0f}%)" if dev is not None else "")
+        extra = f" +{len(a['impacted_outputs'])} liens" if a.get("impacted_outputs") else ""
+        return f"{sev} {a['output_id']} {label} depuis {started}" + (f" ({dev:+.0f}%)" if dev is not None else "") + extra
 
     if len(alerts) == 1:
         return one(alerts[0])[:160]
@@ -359,6 +362,8 @@ class NotificationDispatcher:
         now = self._clock()
         items = []
         for alert in alerts:
+            if alert.suppressed:  # maintenance ou cause amont déjà signalée : enregistrée, jamais envoyée
+                continue
             payload = alert_to_dict(alert)
             for channel in self.channels.values():
                 if channel.accepts(alert):
