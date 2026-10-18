@@ -33,11 +33,21 @@ export interface Incident {
   severity: string;
   incident_type: string;
   last_seen_at: string;
+  opened_at: string | null;
   started_at: string | null;
   ended_at: string | null;
   score: number;
   description: string;
+  verdict: Verdict | null;
+  verdict_by: string | null;
+  verdict_at: string | null;
+  verdict_note: string | null;
+  maintenance: boolean;
+  root_cause_incident_id: string | null;
+  inhibited: boolean;
 }
+
+export type Verdict = "true_positive" | "false_positive";
 
 export interface Alert {
   incident_id: string;
@@ -53,6 +63,9 @@ export interface Alert {
   traffic_deviation_percent: number | null;
   loss_percent: number | null;
   expected_loss_percent: number | null;
+  suppressed: string | null;
+  root_cause_incident_id: string | null;
+  impacted_outputs: string[];
 }
 
 export interface OutputAvailability {
@@ -60,6 +73,8 @@ export interface OutputAvailability {
   period_seconds: number;
   monitored_from: string | null;
   monitored_seconds: number;
+  maintenance_seconds: number;
+  false_positives_excluded: number;
   incidents: number;
   downtime_seconds: number;
   degraded_seconds: number;
@@ -99,4 +114,37 @@ export interface ConfigUpdate {
   close_score?: number;
   warning_score?: number;
   critical_score?: number;
+}
+
+export interface MaintenanceWindow {
+  id: string;
+  output_id: string | null;
+  start: string;
+  end: string;
+  reason: string;
+  created_by: string;
+  cancelled_at: string | null;
+  state: "upcoming" | "active" | "past" | "cancelled";
+}
+
+export interface MaintenanceRequest {
+  output_id: string | null;
+  reason: string;
+  starts_in_minutes: number;
+  duration_minutes: number;
+}
+
+export interface PrecisionSummary {
+  confirmed: number;
+  true_positives: number;
+  false_positives: number;
+  unjudged: number;
+  precision_percent: number | null;
+  judged_share_percent: number | null;
+}
+
+export interface PrecisionReport extends PrecisionSummary {
+  days: number;
+  by_output: Record<string, PrecisionSummary>;
+  by_type: Record<string, PrecisionSummary>;
 }

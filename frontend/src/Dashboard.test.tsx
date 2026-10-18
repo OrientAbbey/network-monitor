@@ -12,10 +12,11 @@ vi.mock("./api", () => {
     currentSession: vi.fn(() => null),
     login: vi.fn(async (username: string) => ({ username, expiresAt: new Date(Date.now() + 3_600_000) })),
     logout: vi.fn(),
+    hasApiToken: vi.fn(() => false),
     api: {
       outputs: vi.fn(async () => [{ output_id: "OUT_001", latest_sample: history.at(-1), status: "normal", active_incident_id: null }]),
       incidents: vi.fn(async () => []),
-      alerts: vi.fn(async () => [{ incident_id: "i1", output_id: "OUT_001", severity: "critical", event: "opened", timestamp: new Date(T0).toISOString(), message: "chute de trafic" }]),
+      alerts: vi.fn(async () => [{ incident_id: "i1", output_id: "OUT_001", severity: "critical", event: "opened", timestamp: new Date(T0).toISOString(), message: "chute de trafic", suppressed: null, root_cause_incident_id: null, impacted_outputs: [] }]),
       monitoringStatus: vi.fn(async () => ({ running: true, simulated_now: new Date(T0).toISOString() })),
       getConfig: vi.fn(async () => cfg),
       history: vi.fn(async () => history),
@@ -23,19 +24,30 @@ vi.mock("./api", () => {
       forecastAhead: vi.fn(async () => []),
       availability: vi.fn(async () => ({
         start: "2026-08-01T00:00:00Z", end: "2026-09-01T00:00:00Z", downtime_severity: "critical",
-        outputs: [{ output_id: "OUT_001", period_seconds: 2_592_000, monitored_from: "2026-08-20T00:00:00Z", monitored_seconds: 864_000, incidents: 2, downtime_seconds: 5400, degraded_seconds: 600,
+        outputs: [{ output_id: "OUT_001", period_seconds: 2_592_000, monitored_from: "2026-08-20T00:00:00Z", monitored_seconds: 864_000, maintenance_seconds: 1800, false_positives_excluded: 1, incidents: 2, downtime_seconds: 5400, degraded_seconds: 600,
           availability_percent: 99.8264, coverage_percent: 99.5, mttd_seconds: 900, mttr_seconds: 3000, longest_incident_seconds: 4200 }],
       })),
+      precision: vi.fn(async () => ({
+        days: 30, confirmed: 0, true_positives: 0, false_positives: 0, unjudged: 0, precision_percent: null, judged_share_percent: null, by_output: {}, by_type: {},
+      })),
+      setFeedback: vi.fn(),
+      maintenance: vi.fn(async () => []),
+      createMaintenance: vi.fn(async () => ({})),
+      cancelMaintenance: vi.fn(async () => ({})),
       availabilityCsvUrl: vi.fn((days: number) => `http://api/reports/availability?format=csv&days=${days}`),
     },
   };
 });
 
-import { api, login, logout } from "./api";
+import { api, hasApiToken, login, logout } from "./api";
 import Dashboard, { DetailChart } from "./Dashboard";
+import type { Alert, Incident, MaintenanceWindow, PrecisionReport } from "./types";
 
 const visibility = { traffic: true, loss: true, baseline: false, prediction: false };
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(hasApiToken).mockReturnValue(false); // clearAllMocks ne remet pas les valeurs de retour : chaque test repart déconnecté
+});
 afterEach(cleanup);
 
 describe("DetailChart", () => {
@@ -221,5 +233,194 @@ describe("Dashboard", () => {
     await user.type(screen.getByLabelText("Mot de passe"), "mauvais");
     await user.click(screen.getByRole("button", { name: /se connecter/i }));
     expect((await screen.findByRole("alert")).textContent).toMatch(/identifiant ou mot de passe incorrect/i);
+  });
+});
+
+const NOW = new Date(Date.UTC(2026, 8, 1, 12)).toISOString();
+const incident = (over: Partial<Incident> = {}): Incident => ({
+  id: "inc-1", output_id: "OUT_001", status: "open", severity: "critical", incident_type: "traffic_drop", last_seen_at: NOW, opened_at: NOW,
+  started_at: NOW, ended_at: null, score: 0.9, description: "", verdict: null, verdict_by: null, verdict_at: null, verdict_note: null,
+  maintenance: false, root_cause_incident_id: null, inhibited: false, ...over,
+});
+const precision = (over: Partial<PrecisionReport> = {}): PrecisionReport => ({
+  days: 30, confirmed: 0, true_positives: 0, false_positives: 0, unjudged: 0, precision_percent: null, judged_share_percent: null, by_output: {}, by_type: {}, ...over,
+});
+const incidentsPanel = async () => screen.findByRole("region", { name: /^incidents/i });
+
+describe("Incidents : verdicts et précision", () => {
+  it("affiche « — » quand rien n'est jugé, jamais un pourcentage inventé", async () => {
+    vi.mocked(api.incidents).mockResolvedValueOnce([incident()]);
+    render(<Dashboard />);
+    const panel = await incidentsPanel();
+    await waitFor(() => expect(panel.textContent).toMatch(/Précision mesurée sur 30 j : — \(0 vrai, 0 faux ; 0 sans verdict\)/));
+    expect(panel.textContent).not.toMatch(/\d %/);
+  });
+
+  it("détaille la précision mesurée et la part jugée", async () => {
+    vi.mocked(api.precision).mockResolvedValueOnce(precision({ confirmed: 5, true_positives: 3, false_positives: 1, unjudged: 1, precision_percent: 75, judged_share_percent: 80 }));
+    vi.mocked(api.incidents).mockResolvedValueOnce([incident()]);
+    render(<Dashboard />);
+    const panel = await incidentsPanel();
+    await waitFor(() => expect(panel.textContent).toMatch(/75\.0 % \(3 vrais, 1 faux ; 1 sans verdict — 80 % jugés\)/));
+  });
+
+  it("marque les incidents (maintenance, cause amont, verdict) et ne propose de juger que les incidents confirmés", async () => {
+    vi.mocked(api.incidents).mockResolvedValueOnce([
+      incident({ id: "up", output_id: "OUT_001", maintenance: true }),
+      incident({ id: "down", output_id: "OUT_002", root_cause_incident_id: "up", inhibited: true, verdict: "false_positive" }),
+      incident({ id: "weak", output_id: "OUT_003", status: "suspect", opened_at: null }),
+    ]);
+    render(<Dashboard />);
+    const panel = await incidentsPanel();
+    await within(panel).findByText(/pendant une maintenance/);
+    const cause = within(panel).getByRole("link", { name: /cause : OUT_001/ });
+    expect(cause.getAttribute("href")).toBe("#incident-up"); // mène à la ligne de la cause
+    expect(panel.querySelector("#incident-up")).toBeTruthy();
+    expect(within(panel).getByText("faux positif")).toBeTruthy();
+    expect(within(panel).getAllByRole("button", { name: /Juger l'incident de OUT_001/ })).toHaveLength(2);
+    expect(within(panel).getAllByRole("button", { name: /Retirer le verdict/ })).toHaveLength(1); // seul l'incident déjà jugé
+    expect(within(panel).queryByRole("button", { name: /OUT_003/ })).toBeNull(); // signal faible : non confirmé, rien à juger
+  });
+
+  it("envoie le verdict (connecté) et rafraîchit la précision", async () => {
+    vi.mocked(hasApiToken).mockReturnValue(true);
+    vi.mocked(api.incidents).mockResolvedValueOnce([incident()]);
+    vi.mocked(api.setFeedback).mockResolvedValueOnce(incident({ verdict: "false_positive" })).mockResolvedValueOnce(incident({ verdict: null }));
+    vi.mocked(api.precision).mockResolvedValueOnce(precision()).mockResolvedValueOnce(precision({ confirmed: 1, false_positives: 1, precision_percent: 0, judged_share_percent: 100 }));
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    const panel = await incidentsPanel();
+    await user.click(await within(panel).findByRole("button", { name: /Juger l'incident de OUT_001 : faux positif/ }));
+    expect(api.setFeedback).toHaveBeenCalledWith("inc-1", "false_positive");
+    await waitFor(() => expect(panel.textContent).toMatch(/0\.0 % \(0 vrai, 1 faux/));
+    expect(within(panel).getByRole("button", { name: /Retirer le verdict/ })).toBeTruthy();
+    await user.click(within(panel).getByRole("button", { name: /Retirer le verdict/ }));
+    expect(api.setFeedback).toHaveBeenLastCalledWith("inc-1", null);
+    await waitFor(() => expect(within(panel).queryByRole("button", { name: /Retirer le verdict/ })).toBeNull()); // le verdict a bien été retiré
+  });
+
+  it("invite à se connecter, sans appeler l'API, quand il n'y a pas de session", async () => {
+    vi.mocked(api.incidents).mockResolvedValueOnce([incident()]);
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    const panel = await incidentsPanel();
+    await user.click(await within(panel).findByRole("button", { name: /Juger l'incident de OUT_001 : vrai incident/ }));
+    expect((await within(panel).findByRole("alert")).textContent).toMatch(/Connectez-vous \(panneau Configuration\)/);
+    expect(api.setFeedback).not.toHaveBeenCalled();
+  });
+
+  it("traite un 401 du serveur (session expirée) comme une invitation à se reconnecter", async () => {
+    vi.mocked(hasApiToken).mockReturnValue(true);
+    vi.mocked(api.incidents).mockResolvedValueOnce([incident()]);
+    vi.mocked(api.setFeedback).mockRejectedValueOnce(new Error("PUT /incidents/inc-1/feedback -> 401 {}"));
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    const panel = await incidentsPanel();
+    await user.click(await within(panel).findByRole("button", { name: /faux positif/ }));
+    expect((await within(panel).findByRole("alert")).textContent).toMatch(/Connectez-vous/);
+  });
+});
+
+describe("Maintenance planifiée", () => {
+  const window_ = (over: Partial<MaintenanceWindow> = {}): MaintenanceWindow => ({
+    id: "w1", output_id: "OUT_001", start: NOW, end: new Date(Date.UTC(2026, 8, 1, 14)).toISOString(), reason: "Mise à jour du routeur",
+    created_by: "alice", cancelled_at: null, state: "upcoming", ...over,
+  });
+  const maintenancePanel = async () => screen.findByRole("region", { name: /maintenance planifiée/i });
+
+  it("liste les fenêtres avec leur état ; annuler n'est proposé que pour une fenêtre à venir ou en cours", async () => {
+    vi.mocked(api.maintenance).mockResolvedValueOnce([
+      window_(), window_({ id: "w2", output_id: null, reason: "Coupure électrique", state: "active" }),
+      window_({ id: "w3", reason: "Ancienne", state: "past" }), window_({ id: "w4", reason: "Abandonnée", state: "cancelled" }),
+    ]);
+    render(<Dashboard />);
+    const panel = await maintenancePanel();
+    await within(panel).findByText(/Mise à jour du routeur/);
+    expect(within(panel).getByText(/Toutes les sorties — .*Coupure électrique/)).toBeTruthy();
+    for (const label of ["à venir", "en cours", "terminée", "annulée"]) expect(within(panel).getByText(label)).toBeTruthy();
+    expect(within(panel).getAllByRole("button", { name: /Annuler la maintenance/ })).toHaveLength(2);
+    expect(api.maintenance).toHaveBeenCalledWith(7); // fenêtre calculée par le serveur
+  });
+
+  it("crée une fenêtre relative à l'horloge du serveur, sans date fabriquée par le navigateur", async () => {
+    vi.mocked(hasApiToken).mockReturnValue(true);
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    const panel = await maintenancePanel();
+    const submit = within(panel).getByRole("button", { name: "Planifier" }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true); // pas de motif
+    await user.selectOptions(within(panel).getByLabelText("Sortie"), "OUT_001");
+    await user.clear(within(panel).getByLabelText("Début dans (min)"));
+    await user.type(within(panel).getByLabelText("Début dans (min)"), "15");
+    await user.clear(within(panel).getByLabelText("Durée (min)"));
+    await user.type(within(panel).getByLabelText("Durée (min)"), "90");
+    await user.type(within(panel).getByLabelText("Motif"), "  Changement de carte  ");
+    await user.click(submit);
+    expect(api.createMaintenance).toHaveBeenCalledWith({ output_id: "OUT_001", reason: "Changement de carte", starts_in_minutes: 15, duration_minutes: 90 });
+    await waitFor(() => expect((within(panel).getByLabelText("Motif") as HTMLInputElement).value).toBe(""));
+  });
+
+  it("annule une fenêtre (connecté)", async () => {
+    vi.mocked(hasApiToken).mockReturnValue(true);
+    vi.mocked(api.maintenance).mockResolvedValueOnce([window_()]);
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    const panel = await maintenancePanel();
+    await user.click(await within(panel).findByRole("button", { name: /Annuler la maintenance/ }));
+    expect(api.cancelMaintenance).toHaveBeenCalledWith("w1");
+  });
+
+  it("demande de se connecter avant de créer ou d'annuler, sans appeler l'API", async () => {
+    vi.mocked(api.maintenance).mockResolvedValueOnce([window_()]);
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    const panel = await maintenancePanel();
+    await user.click(await within(panel).findByRole("button", { name: /Annuler la maintenance/ }));
+    expect((await within(panel).findByRole("alert")).textContent).toMatch(/Connectez-vous/);
+    await user.type(within(panel).getByLabelText("Motif"), "Test");
+    await user.click(within(panel).getByRole("button", { name: "Planifier" }));
+    expect(api.cancelMaintenance).not.toHaveBeenCalled();
+    expect(api.createMaintenance).not.toHaveBeenCalled();
+  });
+
+  it("affiche le refus du serveur (422) sans le masquer", async () => {
+    vi.mocked(hasApiToken).mockReturnValue(true);
+    vi.mocked(api.createMaintenance).mockRejectedValueOnce(new Error("POST /maintenance -> 422 cette fenêtre est déjà terminée"));
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    const panel = await maintenancePanel();
+    await user.type(within(panel).getByLabelText("Motif"), "Test");
+    await user.click(within(panel).getByRole("button", { name: "Planifier" }));
+    expect((await within(panel).findByRole("alert")).textContent).toMatch(/Rejeté par l'API.*déjà terminée/);
+  });
+});
+
+describe("Alertes retenues et disponibilité", () => {
+  const alert_ = (over: Partial<Alert>): Alert => ({
+    incident_id: "i", output_id: "OUT_001", severity: "critical", event: "opened", timestamp: NOW, message: "chute de trafic", incident_type: "traffic_drop",
+    duration_seconds: null, traffic_mbps: null, expected_traffic_mbps: null, traffic_deviation_percent: null, loss_percent: null, expected_loss_percent: null,
+    suppressed: null, root_cause_incident_id: null, impacted_outputs: [], ...over,
+  });
+
+  it("marque les alertes retenues et nomme les sorties qu'une cause amont explique aussi", async () => {
+    vi.mocked(api.alerts).mockResolvedValueOnce([
+      alert_({ incident_id: "a", suppressed: "maintenance" }),
+      alert_({ incident_id: "b", output_id: "OUT_002", suppressed: "inhibited", root_cause_incident_id: "a" }),
+      alert_({ incident_id: "c", impacted_outputs: ["OUT_002", "OUT_003"] }),
+      alert_({ incident_id: "d", output_id: "OUT_003" }),
+    ]);
+    render(<Dashboard />);
+    const log = within(await screen.findByRole("region", { name: /alertes récentes/i })).getByRole("log");
+    await within(log).findByText("retenue : maintenance");
+    expect(within(log).getByText("retenue : cause amont")).toBeTruthy();
+    expect(within(log).getByText(/Explique aussi : OUT_002, OUT_003/)).toBeTruthy();
+    expect(within(log).getAllByText(/retenue/)).toHaveLength(2); // l'alerte ordinaire n'est pas marquée
+  });
+
+  it("montre le temps de maintenance et les faux positifs exclus du rapport de disponibilité", async () => {
+    render(<Dashboard />);
+    const row = await within(await screen.findByRole("region", { name: /disponibilité/i })).findByRole("row", { name: /OUT_001/ });
+    expect(row.textContent).toMatch(/30 min/); // 1 800 s de maintenance
+    expect(row.textContent).toMatch(/\+1 faux positif exclu\)/);
   });
 });

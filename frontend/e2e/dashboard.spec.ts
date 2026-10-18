@@ -3,7 +3,8 @@
  * monitoring, détection, SQLite) et l'interface compilée, sur la même origine.
  *
  * Le backend injecte un incident déterministe sur OUT_001 (chute de trafic, 3 h 50 simulées, soit
- * ~14 s réelles) et va 8× plus vite que la démonstration : les tests lisent ses effets dans l'interface.
+ * ~14 s réelles) et le même un pas plus tard sur OUT_002, déclarée en aval de OUT_001 ; il va 8× plus vite
+ * que la démonstration : les tests lisent ses effets dans l'interface.
  */
 import { expect, test, type Page } from "@playwright/test";
 
@@ -137,7 +138,7 @@ test("le rapport de disponibilité reflète l'incident sur la période observée
   const panel = page.getByRole("region", { name: /disponibilité/i });
   await expect(page.getByRole("region", { name: /alertes récentes/i })).toContainText(/OUT_001 — closed : traffic_drop/, { timeout: 60_000 });
   const row1 = panel.getByRole("row", { name: /OUT_001/ });
-  const row2 = panel.getByRole("row", { name: /OUT_002/ });
+  const row2 = panel.getByRole("row", { name: /OUT_003/ }); // OUT_002 a aussi son incident (aval de OUT_001)
   await expect(row1).toContainText(/\d+ h \d+|\d+ min/, { timeout: 70_000 });
   // Indisponibilité = la chute injectée, de son début réel à sa fin réelle : 46 pas de 5 min = 3 h 50 (début rétro-daté).
   await expect(row1).toContainText("3 h 50", { timeout: 70_000 });
@@ -228,4 +229,108 @@ test("sur un écran de téléphone, la page ne déborde pas horizontalement", as
   expect(overflow, "défilement horizontal de la page").toBeLessThanOrEqual(0);
   await expect(page.getByRole("main")).toBeVisible();
   await context.close();
+});
+
+async function signIn(page: Page) {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Déplier la configuration", exact: true }).click();
+  await page.getByLabel("Identifiant").fill("alice");
+  await page.getByLabel("Mot de passe").fill("e2e-pass");
+  await page.getByRole("button", { name: /se connecter/i }).click();
+  await expect(page.getByText(/connecté en tant que/i)).toBeVisible();
+}
+
+const incidentsPanel = (page: Page) => page.getByRole("region", { name: /^incidents/i });
+
+test("un incident en aval d'un incident déjà signalé est rattaché à sa cause et retenu", async ({ page, request }) => {
+  await page.goto("/");
+  const panel = incidentsPanel(page);
+  const down = panel.locator(".nm-log-row", { hasText: /OUT_002 — traffic_drop/ });
+  const up = panel.locator(".nm-log-row", { hasText: /OUT_001 — traffic_drop/ });
+  await expect(down).toContainText("cause : OUT_001", { timeout: 60_000 });
+  await expect(up).not.toContainText("cause :"); // la cause, elle, n'a pas de cause
+  const link = down.getByRole("link", { name: /cause : OUT_001/ });
+  const target = (await link.getAttribute("href")) as string; // « #incident-<id> » : mène à la ligne de la cause
+  expect(await panel.locator(target).count()).toBe(1);
+
+  // Côté serveur : l'aval est rattaché au bon incident, ses alertes sont retenues, celles de l'amont ne le sont pas.
+  const incidents = (await (await request.get("/incidents")).json()) as { id: string; output_id: string; inhibited: boolean; root_cause_incident_id: string | null }[];
+  const upstream = incidents.find((i) => i.output_id === "OUT_001")!;
+  const downstream = incidents.find((i) => i.output_id === "OUT_002")!;
+  expect(target).toBe(`#incident-${upstream.id}`);
+  expect(downstream).toMatchObject({ inhibited: true, root_cause_incident_id: upstream.id });
+  const alerts = (await (await request.get("/alerts?all=true&limit=500")).json()) as { output_id: string; suppressed: string | null; event: string }[];
+  expect(alerts.filter((a) => a.output_id === "OUT_002" && a.event === "opened").map((a) => a.suppressed)).toEqual(["inhibited"]);
+  expect(alerts.filter((a) => a.output_id === "OUT_001").every((a) => a.suppressed === null)).toBe(true);
+  // Et l'interface le dit dans le panneau d'alertes.
+  await expect(page.getByRole("region", { name: /alertes récentes/i })).toContainText("retenue : cause amont");
+});
+
+test("sans session, juger un incident invite à se connecter et n'envoie rien", async ({ page }) => {
+  const puts: string[] = [];
+  page.on("request", (r) => { if (r.method() === "PUT") puts.push(r.url()); });
+  await page.goto("/");
+  await incidentsPanel(page).getByRole("button", { name: /Juger l'incident de OUT_001 : faux positif/ }).click({ timeout: 60_000 });
+  await expect(incidentsPanel(page).getByRole("alert")).toContainText(/Connectez-vous \(panneau Configuration\)/);
+  expect(puts).toEqual([]);
+});
+
+test("juger un incident change la précision mesurée et le rapport de disponibilité, puis le verdict se retire", async ({ page }) => {
+  await signIn(page);
+  const panel = incidentsPanel(page);
+  const precision = panel.getByRole("status");
+  const report = page.getByRole("region", { name: /disponibilité/i });
+  const row = report.getByRole("row", { name: /OUT_001/ });
+  const refreshReport = async (days: string, other: string) => { // le rapport se rafraîchit toutes les 60 s : on le force en changeant de période
+    await report.getByRole("button", { name: other }).click();
+    await report.getByRole("button", { name: days }).click();
+  };
+  await expect(panel).toContainText(/OUT_001 — traffic_drop \(closed/, { timeout: 60_000 });
+  await expect(row).toContainText("3 h 50", { timeout: 70_000 });
+  await expect(precision).toContainText(/Précision mesurée sur 30 j : — \(0 vrai, 0 faux ; \d+ sans verdict/); // aucun verdict : pas de pourcentage
+
+  await panel.getByRole("button", { name: "Juger l'incident de OUT_001 : faux positif" }).click();
+  await expect(precision).toContainText(/Précision mesurée sur 30 j : 0\.0 % \(0 vrai, 1 faux ; \d+ sans verdict — \d+ % jugés\)/);
+  await expect(panel.locator(".nm-log-row", { hasText: /OUT_001 — traffic_drop/ })).toContainText("faux positif");
+  await refreshReport("30 j", "7 j");
+  await expect(row).toContainText(/\+1 faux positif exclu\)/); // exclu du rapport, et dit comme tel
+  await expect(row.getByRole("cell").nth(1)).toHaveText("100.000 %");
+
+  await panel.getByRole("button", { name: "Juger l'incident de OUT_001 : vrai incident" }).click();
+  await expect(precision).toContainText(/Précision mesurée sur 30 j : 100\.0 % \(1 vrai, 0 faux/);
+  await refreshReport("30 j", "7 j");
+  await expect(row).toContainText("3 h 50"); // de nouveau compté
+  await expect(row).not.toContainText("faux positif exclu");
+
+  await panel.getByRole("button", { name: "Retirer le verdict de l'incident de OUT_001" }).click();
+  await expect(precision).toContainText(/Précision mesurée sur 30 j : — \(0 vrai, 0 faux/);
+  await expect(panel.getByRole("button", { name: /Retirer le verdict/ })).toHaveCount(0);
+});
+
+test("créer puis annuler une maintenance : horaires relatifs à l'horloge du serveur", async ({ page, request }) => {
+  await signIn(page);
+  const panel = page.getByRole("region", { name: /maintenance planifiée/i });
+  await panel.getByLabel("Sortie").selectOption("OUT_003");
+  await panel.getByLabel("Début dans (min)").fill("600");
+  await panel.getByLabel("Durée (min)").fill("120");
+  await panel.getByLabel("Motif").fill("E2E remplacement de carte");
+  await panel.getByRole("button", { name: "Planifier" }).click();
+  const row = panel.locator(".nm-log-row", { hasText: "E2E remplacement de carte" });
+  await expect(row).toContainText("OUT_003");
+  await expect(row).toContainText("à venir");
+
+  // L'horloge du serveur est simulée (8× plus vite) et sans rapport avec celle du navigateur : si le début
+  // était calculé par le navigateur, il serait très loin de « maintenant + 600 min » du serveur.
+  const status = (await (await request.get("/monitoring/status")).json()) as { simulated_now: string };
+  const windows = (await (await request.get("/maintenance")).json()) as { output_id: string; start: string; end: string; reason: string }[];
+  const mine = windows.find((w) => w.reason === "E2E remplacement de carte")!;
+  const minutesAhead = (new Date(mine.start).getTime() - new Date(status.simulated_now).getTime()) / 60_000;
+  expect(Math.abs(minutesAhead - 600)).toBeLessThan(30);
+  expect((new Date(mine.end).getTime() - new Date(mine.start).getTime()) / 60_000).toBe(120);
+
+  await row.getByRole("button", { name: /Annuler la maintenance/ }).click();
+  await expect(row).toContainText("annulée");
+  await expect(row.getByRole("button", { name: /Annuler la maintenance/ })).toHaveCount(0);
+  const after = (await (await request.get("/maintenance")).json()) as { reason: string; state: string }[];
+  expect(after.find((w) => w.reason === "E2E remplacement de carte")?.state).toBe("cancelled");
 });

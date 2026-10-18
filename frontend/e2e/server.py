@@ -1,7 +1,7 @@
 """
 Serveur de test pour Playwright : le **vrai** backend (boucle, détection, base SQLite, API), servant
 l'interface compilée sur la même origine — exactement le montage de l'image Docker. Seules différences
-avec la démonstration : un incident déterministe est injecté, la boucle va 8× plus vite que la
+avec la démonstration : deux incidents déterministes sont injectés (OUT_002 est déclarée en aval de OUT_001), la boucle va 8× plus vite que la
 démonstration (0,25 s par pas de 5 min) et un utilisateur de test existe (alice / e2e-pass).
 
     python frontend/e2e/server.py <port> <dossier-temporaire>
@@ -18,7 +18,8 @@ frontend = Path(__file__).resolve().parent.parent
 
 # L'environnement se règle AVANT l'import de l'API : le montage de l'interface et la configuration sont lus à l'import.
 (workdir / "config.yaml").write_text(
-    f"history: {{minimum: 30d, preferred: 40d}}\nstorage: {{database_url: 'sqlite:///{workdir / 'e2e.db'}'}}\n", encoding="utf-8"
+    f"history: {{minimum: 30d, preferred: 40d}}\nstorage: {{database_url: 'sqlite:///{workdir / 'e2e.db'}'}}\n"
+    f"topology: {{parents: {{OUT_002: OUT_001}}}}\n", encoding="utf-8"
 )
 os.environ.update(NM_CONFIG=str(workdir / "config.yaml"), NM_STATIC_DIR=str(frontend / "dist-e2e"), NM_AUTH_SECRET="e2e-secret")
 
@@ -36,6 +37,12 @@ step = state.source.get_interval()
 state.source.add_scenario(  # chute de trafic de 3 h 50 simulées, qui démarre 40 minutes simulées après le lancement
     AnomalyScenario(
         scenario_id="E2E", output_id="OUT_001", start_time=state.now + 8 * step, end_time=state.now + 54 * step,
+        type=ScenarioType.TRAFFIC_DROP, severity=Severity.CRITICAL, traffic_drop_fraction=0.7,
+    )
+)
+state.source.add_scenario(  # même chute sur l'aval, un pas plus tard : rattachée à la cause amont, donc retenue (jamais notifiée)
+    AnomalyScenario(
+        scenario_id="E2E_DOWNSTREAM", output_id="OUT_002", start_time=state.now + 9 * step, end_time=state.now + 54 * step,
         type=ScenarioType.TRAFFIC_DROP, severity=Severity.CRITICAL, traffic_drop_fraction=0.7,
     )
 )

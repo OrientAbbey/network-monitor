@@ -1,8 +1,11 @@
 import { useState, useEffect, useRef, useCallback, type KeyboardEvent, type MouseEvent } from "react";
-import { api, currentSession, login, logout, type Session } from "./api";
+import { api, currentSession, hasApiToken, login, logout, type Session } from "./api";
 import { decimate, mergeSeries, nearestIndex, pointerToTime, type Point } from "./chart";
 import { usePolling } from "./polling";
-import type { Alert, AppConfigView, AvailabilityReport, ForecastPoint, Incident, MonitoringStatus, OutputSummary, TrafficSample } from "./types";
+import type {
+  Alert, AppConfigView, AvailabilityReport, ForecastPoint, Incident, MaintenanceWindow, MonitoringStatus, OutputSummary, PrecisionReport,
+  TrafficSample, Verdict,
+} from "./types";
 
 type Visibility = { traffic: boolean; loss: boolean; baseline: boolean; prediction: boolean };
 type Current = { traffic: number | null | undefined; loss: number | null | undefined };
@@ -545,7 +548,7 @@ function AvailabilityPanel() {
             <thead>
               <tr>
                 <th scope="col">Sortie</th><th scope="col">Observé</th><th scope="col">Disponibilité</th><th scope="col">Indisponible</th>
-                <th scope="col">Dégradé</th><th scope="col">Incidents</th><th scope="col">Détection</th>
+                <th scope="col">Dégradé</th><th scope="col">Maintenance</th><th scope="col">Incidents</th><th scope="col">Détection</th>
                 <th scope="col">Durée moy.</th><th scope="col">Couverture</th>
               </tr>
             </thead>
@@ -557,7 +560,11 @@ function AvailabilityPanel() {
                   <td className="mono">{o.availability_percent === null ? "—" : `${o.availability_percent.toFixed(3)} %`}</td>
                   <td className="mono">{formatDuration(o.downtime_seconds)}</td>
                   <td className="mono">{formatDuration(o.degraded_seconds)}</td>
-                  <td className="mono">{o.incidents}</td>
+                  <td className="mono">{formatDuration(o.maintenance_seconds)}</td>
+                  <td className="mono">
+                    {o.incidents}
+                    {o.false_positives_excluded > 0 && <span className="nm-note"> (+{o.false_positives_excluded} faux positif{o.false_positives_excluded > 1 ? "s" : ""} exclu{o.false_positives_excluded > 1 ? "s" : ""})</span>}
+                  </td>
                   <td className="mono">{formatDuration(o.mttd_seconds)}</td>
                   <td className="mono">{formatDuration(o.mttr_seconds)}</td>
                   <td className="mono">{o.coverage_percent === null ? "—" : `${o.coverage_percent.toFixed(1)} %`}</td>
@@ -567,11 +574,184 @@ function AvailabilityPanel() {
           </table>
           <p className="settings-field-hint">
             Calculé sur la période <strong>observée</strong> (depuis la première mesure conservée, au plus tôt le début de la
-            période choisie), pas sur la période demandée. Indisponibilité = incidents critiques, du début réel à la fin réelle.
+            période choisie), pas sur la période demandée. Indisponibilité = incidents critiques, du début réel à la fin réelle ; le temps de maintenance planifiée est retiré de l'indisponibilité et du temps dû, et les incidents jugés faux positifs ne sont pas comptés.
             Couverture = part des mesures attendues effectivement reçues (une couverture basse rend la disponibilité moins fiable).
           </p>
         </div>
       )}
+    </section>
+  );
+}
+
+const NOT_LOGGED_IN = "Connectez-vous (panneau Configuration) pour effectuer cette action.";
+
+/** Message lisible pour un échec d'action protégée : session absente ou expirée (401), authentification non configurée (503). */
+function actionError(err: unknown): string {
+  const msg = errorMessage(err);
+  if (msg.includes(" 401 ")) return NOT_LOGGED_IN;
+  if (msg.includes(" 503 ")) return "Authentification non configurée sur le serveur : action impossible.";
+  return "Rejeté par l'API : " + msg;
+}
+
+const VERDICT_LABEL: Record<Verdict, string> = { true_positive: "vrai incident", false_positive: "faux positif" };
+
+function IncidentsPanel({ incidents }: { incidents: Incident[] }) {
+  const [precision, setPrecision] = useState<PrecisionReport | null>(null);
+  const [verdicts, setVerdicts] = useState<Record<string, Verdict | null>>({}); // jugements posés ici, avant le prochain rafraîchissement
+  const [error, setError] = useState<string | null>(null);
+  const refreshPrecision = useCallback(async () => {
+    try {
+      setPrecision(await api.precision(30));
+    } catch {
+      setPrecision(null);
+    }
+  }, []);
+  usePolling(refreshPrecision, 30_000, [refreshPrecision]);
+
+  const judge = async (inc: Incident, verdict: Verdict | null) => {
+    if (!hasApiToken()) return setError(NOT_LOGGED_IN);
+    setError(null);
+    try {
+      const { verdict: saved } = await api.setFeedback(inc.id, verdict); // lu ici : une réponse inattendue est attrapée par le catch
+      setVerdicts((prev) => ({ ...prev, [inc.id]: saved }));
+      void refreshPrecision();
+    } catch (err) {
+      setError(actionError(err));
+    }
+  };
+
+  const outputOf = (id: string) => incidents.find((i) => i.id === id)?.output_id;
+  return (
+    <section className="nm-panel" aria-labelledby="h-incidents">
+      <h2 id="h-incidents">Incidents (récents et actifs)</h2>
+      <p className="settings-field-hint" role="status">
+        {precision === null ? "Précision indisponible."
+          : `Précision mesurée sur ${precision.days} j : ${precision.precision_percent === null ? "—" : `${precision.precision_percent.toFixed(1)} %`} `
+            + `(${precision.true_positives} vrai${precision.true_positives > 1 ? "s" : ""}, ${precision.false_positives} faux ; ${precision.unjudged} sans verdict`
+            + `${precision.judged_share_percent === null ? "" : ` — ${precision.judged_share_percent.toFixed(0)} % jugés`})`}
+      </p>
+      {error && <p className="settings-warning" role="alert">{error}</p>}
+      <div className="nm-log" role="log" aria-live="polite" aria-relevant="additions">
+        {incidents.length === 0 && <div className="nm-log-empty">Aucun incident pour l'instant.</div>}
+        {incidents.map((inc) => {
+          const verdict = inc.id in verdicts ? verdicts[inc.id] : inc.verdict;
+          const cause = inc.root_cause_incident_id;
+          return (
+            <div className="nm-log-row" id={`incident-${inc.id}`} key={inc.id}>
+              <span className="nm-log-time mono">{formatClock(new Date(inc.last_seen_at))}</span>
+              <span className="nm-log-dot" style={{ background: (STATUS_STYLE[inc.status] ?? STATUS_STYLE.normal).color, marginTop: 4 }} />
+              <span className="nm-log-msg">
+                {inc.output_id} — {inc.incident_type} ({(STATUS_STYLE[inc.status] ?? STATUS_STYLE.normal).label}, score {inc.score.toFixed(2)})
+                {inc.maintenance && <span className="nm-tag">pendant une maintenance</span>}
+                {cause && (outputOf(cause)
+                  ? <a className="nm-tag" href={`#incident-${cause}`}>cause : {outputOf(cause)}</a>
+                  : <span className="nm-tag">cause : un incident amont</span>)}
+                {verdict && <span className="nm-tag">{VERDICT_LABEL[verdict]}</span>}
+                {inc.opened_at && (
+                  <span className="nm-verdicts">
+                    {(["false_positive", "true_positive"] as Verdict[]).map((v) => (
+                      <button key={v} type="button" className={`range-btn${verdict === v ? " active" : ""}`} aria-pressed={verdict === v}
+                        aria-label={`Juger l'incident de ${inc.output_id} : ${VERDICT_LABEL[v]}`} onClick={() => void judge(inc, v)}>
+                        {v === "false_positive" ? "Faux positif" : "Vrai incident"}
+                      </button>
+                    ))}
+                    {verdict && (
+                      <button type="button" className="range-btn" aria-label={`Retirer le verdict de l'incident de ${inc.output_id}`} onClick={() => void judge(inc, null)}>
+                        Retirer le verdict
+                      </button>
+                    )}
+                  </span>
+                )}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+const MAINTENANCE_STATE: Record<MaintenanceWindow["state"], string> = { upcoming: "à venir", active: "en cours", past: "terminée", cancelled: "annulée" };
+
+function formatWhen(iso: string): string {
+  return new Date(iso).toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function MaintenancePanel({ outputIds }: { outputIds: string[] }) {
+  const [windows, setWindows] = useState<MaintenanceWindow[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [output, setOutput] = useState("");
+  const [startsIn, setStartsIn] = useState(0);
+  const [duration, setDuration] = useState(60);
+  const [reason, setReason] = useState("");
+  const refresh = useCallback(async () => {
+    try {
+      setWindows(await api.maintenance(7));
+    } catch {
+      setWindows([]);
+    }
+  }, []);
+  usePolling(refresh, 15_000, [refresh]);
+
+  const act = async (action: () => Promise<unknown>) => {
+    if (!hasApiToken()) return setError(NOT_LOGGED_IN);
+    setError(null);
+    try {
+      await action();
+      await refresh();
+    } catch (err) {
+      setError(actionError(err));
+    }
+  };
+  const create = () => act(async () => {
+    await api.createMaintenance({ output_id: output || null, reason: reason.trim(), starts_in_minutes: startsIn, duration_minutes: duration });
+    setReason("");
+  });
+
+  return (
+    <section className="nm-panel" aria-labelledby="h-maintenance">
+      <h2 id="h-maintenance">Maintenance planifiée</h2>
+      <p className="settings-field-hint">
+        Pendant une fenêtre, les incidents de la sortie sont enregistrés mais n'envoient aucune alerte ; son temps est retiré de la disponibilité.
+        Les horaires sont relatifs à l'horloge du serveur.
+      </p>
+      {error && <p className="settings-warning" role="alert">{error}</p>}
+      <div className="nm-log" role="log" aria-live="polite" aria-relevant="additions">
+        {windows.length === 0 && <div className="nm-log-empty">Aucune maintenance planifiée.</div>}
+        {windows.map((w) => (
+          <div className="nm-log-row" key={w.id}>
+            <span className="nm-log-msg">
+              {w.output_id ?? "Toutes les sorties"} — {formatWhen(w.start)} → {formatWhen(w.end)} — {w.reason}
+              <span className="nm-tag">{MAINTENANCE_STATE[w.state]}</span>
+              {(w.state === "upcoming" || w.state === "active") && (
+                <button type="button" className="range-btn" aria-label={`Annuler la maintenance « ${w.reason} »`} onClick={() => void act(() => api.cancelMaintenance(w.id))}>
+                  Annuler
+                </button>
+              )}
+            </span>
+          </div>
+        ))}
+      </div>
+      <fieldset className="nm-form">
+        <legend>Planifier une fenêtre</legend>
+        <label>Sortie
+          <select className="settings-input" style={{ width: 150 }} value={output} onChange={(e) => setOutput(e.target.value)}>
+            <option value="">Toutes les sorties</option>
+            {outputIds.map((id) => <option key={id} value={id}>{id}</option>)}
+          </select>
+        </label>
+        <label>Début dans (min)
+          <input className="settings-input mono" type="number" min={0} value={startsIn} onChange={(e) => setStartsIn(Number(e.target.value))} />
+        </label>
+        <label>Durée (min)
+          <input className="settings-input mono" type="number" min={1} value={duration} onChange={(e) => setDuration(Number(e.target.value))} />
+        </label>
+        <label>Motif
+          <input className="settings-input" style={{ width: 220 }} maxLength={200} value={reason} onChange={(e) => setReason(e.target.value)} />
+        </label>
+        <button type="button" className="settings-reset" disabled={!reason.trim() || duration <= 0} onClick={() => void create()}>Planifier</button>
+        {!hasApiToken() && <span className="settings-field-hint">{NOT_LOGGED_IN}</span>}
+      </fieldset>
     </section>
   );
 }
@@ -838,25 +1018,19 @@ export default function Dashboard() {
             <div className="nm-log-row" key={`${a.incident_id}-${a.timestamp}-${a.event}`}>
               <span className="nm-log-time mono">{formatClock(new Date(a.timestamp))}</span>
               <span className="nm-log-dot" style={{ background: a.severity === "critical" ? COLORS.coral : a.severity === "warning" ? COLORS.amber : COLORS.textDim }} />
-              <span className="nm-log-msg">{a.output_id} — {a.event} : {a.message}</span>
+              <span className="nm-log-msg">
+                {a.output_id} — {a.event} : {a.message}
+                {a.suppressed && <span className="nm-tag">retenue : {a.suppressed === "maintenance" ? "maintenance" : "cause amont"}</span>}
+                {a.impacted_outputs.length > 0 && <span className="nm-note"> Explique aussi : {a.impacted_outputs.join(", ")}</span>}
+              </span>
             </div>
           ))}
         </div>
       </section>
 
-      <section className="nm-panel" aria-labelledby="h-incidents">
-        <h2 id="h-incidents">Incidents (récents et actifs)</h2>
-        <div className="nm-log" role="log" aria-live="polite" aria-relevant="additions">
-          {incidents.length === 0 && <div className="nm-log-empty">Aucun incident pour l'instant.</div>}
-          {incidents.map((inc) => (
-            <div className="nm-log-row" key={inc.id}>
-              <span className="nm-log-time mono">{formatClock(new Date(inc.last_seen_at))}</span>
-              <span className="nm-log-dot" style={{ background: (STATUS_STYLE[inc.status] ?? STATUS_STYLE.normal).color, marginTop: 4 }} />
-              <span className="nm-log-msg">{inc.output_id} — {inc.incident_type} ({(STATUS_STYLE[inc.status] ?? STATUS_STYLE.normal).label}, score {inc.score.toFixed(2)})</span>
-            </div>
-          ))}
-        </div>
-      </section>
+      <IncidentsPanel incidents={incidents} />
+
+      <MaintenancePanel outputIds={outputs.map((o) => o.output_id)} />
       </main>
     </div>
   );
@@ -961,5 +1135,13 @@ const BASE_STYLE = `
   .nm-log-row { display: flex; gap: 10px; align-items: baseline; font-size: 12.5px; }
   .nm-log-time { color: ${COLORS.textFaint}; flex-shrink: 0; width: 40px; }
   .nm-log-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; margin-top: 4px; }
+  .nm-tag { margin-left: 8px; padding: 1px 6px; border: 1px solid ${COLORS.border}; color: ${COLORS.textDim}; font-size: 11px; white-space: nowrap; }
+  a.nm-tag { color: ${COLORS.trace}; }
+  .nm-note { color: ${COLORS.textDim}; font-size: 11px; }
+  .nm-form { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: flex-end; margin: 14px 0 0; padding: 10px 14px 14px; border: 1px solid ${COLORS.border}; }
+  .nm-form legend { font-size: 12px; color: ${COLORS.text}; padding: 0 6px; }
+  .nm-form label { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: ${COLORS.textDim}; }
+  .nm-form .settings-input { margin-top: 0; }
+  .nm-verdicts { display: inline-flex; gap: 6px; margin-left: 10px; }
   .nm-log-empty { color: ${COLORS.textFaint}; font-size: 12.5px; }
 `;

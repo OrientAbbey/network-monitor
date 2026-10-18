@@ -3,7 +3,8 @@
  * génération de données ici — uniquement des appels réseau vers le vrai backend.
  */
 import type {
-  Alert, AppConfigView, AvailabilityReport, ConfigUpdate, ForecastPoint, Incident, MonitoringStatus, OutputSummary, TrafficSample,
+  Alert, AppConfigView, AvailabilityReport, ConfigUpdate, ForecastPoint, Incident, MaintenanceRequest, MaintenanceWindow,
+  MonitoringStatus, OutputSummary, PrecisionReport, TrafficSample, Verdict,
 } from "./types";
 
 // Chaîne vide (image Docker : l'API sert elle-même l'interface) = même origine que la page.
@@ -46,7 +47,7 @@ export function logout(): void {
 type Param = string | number | undefined | null | string[];
 
 interface RequestOptions {
-  method?: "GET" | "POST" | "PUT";
+  method?: "GET" | "POST" | "PUT" | "DELETE";
   params?: Record<string, Param>;
   body?: unknown;
 }
@@ -107,6 +108,14 @@ export const api = {
   availability: (days: number) => request<AvailabilityReport>("/reports/availability", { params: { days } }),
   availabilityCsvUrl: (days: number) => new URL(`/reports/availability?format=csv&days=${days}`, API_BASE || window.location.origin).toString(),
   alerts: (outputId?: string, limit = 20) => request<Alert[]>("/alerts", { params: { output_id: outputId, limit } }),
+  // Verdict d'un opérateur (connecté) ; `null` le retire. Seul un incident confirmé peut être jugé (409 sinon).
+  setFeedback: (id: string, verdict: Verdict | null) =>
+    request<Incident>(`/incidents/${encodeURIComponent(id)}/feedback`, { method: "PUT", body: { verdict } }),
+  precision: (days: number) => request<PrecisionReport>("/reports/precision", { params: { days } }),
+  // Fenêtres relatives à l'horloge du SERVEUR (`days`, `starts_in_minutes`) : jamais de dates fabriquées ici.
+  maintenance: (days = 7) => request<MaintenanceWindow[]>("/maintenance", { params: { days } }),
+  createMaintenance: (body: MaintenanceRequest) => request<MaintenanceWindow>("/maintenance", { method: "POST", body }),
+  cancelMaintenance: (id: string) => request<MaintenanceWindow>(`/maintenance/${encodeURIComponent(id)}`, { method: "DELETE" }),
   incident: (id: string) => request<Incident>(`/incidents/${encodeURIComponent(id)}`),
   monitoringStatus: () => request<MonitoringStatus>("/monitoring/status"),
   startMonitoring: () => request<MonitoringStatus>("/monitoring/start", { method: "POST" }),
