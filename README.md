@@ -52,6 +52,7 @@ docs/
   CAHIER_DES_CHARGES_RESEAU.md   Spécifications du système de détection
   ARCHITECTURE.md                 Documentation technique du projet complet
   LIMITES_ET_FEUILLE_DE_ROUTE.md  Limites, fonctionnalités proposées, décisions reportées
+  REVUE_ET_PLAN.md               Revue indépendante de la version initiale (6b883b6) et plan d'action
 
 config.example.yaml      Exemple de configuration (source, seuils, Isolation Forest)
 requirements.txt         Dépendances d'exécution (optionnel : scikit-learn, pymysql)
