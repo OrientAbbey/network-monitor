@@ -25,7 +25,9 @@ from sqlalchemy import (
     create_engine,
     event,
     func,
+    text,
 )
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from network_monitor.analysis.availability import SampleStats
@@ -326,6 +328,16 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    def ping(self) -> bool:
+        """La base répond-elle ? (santé du service : jamais d'exception, un booléen)."""
+        ...
+
+    @abstractmethod
+    def count_notifications(self) -> dict[tuple[str, str], int]:
+        """Nombre de notifications par (canal, statut), pour la supervision."""
+        ...
+
+    @abstractmethod
     def dispose(self) -> None:
         """Ferme proprement les connexions sous-jacentes (tests, arrêt propre)."""
         ...
@@ -509,6 +521,21 @@ class SqlAlchemyRepository(Repository):
         with self._session() as session:
             self._merge_notifications(session, items)
             session.commit()
+
+    def ping(self) -> bool:
+        try:
+            with self._session() as session:
+                session.execute(text("SELECT 1"))
+            return True
+        except SQLAlchemyError:
+            return False
+
+    def count_notifications(self) -> dict[tuple[str, str], int]:
+        with self._session() as session:
+            rows = session.query(NotificationRow.channel, NotificationRow.status, func.count()).group_by(
+                NotificationRow.channel, NotificationRow.status
+            )
+            return {(channel, status): n for channel, status, n in rows}
 
     def list_notifications(self, status: str | None = None, limit: int = 100) -> list[Notification]:
         with self._session() as session:

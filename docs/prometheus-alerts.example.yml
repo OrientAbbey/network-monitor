@@ -1,0 +1,46 @@
+# Règles d'alerte Prometheus d'exemple pour network-monitor (à adapter : seuils, durées, étiquettes de routage).
+# Elles complètent le signal de vie externe (`heartbeat`), qui, lui, détecte la mort du processus : ici,
+# Prometheus voit un service vivant qui ne fait plus son travail. Validées avec `promtool check rules`.
+#
+#   scrape_configs:
+#     - job_name: network-monitor
+#       metrics_path: /metrics
+#       authorization: {credentials_file: /etc/prometheus/nm_metrics_token}   # seulement si NM_METRICS_TOKEN est défini
+#       static_configs: [{targets: ["network-monitor:8000"]}]
+groups:
+  - name: network-monitor
+    rules:
+      - alert: NetworkMonitorLoopStuck
+        # Même règle que /health/ready : plus de pas depuis 3 périodes + 10 s alors que la boucle devrait tourner.
+        # La durée écoulée est l'opérande de GAUCHE : `A and B` garde la valeur de A, et c'est elle qu'affiche {{ $value }}.
+        expr: (time() - nm_last_tick_timestamp_seconds) > 3 * nm_interval_seconds + 10 and nm_monitoring_running == 1
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "La boucle de surveillance ne produit plus de pas"
+          description: "Dernier pas il y a {{ $value | humanizeDuration }} : la détection est aveugle, aucune alerte réseau ne partira."
+
+      - alert: NetworkMonitorStaleData
+        # Même règle que /health/ready : la dernière mesure d'une sortie a plus de 3 intervalles de retard sur l'horloge du serveur.
+        expr: scalar(nm_simulated_clock_timestamp_seconds) - nm_output_last_sample_timestamp_seconds > 3 * scalar(nm_interval_seconds)
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Plus de mesures pour la sortie {{ $labels.output }}"
+          description: "La source ne livre plus de données pour cette sortie depuis {{ $value | humanizeDuration }} : une vraie panne ne serait pas détectée."
+
+      - alert: NetworkMonitorNotificationsFailing
+        # `nm_notifications` compte les lignes en base (jauge) : on alerte sur l'augmentation, pas sur le total historique.
+        expr: increase(nm_notifications{status="failed"}[15m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Des notifications sortantes échouent (canal {{ $labels.channel }})"
+          description: "Des alertes réseau n'ont pas pu être transmises : vérifier le canal, son secret et sa joignabilité."
+
+      - alert: NetworkMonitorOutputNotCalibrated
+        expr: nm_output_calibrated == 0
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "La sortie {{ $labels.output }} n'a pas de modèle calibré"
+          description: "Sans historique suffisant, la détection de cette sortie est dégradée ou absente."

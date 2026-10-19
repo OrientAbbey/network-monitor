@@ -407,6 +407,24 @@ class TopologyConfig(BaseModel):
         return self
 
 
+class HeartbeatConfig(BaseModel):
+    """Signal de vie externe (interrupteur d'homme mort) : un service tiers (ex. Healthchecks.io, gratuit et sans
+    carte) alerte quand les appels cessent, ce qu'aucune autosurveillance interne ne peut faire si le processus meurt.
+    L'URL (secret) n'est jamais ici : `url_env` nomme la variable d'environnement qui la porte."""
+
+    enabled: bool = False
+    url_env: str = "NM_HEARTBEAT_URL"
+    period: timedelta = timedelta(seconds=60)
+    timeout: timedelta = timedelta(seconds=10)
+    fail_suffix: str = "/fail"
+    """Ajouté à l'URL pour signaler explicitement un défaut (les raisons sont envoyées en corps)."""
+
+    @field_validator("period", "timeout", mode="before")
+    @classmethod
+    def _parse(cls, v):
+        return _parse_duration(v) if not isinstance(v, timedelta) else v
+
+
 class StorageConfig(BaseModel):
     database_url: str = "sqlite:///network_monitor.db"
     lock_file: str | None = None
@@ -432,6 +450,7 @@ class AppConfig(BaseModel):
     alerts: AlertsConfig = AlertsConfig()
     notifications: NotificationsConfig = NotificationsConfig()
     topology: TopologyConfig = TopologyConfig()
+    heartbeat: HeartbeatConfig = HeartbeatConfig()
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> AppConfig:

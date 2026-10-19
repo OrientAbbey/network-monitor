@@ -88,6 +88,11 @@ class MonitoringLoop:
             o: deque(maxlen=history_steps(source.get_interval())) for o in source.list_outputs()
         }
         self._last_calibrated_at: datetime | None = None
+        self.last_sample_at: dict[str, datetime] = {}
+        """Horodatage de la dernière mesure utilisable reçue, par sortie (supervision : données périmées)."""
+
+    def is_calibrated(self, output_id: str) -> bool:
+        return output_id in self._forecast_models and output_id in self._loss_baselines
 
     @property
     def incident_manager(self) -> IncidentManager:
@@ -231,6 +236,8 @@ class MonitoringLoop:
             # L'envoi est planifié dans la même transaction que l'alerte (outbox) : voir app/notify.py.
             self._notifier.plan(alerts) if self._notifier else [],
         )
+        for sample in tick.samples:
+            self.last_sample_at[sample.output_id] = max(sample.timestamp, self.last_sample_at.get(sample.output_id, sample.timestamp))
         self.maybe_recalibrate(now)
 
     def _features(self, sample: TrafficSample, forecast: ForecastResult, baseline: LossBaseline) -> dict[str, float]:

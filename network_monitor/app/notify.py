@@ -26,6 +26,7 @@ import os
 import threading
 import time
 from collections import defaultdict, deque
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -34,6 +35,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from network_monitor.app.config import (
+    HeartbeatConfig,
     NotificationsConfig,
     SmsChannel,
     TelegramChannel,
@@ -44,6 +46,10 @@ from network_monitor.incidents.manager import Alert
 from network_monitor.storage.repository import Notification, Repository
 
 logger = logging.getLogger(__name__)
+
+# httpx journalise chaque requête à INFO avec son URL complète. Or ici l'URL est un secret (jeton Telegram, URL du
+# signal de vie) : un simple `logging.basicConfig(level=INFO)` côté exploitation suffirait à la divulguer.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 _RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
 _MAX_BACKOFF = timedelta(minutes=15)
@@ -471,10 +477,65 @@ class NotificationDispatcher:
         self._client.close()
 
 
+class Heartbeat:
+    """Signal de vie externe (interrupteur d'homme mort). Tant que `check()` ne renvoie aucune raison, un thread
+    appelle l'URL du service tiers ; sinon il appelle `url + fail_suffix` avec les raisons en corps. Si le
+    processus meurt, les appels cessent : c'est le service tiers qui alerte, pas nous. L'URL est un secret :
+    elle vient de l'environnement et n'est jamais journalisée (les erreurs httpx la contiennent parfois)."""
+
+    def __init__(self, cfg: HeartbeatConfig, check: Callable[[], list[str]], client: httpx.Client | None = None) -> None:
+        url = os.environ.get(cfg.url_env)
+        if not url:
+            raise RuntimeError(f"heartbeat.enabled exige la variable d'environnement {cfg.url_env} (URL du service de signal de vie)")
+        self._url, self._cfg, self._check = url, cfg, check
+        self._client = client or httpx.Client(timeout=cfg.timeout.total_seconds())
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    def beat(self) -> bool:
+        """Un appel. Renvoie vrai si le service tiers l'a reçu (jamais d'exception : un service injoignable est journalisé)."""
+        try:
+            reasons = self._check()
+        except Exception as exc:
+            logger.exception("Signal de vie : le contrôle de santé a échoué")
+            reasons = [f"contrôle de santé en erreur ({type(exc).__name__})"]
+        url = self._url.rstrip("/") + self._cfg.fail_suffix if reasons else self._url
+        try:
+            self._client.post(url, content="; ".join(reasons)[:1000].encode()).raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.warning("Signal de vie : le service a répondu %s", exc.response.status_code)
+            return False
+        except httpx.HTTPError as exc:
+            logger.warning("Signal de vie : service injoignable (%s)", type(exc).__name__)
+            return False
+        return True
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._stop.clear()
+
+        def loop() -> None:
+            while True:
+                self.beat()
+                if self._stop.wait(self._cfg.period.total_seconds()):
+                    return
+
+        self._thread = threading.Thread(target=loop, name="heartbeat", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            self._thread = None
+        self._client.close()
+
+
 def build_dispatcher(cfg: NotificationsConfig, storage: Repository) -> NotificationDispatcher | None:
     """None si les notifications sont désactivées. Lève `RuntimeError` (message clair) si un
     secret manque : mieux vaut refuser de démarrer que découvrir pendant un incident qu'aucune alerte ne part."""
     return NotificationDispatcher(cfg, storage) if cfg.enabled else None
 
 
-__all__ = ["NotificationDispatcher", "build_dispatcher", "format_sms", "format_text"]
+__all__ = ["Heartbeat", "NotificationDispatcher", "build_dispatcher", "format_sms", "format_text"]

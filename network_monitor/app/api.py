@@ -15,12 +15,15 @@ développement par défaut), pas à `*`.
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import threading
+import time
 import uuid
+from collections import Counter
 from contextlib import asynccontextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
@@ -28,6 +31,7 @@ from typing import Annotated, Literal
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr, ValidationError
 
@@ -37,6 +41,7 @@ from network_monitor.app.config import AppConfig, HistoryConfig
 from network_monitor.app.http_cache import ETagMiddleware
 from network_monitor.app.lock import SingleInstanceLock
 from network_monitor.app.main import MonitoringLoop
+from network_monitor.app.metrics import Family, render
 from network_monitor.app.models import (
     AnomalyResult,
     ForecastResult,
@@ -46,7 +51,7 @@ from network_monitor.app.models import (
     Severity,
     TrafficSample,
 )
-from network_monitor.app.notify import build_dispatcher
+from network_monitor.app.notify import Heartbeat, build_dispatcher
 from network_monitor.data.sources import build_source
 from network_monitor.incidents.manager import Alert
 from network_monitor.storage.archive import ParquetArchive
@@ -109,6 +114,21 @@ def _client(request: Request) -> str:
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class Telemetry:
+    """Ce que la boucle sait d'elle-même, pour `/metrics` et `/health/ready`."""
+
+    ticks: int = 0
+    errors: int = 0
+    last_tick_at: float | None = None
+    """Heure réelle (epoch) de la fin du dernier pas, réussi ou non."""
+    last_tick_seconds: float | None = None
+
+
+_TICK_MARGIN_SECONDS = 10.0
+"""Marge ajoutée à 3 périodes avant de dire qu'un pas manque : un pas lent n'est pas une panne."""
+
+
 class MonitoringState:
     """
     Regroupe tout ce que l'API doit garder en mémoire entre les requêtes.
@@ -136,6 +156,7 @@ class MonitoringState:
         # Un secret manquant lève ici : refuser de démarrer vaut mieux que découvrir pendant
         # un incident qu'aucune alerte ne part.
         self.notifier = build_dispatcher(self.config.notifications, self.storage)
+        self.heartbeat = Heartbeat(self.config.heartbeat, self.readiness) if self.config.heartbeat.enabled else None
         self.loop = MonitoringLoop(self.source, self.storage, self.config, self.notifier)
         interval = self.config.monitoring.interval
         # Source « live » (SQL) : horloge réelle, un tick par intervalle. Rejeu CSV :
@@ -152,6 +173,30 @@ class MonitoringState:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        self.telemetry = Telemetry()
+        self._started_at = time.time()
+
+    def readiness(self) -> list[str]:
+        """Raisons pour lesquelles le service ne fait pas son travail (liste vide = sain). Distincte de `/health`,
+        qui dit seulement que le processus répond : une boucle arrêtée ou des données périmées ne se voient pas là."""
+        reasons: list[str] = []
+        if not self.storage.ping():
+            reasons.append("base de données inaccessible")
+        if not self.running:
+            return [*reasons, "boucle de surveillance arrêtée"]
+        limit = 3 * self.seconds_per_tick + _TICK_MARGIN_SECONDS
+        age = time.time() - (self.telemetry.last_tick_at or self._started_at)
+        if age > limit:
+            reasons.append(f"aucun pas de surveillance depuis {age:.0f} s (limite {limit:.0f} s)")
+        if self.telemetry.ticks:  # avant le premier pas, aucune mesure n'est encore attendue
+            stale_after = 3 * self.source.get_interval()
+            for output_id in self.source.list_outputs():
+                last = self.loop.last_sample_at.get(output_id)
+                if last is None:
+                    reasons.append(f"aucune mesure reçue pour {output_id}")
+                elif self.now - last > stale_after:
+                    reasons.append(f"données périmées pour {output_id} (dernière mesure : {last:%Y-%m-%d %H:%M} UTC)")
+        return reasons
 
     def calibrate(self) -> None:
         self.loop.calibrate(self.now)
@@ -161,6 +206,7 @@ class MonitoringState:
         with self._lock:
             if self.running:
                 return
+            self._started_at = time.time()
             if not self.calibrated:
                 self.calibrate()
             if not self._clock_started:
@@ -190,10 +236,15 @@ class MonitoringState:
             with self._lock:
                 self.now = _aligned_now(interval) if self.live else self.now + interval
                 now = self.now
+            began = time.monotonic()
             try:
                 self.loop.run_tick(now)
             except Exception:  # ne jamais laisser une erreur ponctuelle tuer la boucle
+                self.telemetry.errors += 1
                 logger.exception("Erreur pendant run_tick à %s", now)
+            self.telemetry.ticks += 1
+            self.telemetry.last_tick_seconds = time.monotonic() - began
+            self.telemetry.last_tick_at = time.time()
 
 
 def _aligned_now(interval: timedelta) -> datetime:
@@ -229,7 +280,11 @@ async def lifespan(app: FastAPI):
     state.start()
     if state.notifier:
         state.notifier.start()
+    if state.heartbeat:
+        state.heartbeat.start()
     yield
+    if state.heartbeat:  # d'abord : un arrêt voulu ne doit pas se signaler comme une panne
+        state.heartbeat.stop()
     state.stop()
     if state.notifier:
         state.notifier.stop()
@@ -365,6 +420,61 @@ class AlertOut(BaseModel):
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/health/ready")
+def health_ready() -> JSONResponse:
+    """200 si le service fait son travail, 503 avec les raisons sinon (boucle arrêtée ou bloquée, données
+    périmées, base inaccessible). `/health` reste la simple vivacité : c'est lui que sonde le HEALTHCHECK Docker,
+    car un arrêt volontaire de la surveillance ne doit pas faire redémarrer le conteneur."""
+    reasons = state.readiness()
+    return JSONResponse(status_code=503 if reasons else 200, content={"status": "unavailable" if reasons else "ok", "reasons": reasons})
+
+
+def _gauge(name: str, help_text: str, value: float) -> Family:
+    return (name, help_text, "gauge", [({}, value)])
+
+
+_ACTIVE_STATUSES = ("suspect", "open", "stale")
+_NOTIFICATION_STATUSES = ("pending", "sent", "failed")
+
+
+@app.get("/metrics")
+def metrics(authorization: Annotated[str | None, Header()] = None) -> Response:
+    """Métriques au format texte Prometheus. Ouvert comme les autres lectures, sauf si `NM_METRICS_TOKEN` est défini
+    (jeton porteur)."""
+    token = os.environ.get("NM_METRICS_TOKEN")
+    if token and not (authorization and hmac.compare_digest(authorization.encode(), f"Bearer {token}".encode())):
+        raise HTTPException(status_code=401, detail="Jeton de métriques invalide ou absent", headers={"WWW-Authenticate": "Bearer"})
+    t, outputs = state.telemetry, state.source.list_outputs()
+    db_ok = state.storage.ping()
+    families: list[Family] = [
+        _gauge("nm_up", "Le processus répond.", 1),
+        ("nm_build_info", "Version du logiciel.", "gauge", [({"version": app.version}, 1)]),
+        _gauge("nm_monitoring_running", "1 si la boucle de surveillance tourne.", state.running),
+        _gauge("nm_interval_seconds", "Intervalle entre deux mesures.", state.source.get_interval().total_seconds()),
+        _gauge("nm_simulated_clock_timestamp_seconds", "Horloge du serveur (simulée avec le Mock), en secondes epoch.", state.now.timestamp()),
+        ("nm_ticks_total", "Pas de surveillance exécutés.", "counter", [({}, t.ticks)]),
+        ("nm_tick_errors_total", "Pas de surveillance terminés par une erreur.", "counter", [({}, t.errors)]),
+        ("nm_output_calibrated", "1 si la sortie a un modèle calibré.", "gauge", [({"output": o}, state.loop.is_calibrated(o)) for o in outputs]),
+        ("nm_output_last_sample_timestamp_seconds", "Horodatage de la dernière mesure reçue, par sortie.", "gauge",
+         [({"output": o}, state.loop.last_sample_at[o].timestamp()) for o in outputs if o in state.loop.last_sample_at]),
+        _gauge("nm_database_ok", "1 si la base répond.", db_ok),
+    ]
+    if t.last_tick_at is not None and t.last_tick_seconds is not None:
+        families += [
+            _gauge("nm_last_tick_timestamp_seconds", "Heure réelle de la fin du dernier pas, en secondes epoch.", t.last_tick_at),
+            _gauge("nm_last_tick_duration_seconds", "Durée du dernier pas.", t.last_tick_seconds),
+        ]
+    if db_ok:
+        active = Counter((i.output_id, i.status.value) for i in state.storage.list_active_incidents())
+        families.append(("nm_active_incidents", "Incidents en cours, par sortie et statut.", "gauge",
+                         [({"output": o, "status": s}, active[(o, s)]) for o in outputs for s in _ACTIVE_STATUSES]))
+        sent = state.storage.count_notifications()
+        channels = [c.name for c in state.config.notifications.channels]
+        families.append(("nm_notifications", "Notifications par canal et statut (comptes en base).", "gauge",
+                         [({"channel": c, "status": s}, sent.get((c, s), 0)) for c in channels for s in _NOTIFICATION_STATUSES]))
+    return Response(render(families), media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 @app.get("/outputs", response_model=list[OutputSummary])
