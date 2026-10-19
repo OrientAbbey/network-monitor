@@ -380,3 +380,68 @@ def test_recalibration_ignores_maintenance_windows(tmp_path, monkeypatch):
         assert (everything.start, everything.end) in ranges["OUT_003"] and (window.start, window.end) not in ranges["OUT_003"]
     finally:
         repo.dispose()
+
+
+# -- re-balayage des seuils à partir des verdicts (analysis.evaluation --from-db) --------------------------------
+
+
+def _judged_run(tmp_path, monkeypatch, judge_blip=True):
+    """Vraie boucle sur le Mock : une longue chute sur OUT_001 (jugée vraie), une brève sur OUT_002 (jugée fausse)."""
+    repo, _, _ = _run(tmp_path, monkeypatch, [_drop("OUT_001", 6, 40), _drop("OUT_002", 6, 10)])
+    for inc in repo.list_incidents_between(NOW, NOW + 10 * H):
+        if inc.output_id == "OUT_001" or judge_blip:
+            verdict = IncidentVerdict.TRUE_POSITIVE if inc.output_id == "OUT_001" else IncidentVerdict.FALSE_POSITIVE
+            repo.set_feedback(inc.id, verdict, "alice", NOW + 9 * H)
+    return repo
+
+
+def test_replay_from_storage_reproduces_the_live_run_then_applies_other_thresholds(tmp_path, monkeypatch):
+    from network_monitor.analysis.evaluation import replay_from_storage
+
+    repo = _judged_run(tmp_path, monkeypatch)
+    try:
+        same = replay_from_storage(repo, NOW, NOW + 10 * H)  # mêmes réglages : le rejeu est exact
+        assert (same["true_positives"], same["true_positives_still_detected"]) == (1, 1)
+        assert (same["false_positives"], same["false_positives_still_opened"]) == (1, 1)
+        stricter = replay_from_storage(repo, NOW, NOW + 10 * H, {"minimum_duration": "40m"})
+        assert stricter["false_positives_still_opened"] == 0 and stricter["true_positives_still_detected"] == 1  # la coupure brève n'ouvre plus
+        assert stricter["recall_on_judged"] == 1.0
+        too_strict = replay_from_storage(repo, NOW, NOW + 10 * H, {"minimum_duration": "4h"})
+        assert too_strict["true_positives_still_detected"] == 0 and too_strict["recall_on_judged"] == 0.0  # le vrai incident est perdu : visible
+        looser = replay_from_storage(repo, NOW, NOW + 10 * H, {"minimum_duration": "5m"})
+        assert looser["unjudged_ignored"] > 0  # de nouveaux incidents que personne n'a jugés : comptés à part, pas dans la précision
+    finally:
+        repo.dispose()
+
+
+def test_replay_ignores_unjudged_incidents_and_reports_nothing_invented(tmp_path, monkeypatch):
+    from network_monitor.analysis.evaluation import replay_from_storage
+
+    repo = _judged_run(tmp_path, monkeypatch, judge_blip=False)
+    try:
+        result = replay_from_storage(repo, NOW, NOW + 10 * H)
+        assert result["unjudged_original"] == 1  # l'incident de OUT_002 n'a pas de verdict : ignoré
+        assert (result["false_positives"], result["false_positives_still_opened"]) == (0, 0)
+        assert result["unjudged_ignored"] == 1  # et rejoué, il ne recoupe aucun incident jugé
+        empty = replay_from_storage(repo, NOW + 20 * H, NOW + 30 * H)  # fenêtre sans aucun incident
+        assert empty["true_positives"] == 0 and empty["recall_on_judged"] is None  # pas de pourcentage sans donnée
+    finally:
+        repo.dispose()
+
+
+def test_evaluation_cli_sweeps_a_database_with_verdicts(tmp_path, monkeypatch):
+    import ast
+    import subprocess
+    import sys
+
+    repo = _judged_run(tmp_path, monkeypatch)
+    repo.dispose()
+    out = subprocess.run(
+        [sys.executable, "-m", "network_monitor.analysis.evaluation", "--from-db", f"sqlite:///{tmp_path / 'loop.db'}",
+         "--days", "1", "--end", (NOW + 10 * H).isoformat(), "--sweep"],
+        capture_output=True, text=True, check=True, cwd=".",
+    ).stdout.splitlines()
+    assert out[0] == "2 incident(s) jugé(s), 0 sans verdict (ignorés)"
+    rows = [ast.literal_eval(line) for line in out[1:]]
+    assert rows and rows[0]["false_positives_still_opened"] == 0 and rows[0]["true_positives_still_detected"] == 1  # le meilleur réglage est trié en tête
+    assert any(r["false_positives_still_opened"] == 1 for r in rows)  # et la grille contient aussi des réglages qui gardent le faux positif
