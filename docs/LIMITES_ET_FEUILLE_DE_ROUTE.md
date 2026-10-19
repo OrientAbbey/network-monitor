@@ -18,6 +18,10 @@ corrigé et mesuré). Rien n'y est caché derrière un « à peu près » : quan
 | Webhook | ✅ | Vrai serveur HTTP local : signature HMAC-SHA256 vérifiée, identifiant de livraison stable, nouvelle tentative après un 500. |
 | Telegram | 🧪 | Transport simulé. Format de requête vérifié dans la documentation de l'API, jamais envoyé à un vrai groupe. |
 | SMS (passerelle Android, API Orange) | 🧪 | Transports simulés. Formats vérifiés dans la documentation de chaque service, jamais envoyés à un vrai numéro. |
+| Maintenance, inhibition amont/aval, verdicts | 🧪 + ✅ | Vraie boucle de surveillance sur le Mock (incidents injectés) et vrai navigateur : aval rattaché à sa cause et retenu, verdict qui change précision et rapport, maintenance créée puis annulée. Jamais sur un vrai réseau. |
+| `/metrics`, règles d'alerte | ✅ | `promtool check metrics` et `check rules`/`test rules` ; vrai Prometheus 2.45 qui scrape avec jeton porteur. Les seuils des règles sont des exemples. |
+| Signal de vie | 🧪 | Vrai petit serveur HTTP local (succès, échec, 500, service injoignable, arrêt). **Jamais contre un vrai Healthchecks.io.** |
+| CI GitHub Actions | ❓ | Écrite et validée par `actionlint`, **jamais exécutée**. Commandes backend reproduites en local avec MariaDB et Prometheus réels. Le job Docker, le job Windows et `npx playwright install --with-deps` n'ont jamais tourné. |
 | Image Docker | ❓ | **Jamais construite** (pas de Docker dans l'environnement de développement). Étapes reproduites à la main : build du front en même origine, environnement vierge avec le seul `requirements.txt`, démarrage en production sous un utilisateur sans privilèges, verrou d'instance. Non vérifié : la construction, `HEALTHCHECK`, `read_only`, `cap_drop`. |
 | Réseau réel | ❓ | Aucune mesure d'un vrai réseau n'est entrée dans le système. Tous les réglages viennent du Mock. |
 
@@ -118,22 +122,34 @@ corrigé et mesuré). Rien n'y est caché derrière un « à peu près » : quan
 - **Textes en français uniquement**, non externalisés.
 - **Pas de mode clair**, pas de réglage de taille de texte au-delà du zoom du navigateur.
 
+### 2.8 Maintenance, cause amont, verdicts, supervision
+
+- Une fenêtre de maintenance créée **pendant** un incident déjà annoncé ne le retient pas : seules les alertes émises ensuite le sont.
+- La topologie est **statique et déclarée à la main** (`topology.parents`, un seul parent par sortie) : rien n'est déduit des données, et une cause commune à plusieurs équipements n'est pas modélisée.
+- Un verdict n'expire pas et il n'y en a qu'un par incident (le dernier gagne, sans historique). Seul un incident **confirmé** se juge ; un signal faible jamais confirmé n'entre pas dans la précision.
+- La précision mesurée n'est une précision que **sur les incidents jugés** : avec peu de verdicts, le pourcentage est fragile (la part jugée est affichée à côté). L'interface la calcule sur 30 jours fixes.
+- La maintenance se compare à l'horloge **du serveur** (jamais à celle du navigateur), ≤ 14 jours par fenêtre.
+- Le re-balayage `--from-db` rejoue exactement les **seuils** ; les **types** d'incident ne sont fiables que si les mesures brutes sont encore en base (purge au-delà de `history.preferred`). Seules les sorties ayant eu un incident confirmé dans la fenêtre sont rejouées : un réglage plus bas qui ouvrirait un incident sur une sortie restée silencieuse n'est pas vu. Maintenance et inhibition ne sont pas rejouées (elles ne changent pas l'ouverture, seulement l'envoi). `--end` est à donner pour une base à horloge simulée.
+- `/health/ready` dit que la boucle travaille, **pas que les alertes arrivent** (les canaux n'ont jamais été éprouvés, §2.3). `/metrics` est ouvert tant que `NM_METRICS_TOKEN` n'est pas défini.
+- Le signal de vie repose sur un service tiers et sur la joignabilité d'Internet depuis le serveur. Arrêter volontairement la surveillance l'envoie en échec (voulu). Le `HEALTHCHECK` Docker reste sur `/health` (liveness), pas sur `/health/ready`.
+- La règle « boucle bloquée » des règles d'exemple suppose une période de pas égale à l'intervalle des mesures (source live) ; en démonstration (un pas toutes les 2 s pour 5 min simulées), elle est très tolérante.
+- Le rapport de disponibilité du dashboard se rafraîchit toutes les 60 s : un verdict n'y apparaît pas instantanément (il apparaît tout de suite dans la ligne de précision).
+
 ## 3. Fonctionnalités proposées mais non réalisées
+
+**Réalisées depuis** (voir §1 et §2.8) : fenêtres de maintenance et inhibition amont/aval, retour « faux/vrai positif » et re-balayage des seuils, `/metrics` et signal de vie externe. Les numéros ci-dessous sont conservés.
 
 Chaque ligne : le besoin, d'où il vient, l'effort estimé (S ≈ 1 jour, M ≈ 2–4 jours, L > 4 jours) et comment savoir que c'est réussi.
 Les recherches datent du 1er octobre 2026 et **sont à refaire avant de s'y fier** (URLs non conservées).
 
 | # | Fonctionnalité | Besoin et source | Effort | Critère de réussite |
 |---|---|---|---|---|
-| 1 | **Fenêtres de maintenance** et **inhibition amont/aval** | Alertmanager, la référence de l'alerte en exploitation, repose sur le groupement, l'inhibition (couper les alertes aval quand l'amont est en panne) et les silences. Aujourd'hui, une panne amont ouvre autant d'incidents que de sorties touchées, et une maintenance planifiée déclenche des alertes et dégrade la disponibilité. Demande un champ `parent` par sortie et un calendrier. | M | Une panne simulée d'un lien amont ouvre 1 incident (pas 5) ; une sortie en maintenance n'alerte pas et son temps est exclu du rapport. |
 | 2 | **Planification de capacité** | Pratique d'opérateurs relevée en recherche : lancer la procédure d'augmentation à 50 % d'utilisation, l'achever à 70 % (95e centile d'échantillons de 5 min), en tenant compte du délai de réalisation. Demande la capacité de chaque lien (non disponible aujourd'hui) et les prévisions longues. | M | « Jours avant 70 % » par lien, avec un intervalle, validé sur un export réel. |
-| 3 | **Retour « faux/vrai positif »** | Les seuils actuels sont réglés sur le Mock. Un opérateur qui marque un incident faux positif donne la seule vérité terrain disponible en production et alimente le re-balayage (`analysis/evaluation.py` sait déjà rejouer). | S–M | Précision mesurée par mois ; re-balayage des seuils à partir des marques. |
-| 4 | **`/metrics` Prometheus** et **signal de vie externe** | Un moniteur qui s'arrête sans prévenir est le pire cas. Healthchecks.io propose un « interrupteur d'homme mort » gratuit (20 tâches, sans carte) : la boucle le ping à chaque tick, son silence déclenche une alerte. | S | Arrêter la boucle déclenche une alerte externe en moins de deux périodes. |
 | 5 | **Connecteur Zabbix** | Zabbix stocke son historique en base (`history_uint` : `itemid`, `clock`, `value`, `ns`), lisible en SQL. Non écrit : schéma connu par la documentation, jamais essayé ; il faut gérer compteurs → débit (remises à zéro, bouclage) ou valeurs déjà exprimées en débit selon le gabarit. | M | Contrat de source vérifié sur une vraie base Zabbix. |
 | 6 | **Rapports** : PDF, envoi programmé, exclusion des maintenances, indicateurs réglementaires | Le ministère camerounais a demandé des outils d'évaluation automatisés et le remboursement automatique du crédit data en cas de panne, ce qui exige des débuts et fins précis (déjà rétro-datés). Amende globale de 2,6 milliards FCFA en juillet 2025 (source de presse). **Indicateurs exacts de l'ART non trouvés.** | M | Rapport mensuel conforme à la liste exacte des indicateurs, obtenue auprès de l'ART. |
 | 7 | **Escalade et acquittement** | Une alerte sans réponse doit monter (puis appeler quelqu'un d'autre) ; un opérateur doit pouvoir dire « je m'en occupe ». Une enquête d'éditeur (à prendre avec prudence) indique que 57 % des équipes d'astreinte jugent moins de 30 % de leurs alertes exploitables : l'acquittement et le regroupement réduisent le bruit. | M | Un incident non acquitté en 15 min relance un second groupe. |
 | 8 | **Rôles** (lecture, opérateur, administrateur) et **SSO** | Aujourd'hui tout utilisateur connecté peut tout faire. | M–L | Un opérateur ne peut pas modifier les seuils ; connexion par l'annuaire de l'entreprise. |
-| 9 | **Corrélation entre sorties** (topologie) | Voir 1 ; plus largement, remonter à la cause (liens partageant un équipement ou une alimentation). Les coupures d'électricité et de fibre sont citées par le régulateur comme principaux facteurs de disponibilité. | L | Un scénario de panne d'alimentation multi-sorties produit un seul incident « cause commune ». |
+| 9 | **Corrélation entre sorties** (topologie) | L'inhibition amont/aval existe (topologie déclarée à la main) ; il reste, plus largement, remonter à la cause (liens partageant un équipement ou une alimentation). Les coupures d'électricité et de fibre sont citées par le régulateur comme principaux facteurs de disponibilité. | L | Un scénario de panne d'alimentation multi-sorties produit un seul incident « cause commune ». |
 | 10 | **WhatsApp** | Très utilisé dans la région, mais l'API entreprise n'est pas gratuite et n'a pas été évaluée. | ? | — |
 | 11 | **Endpoint « valeur la plus proche d'un instant »** | Supprime la plus grosse partie des requêtes du tableau comparatif (§2.7). | S | 24 requêtes → 1 par rafraîchissement. |
 | 12 | **Messages d'alerte configurables et multilingues** | Aujourd'hui fixes, en français. | S | Modèles de messages dans la configuration. |
@@ -183,13 +199,13 @@ webhook (déjà là).
 
 ### 4.2 Phase 6 : industrialisation (⛔ exclue à la demande du propriétaire, sauf Docker)
 
-- **CI** (GitHub Actions) : `pytest`, `ruff`, `mypy`, `npm run typecheck`, `npm test`, build, et `npm run e2e` avec `playwright install --with-deps chromium`.
-  Les minutes gratuites pour ce dépôt n'ont pas été vérifiées. À faire en premier : sans CI, rien ne garantit que les correctifs restent corrigés.
-- **Matrice Windows** : le propriétaire développe sous Windows ; le verrou d'instance a une branche `msvcrt` jamais exécutée (marquée `pragma: no cover`),
-  les tests de sous-processus et de verrou n'ont tourné que sous Linux. À valider avant de promettre le support de Windows.
+- **CI** (GitHub Actions) : **écrite** (`.github/workflows/ci.yml`, ❓ jamais exécutée) : backend + MariaDB, frontend, e2e, image Docker + test de fumée, `pip-audit`.
+  Les minutes gratuites pour ce dépôt n'ont pas été vérifiées. Le Prometheus réel est omis (node_exporter scruté toutes les 5 s, trop fragile sur un exécuteur partagé).
+- **Matrice Windows** : un job Windows **informatif** (`continue-on-error`) lance les tests ; le propriétaire développe sous Windows et le verrou d'instance a une branche `msvcrt`
+  jamais exécutée (`pragma: no cover`). À rendre bloquant seulement quand il passe et avant de promettre le support de Windows.
 - **Fichiers de projet** volontairement écartés pour ne pas multiplier les fichiers : `CONTRIBUTING.md`, `SECURITY.md`, `CHANGELOG.md`,
   `.editorconfig`, `pre-commit`, Dependabot. À reconsidérer quand il y aura d'autres contributeurs.
-- **Scan d'images et de dépendances** (Trivy, `pip-audit`) : non fait. `npm audit` ne signale rien aujourd'hui (0 vulnérabilité).
+- **Scan d'images et de dépendances** : `pip-audit` informatif en CI (jamais exécuté) ; Trivy non fait. `npm audit` ne signale rien aujourd'hui (0 vulnérabilité).
 
 ### 4.3 Autres reports
 
@@ -204,14 +220,14 @@ webhook (déjà là).
 | Étape | Critère de sortie |
 |---|---|
 | 1. Valider les alertes en vrai | Un message reçu sur chaque canal voulu, le jeton absent des journaux ; un SMS de groupe reçu par tous les numéros. |
-| 2. Construire l'image | `docker compose up` : `/health` répond, `HEALTHCHECK` passe, une seconde instance est refusée. |
-| 3. Ajouter la CI | Chaque modification fait tourner tests, lint, typage, build et e2e ; Windows en plus si le support est voulu. |
+| 2. Construire l'image | `docker compose up` : `/health` répond, `HEALTHCHECK` passe, une seconde instance est refusée (le job `docker` de la CI le vérifie, une fois exécuté). |
+| 3. Faire passer la CI au vert | Premier `push` : les six jobs s'exécutent ; corriger ce qu'ils révèlent (Windows et Docker n'ont jamais tourné). |
 | 4. Brancher une vraie source en lecture seule | Prometheus ou SQL réel ; requêtes PromQL validées lien par lien ; `source.type` ≠ `mock` (le bandeau disparaît). |
-| 5. Marche à blanc de 2 à 4 semaines | Aucune alerte envoyée au début ; incidents examinés à la main ; faux positifs comptés (point 3 du §3 aide). |
+| 5. Marche à blanc de 2 à 4 semaines | Aucune alerte envoyée au début ; incidents examinés à la main ; faux positifs comptés (les verdicts du dashboard y servent). |
 | 6. Re-balayer les seuils sur les données réelles | `--sweep` sur les captures réelles ; défauts de `IncidentConfig` mis à jour avec la nouvelle mesure. |
 | 7. Mettre en place la sauvegarde et les migrations | Restauration d'une sauvegarde testée ; première migration Alembic. |
 | 8. Déploiement (§4.1) | Piste A en ligne ; piste B sur une VM, avec signal de vie externe. |
-| 9. Fonctionnalités du §3, dans l'ordre 4, 1, 3, 7, 6 | Selon l'usage constaté pendant la marche à blanc. |
+| 9. Fonctionnalités du §3, dans l'ordre 7, 6 | Selon l'usage constaté pendant la marche à blanc. |
 
 ## 6. Dette technique et points d'attention du code
 

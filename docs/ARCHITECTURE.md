@@ -102,6 +102,21 @@ choisis par mesure (`REVUE.md`) : confirmation après 15 min au-dessus de `open_
 - **Type.** Instantané (chute, pic, pertes, congestion) puis requalifié par le motif de l'écart : alternance
   avec hystérésis → intermittent, montée corrélée → progressif. Figé pendant le retour à la normale.
 - **Preuves plafonnées** à 200 entrées (début et fin conservés).
+- **Maintenance planifiée** (`MaintenanceWindow`, `GET/POST/DELETE /maintenance`). Pendant une fenêtre, les incidents de la
+  sortie sont **enregistrés mais jamais notifiés** (`Alert.suppressed="maintenance"`) ; si l'incident dure après la fin (ou
+  l'annulation) de la fenêtre, une alerte « Incident persistant après la fin de la maintenance » part. Son temps est retiré
+  de l'indisponibilité **et** du temps dû dans le rapport de disponibilité, et la recalibration exclut ces plages. Les
+  horaires se comptent sur l'horloge **du serveur** (`starts_in_minutes`, `duration_minutes`) : le navigateur n'envoie jamais de date.
+- **Inhibition amont/aval** (`topology.parents`, déclarée à la main, sans cycle ; `correlation_window`, 15 min). Un incident
+  aval confirmé alors que l'amont est ouvert lui est rattaché (`root_cause_incident_id`, `inhibited`) et **retenu**
+  (`suppressed="inhibited"`) ; si l'aval s'ouvre le premier, l'amont l'annonce (`impacted_outputs`, « Explique aussi : … »
+  dans les notifications). L'aval est libéré si la cause est résolue et qu'il dure.
+- **Verdicts** : un opérateur marque un incident confirmé « vrai incident » ou « faux positif » (`PUT /incidents/{id}/feedback`).
+  Le verdict vit dans une **table à part** (`incident_feedback`) : le moteur réécrit la ligne de l'incident et l'écraserait.
+  `GET /reports/precision` donne précision = TP/(TP+FP) **sur les incidents jugés**, avec la part jugée ; le rapport de
+  disponibilité exclut les faux positifs par défaut (`false_positives_excluded` dit combien).
+  `python -m network_monitor.analysis.evaluation --from-db URL --days 30 --end ISO [--sweep]` rejoue les anomalies
+  enregistrées avec d'autres seuils et compte, parmi les incidents jugés, les vrais encore détectés et les faux encore ouverts.
 
 ## 5. Temps, calibration, recalibration
 
@@ -130,15 +145,16 @@ Un thread relit les envois dus toutes les 2 s :
 - **Canaux** : Telegram (groupe), webhook (JSON signé HMAC-SHA256, identifiant de livraison stable pour dédupliquer),
   SMS (passerelle Android en un appel pour tout le groupe, ou API Orange un appel par numéro, jeton OAuth mis en cache).
   Un SMS tient en un segment de 160 caractères sans accents.
+- **Alertes retenues** (maintenance, cause amont) : enregistrées et consultables (`GET /alerts?all=true`), jamais mises en file d'envoi.
 - **Garantie** : au moins une fois. **Un secret absent refuse le démarrage** (mieux vaut échouer au lancement que
   découvrir pendant un incident qu'aucune alerte ne part). Un jeton ne figure jamais dans les erreurs enregistrées.
 
 ## 7. API
 
-Lecture, sans connexion : `GET /health`, `/outputs`, `/outputs/{id}/history|anomalies|forecast|forecast/ahead`,
-`/incidents`, `/incidents/{id}`, `/alerts` (par défaut sans les signaux faibles ; `all=true` pour l'audit), `/reports/availability` (JSON ou CSV), `/monitoring/status`, `/config`.
+Lecture, sans connexion : `GET /health`, `/health/ready`, `/metrics`, `/outputs`, `/outputs/{id}/history|anomalies|forecast|forecast/ahead`,
+`/incidents`, `/incidents/{id}`, `/alerts` (par défaut sans les signaux faibles ; `all=true` pour l'audit), `/maintenance`, `/reports/availability` (JSON ou CSV), `/reports/precision`, `/monitoring/status`, `/config`.
 Avec connexion (`Authorization: Bearer`, session obtenue par `POST /auth/login` ou jeton machine `NM_API_TOKEN`) :
-`PUT /config`, `POST /monitoring/start|stop`, `GET /notifications`, `POST /notifications/test/{canal}`.
+`PUT /config`, `POST /monitoring/start|stop`, `POST /maintenance`, `DELETE /maintenance/{id}`, `PUT /incidents/{id}/feedback`, `GET /notifications`, `POST /notifications/test/{canal}`.
 
 Garde-fous : datetimes sans fuseau refusés (422), fenêtres limitées à 31 jours (rapports : 366), erreurs de
 validation de `PUT /config` structurées (champ et message, sans la valeur saisie ni l'URL de documentation), `/docs` et `/openapi.json` masqués hors `NM_ENV=development`, CORS limité à
@@ -164,7 +180,7 @@ mesures purgées vont dans `archive_dir/<sortie encodée>/<jour>.parquet`.
 | `api.ts`, `types.ts` | Client HTTP typé ; `VITE_API_BASE_URL` (chaîne vide = même origine, cas de l'image Docker) ; session en mémoire (jamais dans le stockage du navigateur) |
 | `chart.ts` | Fonctions pures : décimation min/max (les pics ne sont jamais lissés), point le plus proche, pointeur → temps, fusion incrémentale |
 | `polling.ts` | `usePolling` : appelle tout de suite puis à chaque période, **sauf onglet masqué** |
-| `Dashboard.tsx` | Interface « Signal Room » : sorties, graphe détaillé (souris et clavier), tableau comparatif, rapport de disponibilité, alertes, incidents, configuration et connexion |
+| `Dashboard.tsx` | Interface « Signal Room » : sorties, graphe détaillé (souris et clavier), tableau comparatif, rapport de disponibilité (maintenance et faux positifs exclus), alertes (retenues marquées), incidents (cause amont, verdicts, précision mesurée sur 30 j), maintenance planifiée, configuration et connexion |
 
 Cadence : sorties/incidents/état toutes les 4 s, graphe déplié toutes les 5 s (incrémental : seulement les
 points postérieurs au dernier connu, invalidation des réponses en vol quand la fenêtre change), tableau comparatif
@@ -205,3 +221,25 @@ d'autant. Le message explicite du graphe (« pas encore assez d'historique ») e
   Chaque test échoue si on remet le défaut qu'il garde (vérifié pour la marge d'axe et le libellé « maintenant »).
 - Mesures et protocoles : `../REVUE.md` (balayage des seuils sur 96 scénarios, trafic du dashboard, mémoire à
   30 et 90 sorties, lecture de 1 M de lignes). Elles viennent du Mock : à refaire sur des données réelles.
+
+## 13. Supervision et intégration continue
+
+- **Deux sondes distinctes.** `GET /health` : le processus répond (c'est lui que sonde le `HEALTHCHECK` Docker : un arrêt
+  *voulu* de la surveillance ne doit pas faire redémarrer le conteneur). `GET /health/ready` : 200, ou **503 avec les raisons**
+  — boucle arrêtée, aucun pas depuis 3 périodes + 10 s, données périmées d'une sortie (dernière mesure à plus de
+  3 intervalles de l'horloge du serveur), base inaccessible.
+- **`GET /metrics`** (texte Prometheus écrit à la main, étiquettes échappées ; jeton porteur optionnel `NM_METRICS_TOKEN`) :
+  `nm_up`, `nm_build_info`, `nm_monitoring_running`, `nm_interval_seconds`, `nm_ticks_total`, `nm_tick_errors_total`,
+  `nm_last_tick_timestamp_seconds`, `nm_last_tick_duration_seconds`, `nm_simulated_clock_timestamp_seconds`, `nm_database_ok`,
+  et par sortie `nm_output_calibrated`, `nm_output_last_sample_timestamp_seconds`, `nm_active_incidents{output,status}`,
+  `nm_notifications{channel,status}` (comptes en base, zéros explicites). `docs/prometheus-alerts.example.yml` : quatre règles d'exemple.
+- **Signal de vie externe** (`heartbeat`, URL dans `NM_HEARTBEAT_URL`) : un thread appelle l'URL tant que `/health/ready` est
+  sain, sinon `url + /fail` avec les raisons en corps. Si le processus meurt, **l'absence d'appel déclenche l'alerte chez le
+  service tiers** : c'est le seul cas qu'aucune autosurveillance interne ne peut couvrir. Arrêter volontairement la surveillance
+  l'envoie aussi en échec (voulu). Un arrêt propre du service coupe le signal *avant* la boucle : pas de fausse panne.
+- **Secrets et journaux.** L'URL du signal de vie (comme le jeton Telegram, présent dans l'URL de l'API) est un secret :
+  `httpx` journalise chaque requête à INFO avec son URL complète, donc son logger est relevé à WARNING (`app/notify.py`).
+- **CI** (`.github/workflows/ci.yml`) : `backend` (ruff épinglé, mypy, pytest avec un service MariaDB 10.11), `windows`
+  (informatif), `frontend` (typage, Vitest, build, `npm audit`), `e2e` (Playwright), `docker` (construction + test de fumée :
+  `/health`, interface en HTML, `/docs` en 404, seconde instance refusée), `audit` (`pip-audit`, informatif). Le Prometheus
+  réel est volontairement omis (ses tests exigent un node_exporter scruté toutes les 5 s).

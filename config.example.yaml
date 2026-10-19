@@ -69,3 +69,11 @@ incident:
 alerts:
   enabled: true
   critical_score: 0.80
+topology:               # inhibition amont/aval : la clé dépend de la valeur (aval -> amont), sans cycle
+  parents: {}           # ex. {LINK_DOUALA_BAFOUSSAM: LINK_DOUALA_YAOUNDE}
+  correlation_window: 15m
+heartbeat:              # signal de vie externe (ex. Healthchecks.io) ; l'URL est dans NM_HEARTBEAT_URL
+  enabled: false
+  period: 60s
+  timeout: 10s
+  fail_suffix: /fail    # ajouté à l'URL pour signaler un défaut, avec les raisons en corps

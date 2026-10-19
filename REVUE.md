@@ -51,7 +51,7 @@ protocole détaillé dans « Mesures »). Évaluation : `python -m network_monit
 | Pas d'image de déploiement | `Dockerfile` (front + API, utilisateur non privilégié, 1 worker), `docker-compose.yml`, `requirements.txt` d'exécution séparé de `requirements-dev.txt` | **image non construite ici (pas de Docker)** : étapes reproduites à la main, voir « Mesures » |
 
 
-| Interface jamais vue dans un vrai navigateur | Playwright + Chromium contre le vrai backend (incident injecté) : 12 scénarios, dont infobulle à la souris, gzip/304/incrémental, onglet masqué, connexion, CSV téléchargé | `npm run e2e` ; les tests échouent quand on remet les défauts qu'ils gardent (vérifié) |
+| Interface jamais vue dans un vrai navigateur | Playwright + Chromium contre le vrai backend (incident injecté) : 16 scénarios, dont infobulle à la souris, gzip/304/incrémental, onglet masqué, connexion, CSV téléchargé | `npm run e2e` ; les tests échouent quand on remet les défauts qu'ils gardent (vérifié) |
 | Libellés d'axe tronqués (« .22 Gbps »), « maintenant » sur un libellé | marge gauche 50 → 68, libellé à gauche du trait | tests e2e de géométrie réelle |
 | axe-core : bouton imbriqué dans un « bouton » (sérieux), contrastes 4,07:1 et 2,27:1 (sérieux) | un seul contrôle clavier par en-tête, `textDim`/`textFaint` éclaircis (≥ 4,5:1) | audit axe WCAG A/AA : aucune violation sérieuse ou critique |
 | Polices chargées depuis Google | `@fontsource`, sous-ensemble latin, auto-hébergées (le dashboard garde son apparence sans Internet) | e2e : aucune requête hors origine |
@@ -59,6 +59,11 @@ protocole détaillé dans « Mesures »). Évaluation : `python -m network_monit
 | Panneau d'alertes noyé de signaux faibles | `GET /alerts` ne rend que les alertes notables (`all=true` pour l'audit) | test API + e2e |
 | Données Mock prises pour un vrai réseau | bandeau « Données simulées » + avertissement au démarrage hors développement | test unitaire, e2e |
 | `PUT /config` renvoyait le texte brut de l'exception | erreurs structurées sans valeur saisie ni URL | `tests/test_api.py` |
+| Une maintenance planifiée ou une panne aval alertait et dégradait la disponibilité | fenêtres de maintenance, inhibition amont/aval, alertes **retenues** (enregistrées, jamais notifiées) | `tests/test_maintenance_topology.py` (boucle réelle sur le Mock), e2e (aval rattaché à sa cause) |
+| Aucune vérité terrain en exploitation | verdict vrai/faux positif, précision mesurée sur les incidents jugés, re-balayage `--from-db` | `tests/test_feedback_maintenance.py`, e2e (le verdict change précision et rapport, puis se retire) |
+| Un moniteur qui s'arrête sans prévenir | `/metrics`, `/health/ready` (503 avec raisons), signal de vie externe, règles d'alerte d'exemple | `tests/test_observability.py` (serveur HTTP local), `promtool`, vrai Prometheus |
+| **URL secrètes écrites dans le journal** : `httpx` journalise l'URL complète à INFO (jeton Telegram, signal de vie) | logger `httpx` relevé à WARNING | `tests/test_observability.py` — **échouait avant le correctif** |
+| Aucune intégration continue | `.github/workflows/ci.yml` | ❓ jamais exécutée ; `actionlint` propre ; mêmes commandes reproduites en local |
 
 ## Mesures (Mock ; à refaire sur données réelles)
 
@@ -106,6 +111,18 @@ Lecture d'un export de 1 036 800 lignes (90 sorties × 40 jours), processus isol
 | Parquet (zstd, 6,3 Mo contre 52 Mo de CSV) | 0,2 s | 0,27 s | 157 Mo |
 
 Rétro-datage (8 jeux, 87 scénarios détectés) : écart moyen du début rétro-daté au début réel 5,5 min ; erreur moyenne de durée 11,8 min (ouverture → fermeture) → 5,0 min (début → fin rétro-datés). Biais signé de la fin : +3 à +7 min selon le type.
+
+### Mesures du lot « maintenance, verdicts, supervision »
+
+Suite backend contre de **vrais services** (MariaDB 10.11.14, Prometheus 2.45.3 avec node_exporter) : **245 passés, 0 ignoré** (222 passés + 6 ignorés avant ce lot, + 17 nouveaux). Frontend : 49 tests Vitest (+13), 16 scénarios Playwright (12 + 4 ; dont l'audit axe sur les nouveaux panneaux avec une vraie fenêtre de maintenance).
+
+| Vérification | Résultat |
+|---|---|
+| `promtool check metrics` sur la sortie réelle de `/metrics` ; parseur officiel `prometheus_client` | accepté ; 13 familles lues |
+| Vrai Prometheus qui scrape `/metrics` avec jeton porteur | `up = 1` ; `nm_ticks_total` 7 → 10 en 6 s (un pas / 2 s) ; 3 sorties calibrées ; mauvais jeton : cible `down`, HTTP 401 |
+| `promtool check rules` / `promtool test rules` (5 cas) | 4 règles acceptées, tests passés ; **un bug trouvé** : avec `A and B`, `{{ $value }}` valait la valeur de A (`nm_monitoring_running` = 1 → « il y a 1 s ») ; opérandes inversés |
+| Re-balayage `--from-db` (Mock, 1 incident long jugé vrai, 1 coupure de 20 min jugée fausse) | sur 162 réglages de la grille, 54 éliminent le faux positif en gardant le vrai, 108 le gardent ; sans réglage, le rejeu reproduit l'état d'origine |
+| Tests de mutation | topologie retirée du serveur e2e → tests d'inhibition en échec ; faux positifs exclus non affichés → test de verdict en échec ; rapprochement temporel du rejeu cassé → 2 tests en échec ; tolérance de péremption × 100 → test de santé en échec |
 
 Image : sans Docker dans cet environnement, j'ai reproduit les étapes du `Dockerfile` à la main : build du front avec `VITE_API_BASE_URL=""` (le bundle ne contient plus l'adresse par défaut : même origine), environnement vierge avec le seul `requirements.txt` (aucun outil de dev, fuseau `Africa/Douala` disponible), démarrage en production sous un utilisateur sans privilèges. Constaté : `/` sert l'interface, le JS passe de 253 à 78 Ko en gzip, `/docs` et `/openapi.json` répondent 404, `PUT /config` répond 401 sans session et 200 avec, une seconde instance sur la même base est refusée avec un message explicite. Non vérifié : la construction de l'image elle-même, `HEALTHCHECK`, `read_only` et `cap_drop` du compose.
 

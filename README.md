@@ -16,7 +16,7 @@ Limites connues (liste complète, avec ce qui est vérifié ou non : `docs/LIMIT
 - Alertes : Telegram (groupe), webhook signé et SMS de groupe sont testés contre des serveurs **simulés**, jamais contre les vrais services. Premier essai réel : `POST /notifications/test/{canal}`.
 - Authentification : identifiant et mot de passe (`NM_USERS`, scrypt), session signée à durée limitée, limitation des essais. Ni annuaire, ni rôles : tout utilisateur connecté peut tout modifier.
 - Seuils d'incident réglés par mesure sur le Mock seulement (96 scénarios) : 0,04 faux incident par sortie et par jour, 87 scénarios détectés sur 96 (les 9 manqués sont des intermittents épars). Voir `REVUE.md`.
-- L'image Docker n'a pas pu être construite dans l'environnement de développement (pas de Docker) : ses étapes ont été reproduites à la main, voir `REVUE.md`.
+- L'image Docker n'a pas pu être construite dans l'environnement de développement (pas de Docker) : ses étapes ont été reproduites à la main, voir `REVUE.md`. La CI (`.github/workflows/ci.yml`) la construit et la teste, mais **elle n'a pas encore tourné** : le premier `push` dira ce qu'elle vaut.
 - Le schéma SQLite est créé au démarrage sans migration : après une évolution du modèle de données, supprimer `network_monitor.db` (rien à conserver à ce stade).
 
 ## Structure
@@ -142,6 +142,32 @@ notifications:
 
 `GET /reports/availability?days=30` (ou `start`/`end`), `&format=csv`, `&output_id=…`, et le panneau « Disponibilité » du dashboard. Par sortie : indisponibilité (incidents critiques, union des intervalles), dégradation, couverture des mesures, MTTD, MTTR — calculés sur les dates **rétro-datées** de l'incident (`started_at` : premier signal faible, `ended_at` : premier pas de retour à la normale), pas sur les dates de confirmation et de fermeture. La disponibilité est rapportée sur le temps écoulé ; une couverture basse la rend moins fiable.
 
+## Maintenance, cause amont, verdicts
+
+- **Maintenance** : `POST /maintenance` (connecté ; `output_id` ou toutes les sorties, `starts_in_minutes` + `duration_minutes` sur l'horloge **du serveur**, ≤ 14 jours), `DELETE /maintenance/{id}`. Pendant la fenêtre, les incidents sont enregistrés mais **n'alertent pas** ; son temps est exclu de la disponibilité.
+- **Cause amont** : déclarer la dépendance à la main ; une panne aval est rattachée à la panne amont et ne notifie pas.
+
+  ```yaml
+  topology:
+    parents: {LINK_DOUALA_BAFOUSSAM: LINK_DOUALA_YAOUNDE}   # aval -> amont
+  ```
+- **Verdicts** : sur chaque incident confirmé, « Faux positif » ou « Vrai incident » (`PUT /incidents/{id}/feedback`, connecté). `GET /reports/precision` (et la ligne « Précision mesurée sur 30 j » du dashboard) n'est une précision que **sur les incidents jugés** ; sans verdict, elle affiche « — ». Les faux positifs sortent du rapport de disponibilité.
+- **Re-balayage des seuils** sur ces verdicts : `python -m network_monitor.analysis.evaluation --from-db sqlite:///network_monitor.db --days 30 --sweep` (`--end` pour une base à horloge simulée).
+
+## Supervision
+
+- `GET /health` : le processus répond. `GET /health/ready` : 200, ou 503 avec les raisons (boucle arrêtée ou bloquée, données périmées, base inaccessible).
+- `GET /metrics` : format texte Prometheus ; si `NM_METRICS_TOKEN` est défini, jeton porteur exigé. Règles d'alerte d'exemple : `docs/prometheus-alerts.example.yml`.
+- **Signal de vie externe** (interrupteur d'homme mort, ex. [Healthchecks.io](https://healthchecks.io) : si les appels cessent, c'est le service qui alerte, même si le processus est mort) :
+
+  ```yaml
+  heartbeat: {enabled: true, period: 60s}     # l'URL de ping est dans NM_HEARTBEAT_URL (jamais dans ce fichier)
+  ```
+
+## Intégration continue
+
+`.github/workflows/ci.yml` : backend (ruff, mypy, pytest + MariaDB), frontend (typage, Vitest, build, `npm audit`), e2e Playwright, image Docker + test de fumée, Windows et `pip-audit` à titre informatif. Mêmes commandes en local : voir `docs/ARCHITECTURE.md` §12 et §13.
+
 ## Ce que fait le dashboard
 
 Reprend l'identité visuelle "Signal Room" (console façon oscilloscope/radar)
@@ -157,7 +183,8 @@ des maquettes précédentes, mais entièrement branché sur l'API réelle :
   envoyés à l'API via `PUT /config` et s'appliquent réellement à la
   détection en cours — pas un réglage cosmétique local.
 - **Liste des incidents**, actifs et récents, lue directement depuis
-  `GET /incidents`.
+  `GET /incidents` : cause amont, pendant une maintenance, verdict, boutons « Faux positif » / « Vrai incident » (connecté) et précision mesurée.
+- **Maintenance planifiée** : liste des fenêtres, planification et annulation (connecté).
 
 ## Point d'attention important : le temps réel du Mock
 
