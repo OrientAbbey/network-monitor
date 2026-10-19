@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Un nouveau push annule l'exécution précédente de la même branche.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (ruff, mypy, pytest + MariaDB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: rootpass
+          MARIADB_DATABASE: nmtest
+          MARIADB_USER: nm
+          MARIADB_PASSWORD: nmpass
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      # Active les tests « contre un vrai MariaDB » (ignorés sinon). Le Prometheus réel est volontairement omis :
+      # ses tests exigent un node_exporter scruté toutes les 5 s, trop fragile sur un exécuteur partagé.
+      NM_TEST_MARIADB_URL: mysql+pymysql://nm:nmpass@127.0.0.1:3306/nmtest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt # ruff y est épinglé : ses règles par défaut changent d'une version à l'autre
+      - run: ruff check network_monitor
+      - run: mypy network_monitor --ignore-missing-imports
+      - run: python -m pytest network_monitor/tests -q -p no:cacheprovider -W ignore
+        env:
+          PYTHONPATH: .
+
+  windows:
+    # Informatif au départ : la branche `msvcrt` du verrou d'instance (app/lock.py) n'a jamais été exécutée.
+    name: Backend sous Windows (informatif)
+    runs-on: windows-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest network_monitor/tests -q -p no:cacheprovider -W ignore
+        env:
+          PYTHONPATH: .
+
+  frontend:
+    name: Frontend (typage, Vitest, build, audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high
+
+  e2e:
+    name: Tests de navigateur (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: pip install -r requirements.txt
+      - run: npm ci
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - run: npm run e2e
+        working-directory: frontend
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-test-results
+          path: frontend/test-results
+          if-no-files-found: ignore
+
+  docker:
+    name: Image Docker + test de fumée
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -t network-monitor:ci .
+      - name: Test de fumée
+        run: |
+          docker volume create nm-data
+          docker run -d --name nm -p 8000:8000 -v nm-data:/data network-monitor:ci
+          # La calibration se fait avant que le serveur n'écoute : on attend jusqu'à 3 minutes.
+          for _ in $(seq 1 90); do curl -sf http://127.0.0.1:8000/health && break; sleep 2; done
+          curl -sf http://127.0.0.1:8000/health
+          curl -sf http://127.0.0.1:8000/ | grep -qi "<!doctype html"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/docs)" = 404
+          # Une seconde instance sur le même volume doit être refusée (une seule boucle de surveillance par base).
+          if out=$(timeout 120 docker run --rm -v nm-data:/data network-monitor:ci 2>&1); then
+            echo "la seconde instance aurait dû être refusée"; exit 1
+          fi
+          echo "$out" | grep -q "Une autre instance"
+      - if: failure()
+        run: docker logs nm || true
+
+  audit:
+    name: Audit des dépendances Python (informatif)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit && pip-audit -r requirements.txt
