@@ -26,6 +26,8 @@ notifications:
   timezone: Africa/Douala        # fuseau des heures dans les messages
   batch_window: 20s              # les alertes rapprochées partent dans un seul message
   max_attempts: 6
+  escalate_after: null           # ex. 15m : un incident confirmé, non pris en charge (PUT /incidents/{id}/ack) depuis ce délai,
+                                 # émet UNE alerte « escalated », reçue par les canaux dont `events` la contient (second groupe)
   channels: []
   # Les secrets sont dans l'environnement (.env), jamais ici : chaque canal nomme sa variable.
   # channels:
@@ -34,6 +36,7 @@ notifications:
   #      recipients: ["+237690000001", "+237690000002"], min_severity: critical,
   #      events: [opened, closed], max_messages_per_hour: 20}
   #   - {name: ticketing, type: webhook}                                                # POST JSON signé
+  #   - {name: astreinte, type: telegram, chat_id: "-1009876543210", events: [escalated]}  # second groupe : n'est prévenu qu'en cas d'escalade
 monitoring:
   interval: 5m
 history:

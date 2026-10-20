@@ -574,6 +574,7 @@ const VERDICT_LABEL: Record<Verdict, string> = { true_positive: "vrai incident",
 function IncidentsPanel({ incidents }: { incidents: Incident[] }) {
   const [precision, setPrecision] = useState<PrecisionReport | null>(null);
   const [verdicts, setVerdicts] = useState<Record<string, Verdict | null>>({}); // jugements posés ici, avant le prochain rafraîchissement
+  const [owners, setOwners] = useState<Record<string, string | null>>({}); // prises en charge posées ici (nom, ou null si retirée)
   const [error, setError] = useState<string | null>(null);
   const refreshPrecision = useCallback(async () => {
     try {
@@ -596,6 +597,17 @@ function IncidentsPanel({ incidents }: { incidents: Incident[] }) {
     }
   };
 
+  const takeCharge = async (inc: Incident, release: boolean) => {
+    if (!hasApiToken()) return setError(NOT_LOGGED_IN);
+    setError(null);
+    try {
+      const { acknowledged_by: by } = await (release ? api.release(inc.id) : api.acknowledge(inc.id));
+      setOwners((prev) => ({ ...prev, [inc.id]: by }));
+    } catch (err) {
+      setError(actionError(err));
+    }
+  };
+
   const outputOf = (id: string) => incidents.find((i) => i.id === id)?.output_id;
   return (
     <section className="nm-panel" aria-labelledby="h-incidents">
@@ -612,6 +624,8 @@ function IncidentsPanel({ incidents }: { incidents: Incident[] }) {
         {incidents.map((inc) => {
           const verdict = inc.id in verdicts ? verdicts[inc.id] : inc.verdict;
           const cause = inc.root_cause_incident_id;
+          const owner = inc.id in owners ? owners[inc.id] : inc.acknowledged_by;
+          const live = inc.opened_at !== null && (inc.status === "open" || inc.status === "stale"); // seuls ceux-là se prennent en charge
           return (
             <div className="nm-log-row" id={`incident-${inc.id}`} key={inc.id}>
               <span className="nm-log-time mono">{formatClock(new Date(inc.last_seen_at))}</span>
@@ -623,6 +637,16 @@ function IncidentsPanel({ incidents }: { incidents: Incident[] }) {
                   ? <a className="nm-tag" href={`#incident-${cause}`}>cause : {outputOf(cause)}</a>
                   : <span className="nm-tag">cause : un incident amont</span>)}
                 {verdict && <span className="nm-tag">{VERDICT_LABEL[verdict]}</span>}
+                {inc.escalated_at && <span className="nm-tag">escaladé</span>}
+                {owner && <span className="nm-tag">pris en charge par {owner}</span>}
+                {live && (
+                  <span className="nm-verdicts">
+                    <button type="button" className="range-btn" onClick={() => void takeCharge(inc, Boolean(owner))}
+                      aria-label={owner ? `Retirer la prise en charge de l'incident de ${inc.output_id}` : `Prendre en charge l'incident de ${inc.output_id}`}>
+                      {owner ? "Retirer la prise en charge" : "Prendre en charge"}
+                    </button>
+                  </span>
+                )}
                 {inc.opened_at && (
                   <span className="nm-verdicts">
                     {(["false_positive", "true_positive"] as Verdict[]).map((v) => (

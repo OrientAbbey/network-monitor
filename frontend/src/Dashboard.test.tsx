@@ -32,6 +32,8 @@ vi.mock("./api", () => {
         days: 30, confirmed: 0, true_positives: 0, false_positives: 0, unjudged: 0, precision_percent: null, judged_share_percent: null, by_output: {}, by_type: {},
       })),
       setFeedback: vi.fn(),
+      acknowledge: vi.fn(),
+      release: vi.fn(),
       maintenance: vi.fn(async () => []),
       createMaintenance: vi.fn(async () => ({})),
       cancelMaintenance: vi.fn(async () => ({})),
@@ -241,7 +243,7 @@ const NOW = new Date(Date.UTC(2026, 8, 1, 12)).toISOString();
 const incident = (over: Partial<Incident> = {}): Incident => ({
   id: "inc-1", output_id: "OUT_001", status: "open", severity: "critical", incident_type: "traffic_drop", last_seen_at: NOW, opened_at: NOW,
   started_at: NOW, ended_at: null, score: 0.9, description: "", verdict: null, verdict_by: null, verdict_at: null, verdict_note: null,
-  maintenance: false, root_cause_incident_id: null, inhibited: false, ...over,
+  acknowledged_by: null, acknowledged_at: null, escalated_at: null, maintenance: false, root_cause_incident_id: null, inhibited: false, ...over,
 });
 const precision = (over: Partial<PrecisionReport> = {}): PrecisionReport => ({
   days: 30, confirmed: 0, true_positives: 0, false_positives: 0, unjudged: 0, precision_percent: null, judged_share_percent: null, by_output: {}, by_type: {}, ...over,
@@ -456,5 +458,68 @@ describe("Comparatif temporel", () => {
     render(<Dashboard />);
     const row = await (await comparison()).findByRole("row", { name: /OUT_001/ });
     expect(within(row).getAllByRole("cell").slice(1).every((c) => c.textContent === "—")).toBe(true);
+  });
+});
+
+describe("Prise en charge et escalade", () => {
+  const take = (panel: ReturnType<typeof within>, output = "OUT_001") => panel.findByRole("button", { name: `Prendre en charge l'incident de ${output}` });
+
+  it("ne propose la prise en charge que pour un incident confirmé et en cours", async () => {
+    vi.mocked(api.incidents).mockResolvedValueOnce([
+      incident({ id: "live", output_id: "OUT_001" }),
+      incident({ id: "done", output_id: "OUT_002", status: "closed" }),
+      incident({ id: "weak", output_id: "OUT_003", status: "suspect", opened_at: null }),
+    ]);
+    render(<Dashboard />);
+    const panel = within(await incidentsPanel());
+    await take(panel);
+    expect(panel.getAllByRole("button", { name: /Prendre en charge/ })).toHaveLength(1); // ni le résolu, ni le signal faible
+  });
+
+  it("prend en charge puis retire la prise en charge (connecté), avec le nom renvoyé par le serveur", async () => {
+    vi.mocked(hasApiToken).mockReturnValue(true);
+    vi.mocked(api.incidents).mockResolvedValueOnce([incident()]);
+    vi.mocked(api.acknowledge).mockResolvedValueOnce(incident({ acknowledged_by: "alice", acknowledged_at: NOW }));
+    vi.mocked(api.release).mockResolvedValueOnce(incident());
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    const panel = within(await incidentsPanel());
+    await user.click(await take(panel));
+    expect(api.acknowledge).toHaveBeenCalledWith("inc-1");
+    await panel.findByText("pris en charge par alice");
+    await user.click(await panel.findByRole("button", { name: "Retirer la prise en charge de l'incident de OUT_001" }));
+    expect(api.release).toHaveBeenCalledWith("inc-1");
+    await waitFor(() => expect(panel.queryByText(/pris en charge par/)).toBeNull());
+    expect(await take(panel)).toBeTruthy(); // le bouton est revenu
+  });
+
+  it("affiche ce que le serveur sait déjà : responsable et escalade", async () => {
+    vi.mocked(api.incidents).mockResolvedValueOnce([incident({ acknowledged_by: "bob", acknowledged_at: NOW, escalated_at: NOW })]);
+    render(<Dashboard />);
+    const panel = within(await incidentsPanel());
+    await panel.findByText("pris en charge par bob");
+    expect(panel.getByText("escaladé")).toBeTruthy();
+  });
+
+  it("invite à se connecter, sans appeler l'API, quand il n'y a pas de session", async () => {
+    vi.mocked(api.incidents).mockResolvedValueOnce([incident()]);
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    const panel = within(await incidentsPanel());
+    await user.click(await take(panel));
+    expect((await panel.findByRole("alert")).textContent).toMatch(/Connectez-vous/);
+    expect(api.acknowledge).not.toHaveBeenCalled();
+  });
+
+  it("montre le refus du serveur (409 : l'incident s'est résolu entre-temps) sans le masquer", async () => {
+    vi.mocked(hasApiToken).mockReturnValue(true);
+    vi.mocked(api.incidents).mockResolvedValueOnce([incident()]);
+    vi.mocked(api.acknowledge).mockRejectedValueOnce(new Error("PUT /incidents/inc-1/ack -> 409 Seul un incident confirmé et en cours peut être pris en charge"));
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    const panel = within(await incidentsPanel());
+    await user.click(await take(panel));
+    expect((await panel.findByRole("alert")).textContent).toMatch(/Rejeté par l'API.*en cours/);
+    expect(panel.queryByText(/pris en charge par/)).toBeNull();
   });
 });

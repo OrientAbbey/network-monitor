@@ -106,7 +106,7 @@ def _label(alert: dict[str, Any]) -> str:
 
 def _line(alert: dict[str, Any], tz: ZoneInfo) -> str:
     icon = "🟢" if alert["event"] == "closed" else _SEVERITY_ICON.get(alert["severity"], "")
-    verb = {"opened": "ouvert", "updated": "mis à jour", "reopened": "rouvert", "closed": "résolu", "stale": "données manquantes"}
+    verb = {"opened": "ouvert", "updated": "mis à jour", "reopened": "rouvert", "closed": "résolu", "stale": "données manquantes", "escalated": "ESCALADE"}
     return f"{_hm(_dt(alert['timestamp']), tz)} {icon} {alert['output_id']} {verb.get(alert['event'], alert['event'])} — {_label(alert)}"
 
 
@@ -119,6 +119,9 @@ def format_text(alerts: list[dict[str, Any]], tz: ZoneInfo, limit: int = 4000) -
             ended = _dt(a.get("ended_at")) or _dt(a["timestamp"])
             lines = [f"🟢 RÉSOLU — {a['output_id']} : {_label(a)}",
                      f"Durée : {_duration(a.get('duration_seconds'))} ({_hm(started, tz)} → {_hm(ended, tz)})"]
+        elif a["event"] == "escalated":
+            lines = [f"🔺 ESCALADE — {a['output_id']} : {_label(a)} ({_SEVERITY_LABEL.get(a['severity'], a['severity'])})",
+                     f"Aucun accusé de réception : incident en cours depuis {_duration(a.get('duration_seconds'))} (début {_hm(started, tz)})"]
         elif a["event"] == "stale":
             lines = [f"⚪ DONNÉES MANQUANTES — {a['output_id']}", "L'incident en cours ne peut plus être suivi : plus de mesures reçues."]
         else:
@@ -154,6 +157,8 @@ def format_sms(alerts: list[dict[str, Any]], tz: ZoneInfo) -> str:
             return f"RESOLU {a['output_id']} {label}, duree {_duration(a.get('duration_seconds'))}"
         sev = "CRIT" if a["severity"] == "critical" else "ALERTE"
         started = _hm(_dt(a.get("started_at")) or _dt(a["timestamp"]), tz)
+        if a["event"] == "escalated":
+            return f"ESCALADE {sev} {a['output_id']} {label} depuis {started}, sans accuse de reception"
         dev = a.get("traffic_deviation_percent")
         extra = f" +{len(a['impacted_outputs'])} liens" if a.get("impacted_outputs") else ""
         return f"{sev} {a['output_id']} {label} depuis {started}" + (f" ({dev:+.0f}%)" if dev is not None else "") + extra

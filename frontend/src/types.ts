@@ -42,6 +42,9 @@ export interface Incident {
   verdict_by: string | null;
   verdict_at: string | null;
   verdict_note: string | null;
+  acknowledged_by: string | null;
+  acknowledged_at: string | null;
+  escalated_at: string | null;
   maintenance: boolean;
   root_cause_incident_id: string | null;
   inhibited: boolean;

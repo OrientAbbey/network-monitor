@@ -152,6 +152,15 @@ notifications:
     parents: {LINK_DOUALA_BAFOUSSAM: LINK_DOUALA_YAOUNDE}   # aval -> amont
   ```
 - **Verdicts** : sur chaque incident confirmé, « Faux positif » ou « Vrai incident » (`PUT /incidents/{id}/feedback`, connecté). `GET /reports/precision` (et la ligne « Précision mesurée sur 30 j » du dashboard) n'est une précision que **sur les incidents jugés** ; sans verdict, elle affiche « — ». Les faux positifs sortent du rapport de disponibilité.
+- **Prise en charge et escalade** : bouton « Prendre en charge » sur un incident en cours (`PUT /incidents/{id}/ack`, connecté). Avec `notifications.escalate_after` (ex. `15m`), un incident que personne n'a pris en charge dans ce délai prévient **un second groupe** (un canal configuré avec `events: [escalated]`), une seule fois. Rien n'escalade pendant une maintenance, pour une panne expliquée par une cause amont, ni pour une panne déjà revenue à la normale.
+
+  ```yaml
+  notifications:
+    escalate_after: 15m
+    channels:
+      - {name: noc, type: telegram, chat_id: "-1001234567890"}                          # reçoit ouverture et résolution
+      - {name: astreinte, type: telegram, chat_id: "-1009876543210", events: [escalated]}  # second groupe
+  ```
 - **Re-balayage des seuils** sur ces verdicts : `python -m network_monitor.analysis.evaluation --from-db sqlite:///network_monitor.db --days 30 --sweep` (`--end` pour une base à horloge simulée).
 
 ## Supervision

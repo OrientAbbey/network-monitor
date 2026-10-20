@@ -260,7 +260,7 @@ class SourceConfig(BaseModel):
         return self
 
 
-_ALERT_EVENTS = frozenset({"opened", "updated", "reopened", "closed", "stale"})
+_ALERT_EVENTS = frozenset({"opened", "updated", "reopened", "closed", "stale", "escalated"})
 
 
 class _ChannelBase(BaseModel):
@@ -352,11 +352,14 @@ class NotificationsConfig(BaseModel):
     """Délai avant la 2e tentative ; double à chaque échec, plafonné à 15 min."""
     timezone: str = "UTC"
     """Fuseau d'affichage des heures dans les messages (ex. Africa/Douala)."""
+    escalate_after: timedelta | None = None
+    """Un incident confirmé, en cours, que personne n'a pris en charge (`PUT /incidents/{id}/ack`) depuis ce délai émet UNE
+    alerte `escalated`, envoyée aux canaux dont `events` la contient (le « second groupe »). `None` : pas d'escalade."""
 
-    @field_validator("batch_window", "retry_base", mode="before")
+    @field_validator("batch_window", "retry_base", "escalate_after", mode="before")
     @classmethod
     def _parse(cls, v):
-        return _parse_duration(v) if not isinstance(v, timedelta) else v
+        return _parse_duration(v) if v is not None and not isinstance(v, timedelta) else v
 
     @field_validator("timezone")
     @classmethod
@@ -376,6 +379,14 @@ class NotificationsConfig(BaseModel):
             raise ValueError("deux canaux portent le même nom")
         if self.enabled and not self.channels:
             raise ValueError("notifications.enabled exige au moins un canal")
+        if self.escalate_after is not None:
+            if self.escalate_after <= timedelta(0):
+                raise ValueError("notifications.escalate_after doit être positif")
+            if not self.enabled or not any("escalated" in c.events for c in self.channels):
+                raise ValueError(
+                    "notifications.escalate_after exige des notifications actives et un canal dont `events` contient « escalated » : "
+                    "sans lui, personne ne recevrait l'escalade"
+                )
         return self
 
 

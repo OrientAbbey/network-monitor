@@ -46,6 +46,7 @@ from network_monitor.app.models import (
     AnomalyResult,
     ForecastResult,
     Incident,
+    IncidentStatus,
     IncidentVerdict,
     MaintenanceWindow,
     Severity,
@@ -656,6 +657,36 @@ def set_incident_feedback(
         raise HTTPException(status_code=409, detail="Seul un incident confirmé peut être jugé")
     state.storage.set_feedback(incident_id, body.verdict, subject, state.now, body.note)
     logger.info("Incident %s jugé %s par %s", incident_id, body.verdict, subject)
+    return state.storage.get_incident(incident_id) or incident
+
+
+def _active_confirmed_incident(incident_id: str) -> Incident:
+    incident = state.storage.get_incident(incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail=f"Incident inconnu : {incident_id}")
+    if incident.opened_at is None or incident.status not in (IncidentStatus.OPEN, IncidentStatus.STALE):
+        raise HTTPException(status_code=409, detail="Seul un incident confirmé et en cours peut être pris en charge")
+    return incident
+
+
+@app.put("/incidents/{incident_id}/ack", response_model=Incident)
+def acknowledge_incident(incident_id: str, subject: Annotated[str, Depends(require_token)]) -> Incident:
+    """« Je m'en occupe » : l'incident n'est plus escaladé (`notifications.escalate_after`). Une prise en charge déjà
+    enregistrée est remplacée (la dernière personne qui dit s'en occuper l'emporte)."""
+    incident = _active_confirmed_incident(incident_id)
+    state.storage.set_ack(incident_id, subject, state.now)
+    logger.info("Incident %s pris en charge par %s", incident_id, subject)
+    return state.storage.get_incident(incident_id) or incident
+
+
+@app.delete("/incidents/{incident_id}/ack", response_model=Incident)
+def release_incident(incident_id: str, subject: Annotated[str, Depends(require_token)]) -> Incident:
+    """Retire la prise en charge : le délai d'escalade repart de l'ouverture de l'incident, pas de ce retrait."""
+    incident = state.storage.get_incident(incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail=f"Incident inconnu : {incident_id}")
+    state.storage.set_ack(incident_id, None, state.now)
+    logger.info("Prise en charge de l'incident %s retirée par %s", incident_id, subject)
     return state.storage.get_incident(incident_id) or incident
 
 

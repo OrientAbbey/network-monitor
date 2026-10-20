@@ -19,9 +19,13 @@ frontend = Path(__file__).resolve().parent.parent
 # L'environnement se règle AVANT l'import de l'API : le montage de l'interface et la configuration sont lus à l'import.
 (workdir / "config.yaml").write_text(
     f"history: {{minimum: 30d, preferred: 40d}}\nstorage: {{database_url: 'sqlite:///{workdir / 'e2e.db'}'}}\n"
-    f"topology: {{parents: {{OUT_002: OUT_001}}}}\n", encoding="utf-8"
+    f"topology: {{parents: {{OUT_002: OUT_001}}}}\n"
+    # Escalade après 3 h simulées (~9 s réelles) vers un canal webhook dont la destination n'écoute pas : l'alerte `escalated`
+    # est enregistrée même si l'envoi échoue, et c'est elle que les tests lisent.
+    f"notifications: {{enabled: true, escalate_after: 3h, channels: [{{name: astreinte, type: webhook, events: [escalated], secret_env: null}}]}}\n",
+    encoding="utf-8"
 )
-os.environ.update(NM_CONFIG=str(workdir / "config.yaml"), NM_STATIC_DIR=str(frontend / "dist-e2e"), NM_AUTH_SECRET="e2e-secret")
+os.environ.update(NM_CONFIG=str(workdir / "config.yaml"), NM_STATIC_DIR=str(frontend / "dist-e2e"), NM_AUTH_SECRET="e2e-secret", NM_WEBHOOK_URL="http://127.0.0.1:9/hook")
 
 import uvicorn  # noqa: E402
 
@@ -43,6 +47,12 @@ state.source.add_scenario(  # chute de trafic de 3 h 50 simulées, qui démarre 
 state.source.add_scenario(  # même chute sur l'aval, un pas plus tard : rattachée à la cause amont, donc retenue (jamais notifiée)
     AnomalyScenario(
         scenario_id="E2E_DOWNSTREAM", output_id="OUT_002", start_time=state.now + 9 * step, end_time=state.now + 54 * step,
+        type=ScenarioType.TRAFFIC_DROP, severity=Severity.CRITICAL, traffic_drop_fraction=0.7,
+    )
+)
+state.source.add_scenario(  # incident TARDIF (≈ 75 s après le lancement) et long : encore ouvert quand le test de prise en charge s'exécute
+    AnomalyScenario(
+        scenario_id="E2E_LATE", output_id="OUT_003", start_time=state.now + 300 * step, end_time=state.now + 600 * step,
         type=ScenarioType.TRAFFIC_DROP, severity=Severity.CRITICAL, traffic_drop_fraction=0.7,
     )
 )

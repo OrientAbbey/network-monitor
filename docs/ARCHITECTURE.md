@@ -111,6 +111,12 @@ choisis par mesure (`REVUE.md`) : confirmation après 15 min au-dessus de `open_
   aval confirmé alors que l'amont est ouvert lui est rattaché (`root_cause_incident_id`, `inhibited`) et **retenu**
   (`suppressed="inhibited"`) ; si l'aval s'ouvre le premier, l'amont l'annonce (`impacted_outputs`, « Explique aussi : … »
   dans les notifications). L'aval est libéré si la cause est résolue et qu'il dure.
+- **Prise en charge et escalade** : un opérateur dit « je m'en occupe » (`PUT /incidents/{id}/ack`, retrait par `DELETE`) ; la prise en charge
+  vit dans une table à part (`incident_ack`, créée sans migration dans une base existante). Si `notifications.escalate_after` est défini, un
+  incident confirmé et en cours (ouvert ou à données manquantes) **sans prise en charge** depuis ce délai émet **une seule** alerte `escalated`.
+  Elle est routée comme les autres : seuls les canaux dont `events` contient `escalated` la reçoivent (le « second groupe »). Jamais d'escalade
+  pour un incident en maintenance, expliqué par une cause amont, déjà pris en charge, qui se ferme à ce pas, ni tant qu'il est en retour à la
+  normale (`IncidentManager.is_recovering`, état en mémoire). Le délai se compte depuis l'ouverture : retirer une prise en charge ne le remet pas à zéro.
 - **Verdicts** : un opérateur marque un incident confirmé « vrai incident » ou « faux positif » (`PUT /incidents/{id}/feedback`).
   Le verdict vit dans une **table à part** (`incident_feedback`) : le moteur réécrit la ligne de l'incident et l'écraserait.
   `GET /reports/precision` donne précision = TP/(TP+FP) **sur les incidents jugés**, avec la part jugée ; le rapport de
@@ -145,6 +151,7 @@ Un thread relit les envois dus toutes les 2 s :
 - **Canaux** : Telegram (groupe), webhook (JSON signé HMAC-SHA256, identifiant de livraison stable pour dédupliquer),
   SMS (passerelle Android en un appel pour tout le groupe, ou API Orange un appel par numéro, jeton OAuth mis en cache).
   Un SMS tient en un segment de 160 caractères sans accents.
+- **Escalade** (`escalated`) : voir §4. Un canal « second groupe » se configure par `events: [escalated]`, sans autre mécanisme de routage.
 - **Alertes retenues** (maintenance, cause amont) : enregistrées et consultables (`GET /alerts?all=true`), jamais mises en file d'envoi.
 - **Garantie** : au moins une fois. **Un secret absent refuse le démarrage** (mieux vaut échouer au lancement que
   découvrir pendant un incident qu'aucune alerte ne part). Un jeton ne figure jamais dans les erreurs enregistrées.
@@ -154,7 +161,7 @@ Un thread relit les envois dus toutes les 2 s :
 Lecture, sans connexion : `GET /health`, `/health/ready`, `/metrics`, `/outputs`, `/outputs/nearest` (la mesure la plus proche de « maintenant − N minutes », pour toutes les sorties en une requête : le tableau comparatif), `/outputs/{id}/history|anomalies|forecast|forecast/ahead`,
 `/incidents`, `/incidents/{id}`, `/alerts` (par défaut sans les signaux faibles ; `all=true` pour l'audit), `/maintenance`, `/reports/availability` (JSON ou CSV), `/reports/precision`, `/monitoring/status`, `/config`.
 Avec connexion (`Authorization: Bearer`, session obtenue par `POST /auth/login` ou jeton machine `NM_API_TOKEN`) :
-`PUT /config`, `POST /monitoring/start|stop`, `POST /maintenance`, `DELETE /maintenance/{id}`, `PUT /incidents/{id}/feedback`, `GET /notifications`, `POST /notifications/test/{canal}`.
+`PUT /config`, `POST /monitoring/start|stop`, `POST /maintenance`, `DELETE /maintenance/{id}`, `PUT /incidents/{id}/feedback`, `PUT|DELETE /incidents/{id}/ack`, `GET /notifications`, `POST /notifications/test/{canal}`.
 
 Garde-fous : datetimes sans fuseau refusés (422), fenêtres limitées à 31 jours (rapports : 366), erreurs de
 validation de `PUT /config` structurées (champ et message, sans la valeur saisie ni l'URL de documentation), `/docs` et `/openapi.json` masqués hors `NM_ENV=development`, CORS limité à

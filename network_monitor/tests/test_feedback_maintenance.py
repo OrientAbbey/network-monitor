@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 import network_monitor.app.api as api_module
 from network_monitor.analysis.availability import SampleStats, build_report
-from network_monitor.app.config import AppConfig
+from network_monitor.app.config import AppConfig, NotificationsConfig
 from network_monitor.app.main import MonitoringLoop
 from network_monitor.app.models import (
     Incident,
@@ -253,12 +253,13 @@ NOW = datetime(2026, 9, 1, tzinfo=timezone.utc)
 TG = {"name": "tg", "type": "telegram", "chat_id": "-1"}
 
 
-def _run(tmp_path, monkeypatch, scenarios, topology=None, prepare=None, ticks=70, at_tick=None):
-    """`at_tick` : {numéro de pas: fonction(repo)} exécutée juste avant ce pas (un opérateur qui agit en cours de route)."""
+def _run(tmp_path, monkeypatch, scenarios, topology=None, prepare=None, ticks=70, at_tick=None, notifications=None, chats=None):
+    """`at_tick` : {numéro de pas: fonction(repo)} exécutée juste avant ce pas (un opérateur qui agit en cours de route).
+    `notifications` complète la configuration des notifications ; `chats`, si fournie, reçoit (chat_id, texte) de chaque envoi."""
     monkeypatch.setenv("NM_TELEGRAM_TOKEN", "t")
     cfg = AppConfig.model_validate({
         "history": {"minimum": "7d", "preferred": "10d"},
-        "notifications": {"enabled": True, "channels": [TG], "batch_window": "0s"},
+        "notifications": {"enabled": True, "channels": [TG], "batch_window": "0s", **(notifications or {})},
         "topology": topology or {},
     })
     source = MockDataSource(seed=1)
@@ -268,7 +269,10 @@ def _run(tmp_path, monkeypatch, scenarios, topology=None, prepare=None, ticks=70
     sent: list[str] = []
 
     def telegram(request: httpx.Request) -> httpx.Response:
-        sent.append(json.loads(request.content)["text"])
+        payload = json.loads(request.content)
+        sent.append(payload["text"])
+        if chats is not None:
+            chats.append((payload["chat_id"], payload["text"]))
         return httpx.Response(200, json={"ok": True})
 
     clock = [NOW]
@@ -445,3 +449,197 @@ def test_evaluation_cli_sweeps_a_database_with_verdicts(tmp_path, monkeypatch):
     rows = [ast.literal_eval(line) for line in out[1:]]
     assert rows and rows[0]["false_positives_still_opened"] == 0 and rows[0]["true_positives_still_detected"] == 1  # le meilleur réglage est trié en tête
     assert any(r["false_positives_still_opened"] == 1 for r in rows)  # et la grille contient aussi des réglages qui gardent le faux positif
+
+
+# -- prise en charge et escalade ----------------------------------------------------------------------------------------
+
+
+def _live(ident="live", output="OUT_001"):
+    """Un incident confirmé et en cours (le moteur le tient ouvert)."""
+    return _inc(ident=ident, output=output).model_copy(update={"status": IncidentStatus.OPEN, "closed_at": None, "ended_at": None})
+
+
+def test_ack_is_stored_apart_and_escalation_is_read_from_the_alerts(repo):
+    repo.upsert_incident(_live())
+    repo.set_ack("live", "alice", T0 + 3 * H)
+    got = repo.get_incident("live")
+    assert got is not None and (got.acknowledged_by, got.acknowledged_at) == ("alice", T0 + 3 * H) and got.escalated_at is None
+    repo.upsert_incident(_live())  # le moteur réécrit la ligne à chaque pas : la prise en charge doit rester
+    assert [i.acknowledged_by for i in repo.list_active_incidents()] == ["alice"]
+    repo.save_alerts([Alert(incident_id="live", output_id="OUT_001", severity=Severity.CRITICAL, event="escalated", timestamp=T0 + 4 * H,
+                            message="m", incident_type=IncidentType.TRAFFIC_DROP)])
+    assert repo.get_incident("live").escalated_at == T0 + 4 * H  # type: ignore[union-attr]
+    repo.set_ack("live", "bob", T0 + 5 * H)  # la dernière prise en charge remplace la précédente
+    assert repo.get_incident("live").acknowledged_by == "bob"  # type: ignore[union-attr]
+    repo.set_ack("live", None, T0 + 6 * H)
+    assert repo.get_incident("live").acknowledged_at is None  # type: ignore[union-attr]
+
+
+ESC_CHANNEL = {"name": "astreinte2", "type": "telegram", "chat_id": "-2", "events": ["escalated"]}
+ESC = {"escalate_after": "15m", "channels": [TG, ESC_CHANNEL]}
+
+
+def test_escalation_needs_a_channel_that_receives_it():
+    ok = NotificationsConfig.model_validate({"enabled": True, **ESC})
+    assert ok.escalate_after == timedelta(minutes=15)
+    for bad, why in [
+        ({"enabled": True, "channels": [TG], "escalate_after": "15m"}, "escalated"),  # personne ne recevrait l'escalade
+        ({"enabled": False, "channels": [TG, ESC_CHANNEL], "escalate_after": "15m"}, "escalated"),
+        ({"enabled": True, "channels": [TG, ESC_CHANNEL], "escalate_after": "0s"}, "positif"),
+    ]:
+        with pytest.raises(ValueError, match=why):
+            NotificationsConfig.model_validate(bad)
+    assert NotificationsConfig.model_validate({"enabled": True, "channels": [TG]}).escalate_after is None  # opt-in
+
+
+def test_ack_endpoints_require_login_and_a_confirmed_live_incident(client):
+    s = api_module.state.storage
+    s.upsert_incident(_live())
+    s.upsert_incident(_inc(ident="done"))  # résolu
+    s.upsert_incident(_live(ident="weak").model_copy(update={"status": IncidentStatus.SUSPECT, "opened_at": None}))  # jamais confirmé
+    assert client.put("/incidents/live/ack").status_code == 401
+    assert client.delete("/incidents/live/ack").status_code == 401
+    assert client.put("/incidents/nope/ack", headers=AUTH).status_code == 404
+    assert client.put("/incidents/done/ack", headers=AUTH).status_code == 409
+    assert client.put("/incidents/weak/ack", headers=AUTH).status_code == 409
+    r = client.put("/incidents/live/ack", headers=AUTH)
+    assert r.status_code == 200 and r.json()["acknowledged_by"] == "api-token"
+    assert datetime.fromisoformat(r.json()["acknowledged_at"]) == api_module.state.now  # horloge du serveur
+    assert client.get("/incidents/live").json()["acknowledged_by"] == "api-token"
+    released = client.delete("/incidents/live/ack", headers=AUTH)
+    assert released.status_code == 200 and released.json()["acknowledged_by"] is None
+    assert client.delete("/incidents/nope/ack", headers=AUTH).status_code == 404
+
+
+def _escalated(repo):
+    return [a for a in repo.list_alerts(limit=500) if a.event == "escalated"]
+
+
+def test_an_unacknowledged_incident_escalates_once_to_the_second_group_only(tmp_path, monkeypatch):
+    chats: list[tuple[str, str]] = []
+    repo, _, _ = _run(tmp_path, monkeypatch, [_drop("OUT_001", 6, 40)], notifications=ESC, chats=chats)
+    try:
+        [esc] = _escalated(repo)  # une seule, malgré ~30 pas d'incident encore ouvert après le délai
+        [inc] = repo.list_incidents_between(NOW, NOW + 10 * H)
+        assert inc.opened_at is not None and timedelta(minutes=15) <= esc.timestamp - inc.opened_at < timedelta(minutes=20)
+        assert inc.escalated_at == esc.timestamp and esc.suppressed is None
+        second = [text for chat, text in chats if chat == "-2"]
+        assert len(second) == 1 and "ESCALADE" in second[0] and "OUT_001" in second[0] and "Aucun accusé de réception" in second[0]
+        primary = [text for chat, text in chats if chat == "-1"]
+        assert primary and not any("ESCALADE" in t for t in primary)  # le groupe principal reçoit ouverture et résolution, pas l'escalade
+    finally:
+        repo.dispose()
+
+
+def test_escalation_is_opt_in(tmp_path, monkeypatch):
+    repo, _, _ = _run(tmp_path, monkeypatch, [_drop("OUT_001", 6, 40)])
+    try:
+        assert _escalated(repo) == []  # sans `escalate_after`, un incident long n'escalade jamais
+    finally:
+        repo.dispose()
+
+
+def _ack(at_tick_ident_output="OUT_001", by="alice"):
+    def act(repo):
+        [inc] = [i for i in repo.list_active_incidents() if i.output_id == at_tick_ident_output]
+        repo.set_ack(inc.id, by, NOW)
+    return act
+
+
+def _release(repo):
+    for inc in repo.list_active_incidents():
+        repo.set_ack(inc.id, None, NOW)
+
+
+def test_taking_charge_in_time_prevents_the_escalation(tmp_path, monkeypatch):
+    chats: list[tuple[str, str]] = []
+    repo, _, _ = _run(tmp_path, monkeypatch, [_drop("OUT_001", 6, 40)], notifications=ESC, chats=chats, at_tick={11: _ack()})  # l'incident s'ouvre au pas 10
+    try:
+        assert _escalated(repo) == [] and [c for c, _ in chats if c == "-2"] == []
+        [inc] = repo.list_incidents_between(NOW, NOW + 10 * H)
+        assert inc.acknowledged_by == "alice"
+    finally:
+        repo.dispose()
+
+
+def test_releasing_the_ack_lets_the_escalation_resume_from_the_opening_not_from_the_release(tmp_path, monkeypatch):
+    repo, _, _ = _run(tmp_path, monkeypatch, [_drop("OUT_001", 6, 40)], notifications=ESC, at_tick={11: _ack(), 12: _release})
+    try:
+        [esc] = _escalated(repo)
+        [inc] = repo.list_incidents_between(NOW, NOW + 10 * H)
+        assert inc.opened_at is not None and esc.timestamp - inc.opened_at < timedelta(minutes=20)  # pas 15 min après le retrait
+    finally:
+        repo.dispose()
+
+
+def test_each_condition_that_excludes_an_escalation_is_honoured(tmp_path, monkeypatch):
+    """Table de conditions sur `_escalations`, sans dépendre de la dynamique du Mock : un seul facteur change à chaque ligne."""
+    from network_monitor.app.main import _TickResults
+    from network_monitor.incidents.manager import IncidentManager
+
+    repo, _, loop = _run(tmp_path, monkeypatch, [], notifications=ESC, ticks=2)
+    try:
+        now = NOW + 3 * H
+        base = _live().model_copy(update={"opened_at": NOW + 2 * H, "started_at": NOW + 2 * H - STEP})  # ouvert depuis 1 h, délai : 15 min
+
+        def escalations(incident=base, tick=None):
+            repo.upsert_incident(incident)
+            repo.set_ack(incident.id, None, now)
+            return loop._escalations(now, tick or _TickResults())
+
+        [alert] = escalations()
+        assert alert.event == "escalated" and alert.incident_id == "live" and alert.timestamp == now and alert.severity == Severity.CRITICAL
+        assert "60 min" in alert.message and alert.duration_seconds == 3900 and alert.suppressed is None
+
+        assert escalations(base.model_copy(update={"opened_at": now - timedelta(minutes=14)})) == []  # le délai n'est pas écoulé
+        assert len(escalations(base.model_copy(update={"opened_at": now - timedelta(minutes=15)}))) == 1  # il l'est (borne incluse)
+        assert escalations(base.model_copy(update={"maintenance": True})) == []  # pendant une maintenance
+        assert escalations(base.model_copy(update={"inhibited": True})) == []  # déjà expliqué par une cause amont
+        assert escalations(base.model_copy(update={"status": IncidentStatus.SUSPECT, "opened_at": None})) == []  # jamais confirmé
+        stale = escalations(base.model_copy(update={"status": IncidentStatus.STALE}))
+        assert len(stale) == 1  # des données qui manquent pendant un incident non pris en charge restent à signaler
+        closing = _TickResults()
+        closing.incidents["live"] = base.model_copy(update={"status": IncidentStatus.CLOSED})
+        assert escalations(tick=closing) == []  # il se ferme à ce pas : inutile de réveiller quelqu'un
+
+        repo.upsert_incident(base)
+        repo.set_ack("live", "alice", now)
+        assert loop._escalations(now, _TickResults()) == []  # pris en charge
+        repo.set_ack("live", None, now)
+        monkeypatch.setattr(IncidentManager, "is_recovering", lambda self, output_id: True)
+        assert loop._escalations(now, _TickResults()) == []  # panne déjà finie, retour à la normale à confirmer
+        monkeypatch.undo()
+        repo.save_alerts([Alert(incident_id="live", output_id="OUT_001", severity=Severity.CRITICAL, event="escalated", timestamp=now,
+                                message="m", incident_type=IncidentType.TRAFFIC_DROP)])
+        assert loop._escalations(now + STEP, _TickResults()) == []  # déjà escaladé : une seule fois
+    finally:
+        repo.dispose()
+
+
+def test_maintenance_and_an_upstream_cause_never_escalate(tmp_path, monkeypatch):
+    window = MaintenanceWindow(id="w", output_id="OUT_003", start=NOW, end=NOW + 20 * H, reason="travaux", created_by="alice", created_at=NOW)
+    repo, _, _ = _run(
+        tmp_path, monkeypatch, [_drop("OUT_001", 6, 40), _drop("OUT_002", 7, 40), _drop("OUT_003", 6, 40)],
+        topology={"parents": {"OUT_002": "OUT_001"}}, notifications=ESC, prepare=lambda r: r.add_maintenance(window),
+    )
+    try:
+        assert {a.output_id for a in _escalated(repo)} == {"OUT_001"}  # OUT_002 est expliquée par OUT_001, OUT_003 est en maintenance
+        by_output = {i.output_id: i for i in repo.list_incidents_between(NOW, NOW + 10 * H)}
+        assert by_output["OUT_002"].inhibited and by_output["OUT_003"].maintenance and by_output["OUT_001"].escalated_at is not None
+    finally:
+        repo.dispose()
+
+
+def test_escalation_messages_are_readable_in_telegram_and_fit_one_sms():
+    from zoneinfo import ZoneInfo
+
+    from network_monitor.app.notify import alert_to_dict, format_sms, format_text
+
+    alert = alert_to_dict(Alert(incident_id="i", output_id="OUT_001", severity=Severity.CRITICAL, event="escalated", timestamp=T0 + 3 * H,
+                                message="m", incident_type=IncidentType.TRAFFIC_DROP, duration_seconds=1500, started_at=T0 + 2.5 * H))
+    text = format_text([alert], ZoneInfo("UTC"))
+    assert text.startswith("🔺 ESCALADE — OUT_001") and "Aucun accusé de réception" in text and "25 min" in text
+    sms = format_sms([alert], ZoneInfo("UTC"))
+    assert sms.startswith("ESCALADE CRIT OUT_001") and "accuse" in sms and sms.isascii() and len(sms) <= 160
+    grouped = format_text([alert, alert], ZoneInfo("UTC"))
+    assert "ESCALADE" in grouped  # aussi dans un message regroupé

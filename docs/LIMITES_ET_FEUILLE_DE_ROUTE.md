@@ -67,7 +67,7 @@ corrigé et mesuré). Rien n'y est caché derrière un « à peu près » : quan
 
 - **Garantie « au moins une fois »** : une coupure entre l'envoi et son enregistrement peut doubler un message (le webhook porte un
   identifiant de livraison pour dédupliquer ; Telegram et SMS n'en ont pas).
-- **Aucun accusé de réception, aucune escalade, aucune astreinte** : si personne ne réagit, rien ne se passe de plus.
+- **Une seule escalade, vers un seul second groupe** (§2.8) : pas de rappels répétés, pas de planning d'astreinte ni de rotation, pas de troisième niveau.
 - **Telegram** : le bot doit être membre du groupe et l'identifiant du groupe (négatif) correct : non vérifié ici. Plafond par défaut
   15 messages/minute (limite annoncée : ~20 par minute et par groupe).
 - **SMS** : un seul segment de 160 caractères, **sans accents** par construction. La passerelle Android appelle `POST /messages`
@@ -124,6 +124,11 @@ corrigé et mesuré). Rien n'y est caché derrière un « à peu près » : quan
 
 ### 2.8 Maintenance, cause amont, verdicts, supervision
 
+- **Escalade** : un seul niveau et une seule alerte par incident (pas de rappel si le second groupe ne réagit pas non plus). La prise en charge est une
+  déclaration d'intention, pas un verrou : n'importe quel compte connecté peut en remplacer un autre (le dernier gagne), et elle ne coupe ni les alertes
+  suivantes ni la résolution. Le délai se compte depuis l'ouverture. L'état « en retour à la normale » n'existe qu'en mémoire : après un redémarrage il est
+  inconnu, et un incident déjà revenu à la normale peut alors escalader. Le canal du second groupe n'a jamais été éprouvé avec un vrai service (§2.3) ; les
+  tests d'intégration visent un webhook volontairement injoignable. Retrait d'une prise en charge et escalade n'existent que pour les incidents confirmés et en cours.
 - Une fenêtre de maintenance créée **pendant** un incident déjà annoncé ne le retient pas : seules les alertes émises ensuite le sont.
 - La topologie est **statique et déclarée à la main** (`topology.parents`, un seul parent par sortie) : rien n'est déduit des données, et une cause commune à plusieurs équipements n'est pas modélisée.
 - Un verdict n'expire pas et il n'y en a qu'un par incident (le dernier gagne, sans historique). Seul un incident **confirmé** se juge ; un signal faible jamais confirmé n'entre pas dans la précision.
@@ -137,7 +142,7 @@ corrigé et mesuré). Rien n'y est caché derrière un « à peu près » : quan
 
 ## 3. Fonctionnalités proposées mais non réalisées
 
-**Réalisées depuis** (voir §1 et §2.8) : fenêtres de maintenance et inhibition amont/aval, retour « faux/vrai positif » et re-balayage des seuils, `/metrics` et signal de vie externe, et le point d'accès « mesure la plus proche d'un instant » (`GET /outputs/nearest` : le tableau comparatif passe de 24 requêtes par rafraîchissement à 1, mesuré dans un vrai navigateur). Les numéros ci-dessous sont conservés.
+**Réalisées depuis** (voir §1 et §2.8) : fenêtres de maintenance et inhibition amont/aval, retour « faux/vrai positif » et re-balayage des seuils, `/metrics` et signal de vie externe, l'acquittement et l'escalade à un niveau, et le point d'accès « mesure la plus proche d'un instant » (`GET /outputs/nearest` : le tableau comparatif passe de 24 requêtes par rafraîchissement à 1, mesuré dans un vrai navigateur). Les numéros ci-dessous sont conservés.
 
 Chaque ligne : le besoin, d'où il vient, l'effort estimé (S ≈ 1 jour, M ≈ 2–4 jours, L > 4 jours) et comment savoir que c'est réussi.
 Les recherches datent du 1er octobre 2026 et **sont à refaire avant de s'y fier** (URLs non conservées).
@@ -147,7 +152,6 @@ Les recherches datent du 1er octobre 2026 et **sont à refaire avant de s'y fier
 | 2 | **Planification de capacité** | Pratique d'opérateurs relevée en recherche : lancer la procédure d'augmentation à 50 % d'utilisation, l'achever à 70 % (95e centile d'échantillons de 5 min), en tenant compte du délai de réalisation. Demande la capacité de chaque lien (non disponible aujourd'hui) et les prévisions longues. | M | « Jours avant 70 % » par lien, avec un intervalle, validé sur un export réel. |
 | 5 | **Connecteur Zabbix** | Zabbix stocke son historique en base (`history_uint` : `itemid`, `clock`, `value`, `ns`), lisible en SQL. Non écrit : schéma connu par la documentation, jamais essayé ; il faut gérer compteurs → débit (remises à zéro, bouclage) ou valeurs déjà exprimées en débit selon le gabarit. | M | Contrat de source vérifié sur une vraie base Zabbix. |
 | 6 | **Rapports** : PDF, envoi programmé, exclusion des maintenances, indicateurs réglementaires | Le ministère camerounais a demandé des outils d'évaluation automatisés et le remboursement automatique du crédit data en cas de panne, ce qui exige des débuts et fins précis (déjà rétro-datés). Amende globale de 2,6 milliards FCFA en juillet 2025 (source de presse). **Indicateurs exacts de l'ART non trouvés.** | M | Rapport mensuel conforme à la liste exacte des indicateurs, obtenue auprès de l'ART. |
-| 7 | **Escalade et acquittement** | Une alerte sans réponse doit monter (puis appeler quelqu'un d'autre) ; un opérateur doit pouvoir dire « je m'en occupe ». Une enquête d'éditeur (à prendre avec prudence) indique que 57 % des équipes d'astreinte jugent moins de 30 % de leurs alertes exploitables : l'acquittement et le regroupement réduisent le bruit. | M | Un incident non acquitté en 15 min relance un second groupe. |
 | 8 | **Rôles** (lecture, opérateur, administrateur) et **SSO** | Aujourd'hui tout utilisateur connecté peut tout faire. | M–L | Un opérateur ne peut pas modifier les seuils ; connexion par l'annuaire de l'entreprise. |
 | 9 | **Corrélation entre sorties** (topologie) | L'inhibition amont/aval existe (topologie déclarée à la main) ; il reste, plus largement, remonter à la cause (liens partageant un équipement ou une alimentation). Les coupures d'électricité et de fibre sont citées par le régulateur comme principaux facteurs de disponibilité. | L | Un scénario de panne d'alimentation multi-sorties produit un seul incident « cause commune ». |
 | 10 | **WhatsApp** | Très utilisé dans la région, mais l'API entreprise n'est pas gratuite et n'a pas été évaluée. | ? | — |
@@ -226,7 +230,7 @@ webhook (déjà là).
 | 6. Re-balayer les seuils sur les données réelles | `--sweep` sur les captures réelles ; défauts de `IncidentConfig` mis à jour avec la nouvelle mesure. |
 | 7. Mettre en place la sauvegarde et les migrations | Restauration d'une sauvegarde testée ; première migration Alembic. |
 | 8. Déploiement (§4.1) | Piste A en ligne ; piste B sur une VM, avec signal de vie externe. |
-| 9. Fonctionnalités du §3, dans l'ordre 7, 6 | Selon l'usage constaté pendant la marche à blanc. |
+| 9. Fonctionnalités du §3, dans l'ordre 6 | Selon l'usage constaté pendant la marche à blanc. |
 
 ## 6. Dette technique et points d'attention du code
 

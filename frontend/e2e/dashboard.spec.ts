@@ -351,3 +351,49 @@ test("le comparatif charge ses valeurs en une requête par rafraîchissement, sa
   for (const params of nearest) expect(params.getAll("ago_minutes")).toEqual(["0", "5", "10", "1440", "1445", "10080", "10085"]);
   expect(boundedHistory).toEqual([]); // avant : 3 sorties × 4 fenêtres × 2 instants = 24 requêtes par rafraîchissement
 });
+
+test("sans prise en charge, un incident escalade une seule fois ; celui expliqué par une cause amont jamais", async ({ page, request }) => {
+  await page.goto("/");
+  const panel = incidentsPanel(page);
+  await expect(panel.locator(".nm-log-row", { hasText: /OUT_001 — traffic_drop/ })).toContainText("escaladé", { timeout: 60_000 }); // 3 h simulées après l'ouverture
+  await expect(panel.locator(".nm-log-row", { hasText: /OUT_002 — traffic_drop/ })).not.toContainText("escaladé");
+  const alerts = (await (await request.get("/alerts?all=true&limit=500")).json()) as { output_id: string; event: string; incident_id: string }[];
+  const escalated = alerts.filter((a) => a.event === "escalated" && a.output_id !== "OUT_003"); // OUT_003 a son propre incident tardif
+  expect(escalated.map((a) => a.output_id)).toEqual(["OUT_001"]); // une seule, et pas pour l'aval
+  await expect(page.getByRole("region", { name: /alertes récentes/i })).toContainText("escalated");
+});
+
+test("prendre en charge un incident en cours le dit dans l'interface, persiste côté serveur et se retire", async ({ page, request }) => {
+  await signIn(page);
+  const panel = incidentsPanel(page);
+  const take = panel.getByRole("button", { name: "Prendre en charge l'incident de OUT_003" });
+  await expect(take).toBeVisible({ timeout: 90_000 }); // l'incident tardif de OUT_003
+  await take.click();
+  const row = panel.locator(".nm-log-row", { hasText: /OUT_003 — traffic_drop/ });
+  await expect(row).toContainText("pris en charge par alice");
+  type Incident = { output_id: string; acknowledged_by: string | null; escalated_at: string | null; opened_at: string };
+  const get = async () => ((await (await request.get("/incidents")).json()) as Incident[]).find((i) => i.output_id === "OUT_003")!;
+  const incident = await get();
+  expect(incident.acknowledged_by).toBe("alice");
+
+  // Pris en charge à temps (moins de 3 h simulées après l'ouverture), il ne doit JAMAIS escalader, même une fois le délai dépassé.
+  const nowOf = async () => new Date(((await (await request.get("/monitoring/status")).json()) as { simulated_now: string }).simulated_now).getTime();
+  const deadline = new Date(incident.opened_at).getTime() + 3 * 3600_000;
+  if ((await nowOf()) < deadline - 30 * 60_000) {
+    await expect.poll(nowOf, { timeout: 40_000, intervals: [500] }).toBeGreaterThan(deadline + 10 * 60_000);
+    expect((await get()).escalated_at).toBeNull();
+  } else {
+    test.info().annotations.push({ type: "note", description: "pris en charge trop tard (machine lente) : l'absence d'escalade n'est pas vérifiée ici" });
+  }
+
+  await page.reload();
+  await expect(panel.locator(".nm-log-row", { hasText: /OUT_003 — traffic_drop/ })).toContainText("pris en charge par alice"); // vient du serveur
+  await page.getByRole("button", { name: "Déplier la configuration", exact: true }).click();
+  await page.getByLabel("Identifiant").fill("alice");
+  await page.getByLabel("Mot de passe").fill("e2e-pass");
+  await page.getByRole("button", { name: /se connecter/i }).click();
+  await expect(page.getByText(/connecté en tant que/i)).toBeVisible();
+  await panel.getByRole("button", { name: "Retirer la prise en charge de l'incident de OUT_003" }).click();
+  await expect(panel.locator(".nm-log-row", { hasText: /OUT_003 — traffic_drop/ })).not.toContainText("pris en charge par");
+  expect((await get()).acknowledged_by).toBeNull();
+});

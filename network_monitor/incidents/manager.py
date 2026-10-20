@@ -616,6 +616,12 @@ class IncidentManager:
         state.open_since = None
         state.below_close_since = None
 
+    def is_recovering(self, output_id: str) -> bool:
+        """Vrai si l'incident en cours de cette sortie est déjà revenu sous `close_score` (retour à la normale à confirmer).
+        Cet état n'existe qu'en mémoire : après un redémarrage, il est inconnu (donc faux)."""
+        state = self._states.get(output_id)
+        return state is not None and state.incident is not None and state.below_close_since is not None
+
     def active_incidents(self) -> list[Incident]:
         return [s.incident for s in self._states.values() if s.incident is not None and s.incident.is_active]
 

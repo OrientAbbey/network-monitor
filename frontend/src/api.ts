@@ -115,6 +115,9 @@ export const api = {
   // Verdict d'un opérateur (connecté) ; `null` le retire. Seul un incident confirmé peut être jugé (409 sinon).
   setFeedback: (id: string, verdict: Verdict | null) =>
     request<Incident>(`/incidents/${encodeURIComponent(id)}/feedback`, { method: "PUT", body: { verdict } }),
+  // « Je m'en occupe » : l'incident n'est plus escaladé. Seuls les incidents confirmés et en cours s'acquittent (409 sinon).
+  acknowledge: (id: string) => request<Incident>(`/incidents/${encodeURIComponent(id)}/ack`, { method: "PUT" }),
+  release: (id: string) => request<Incident>(`/incidents/${encodeURIComponent(id)}/ack`, { method: "DELETE" }),
   precision: (days: number) => request<PrecisionReport>("/reports/precision", { params: { days } }),
   // Fenêtres relatives à l'horloge du SERVEUR (`days`, `starts_in_minutes`) : jamais de dates fabriquées ici.
   maintenance: (days = 7) => request<MaintenanceWindow[]>("/maintenance", { params: { days } }),

@@ -24,6 +24,7 @@ from network_monitor.app.models import (
     AnomalyResult,
     ForecastResult,
     Incident,
+    IncidentStatus,
     MaintenanceWindow,
     RawMeasurement,
     TrafficSample,
@@ -226,7 +227,7 @@ class MonitoringLoop:
         # bruit résorbé seul (§19), voir `incident_worth_persisting`. Un
         # incident tout juste fermé, lui, l'est (il ne réapparaîtrait plus
         # dans active_incidents(), §29).
-        alerts = tick.alerts if self._config.alerts.enabled else []
+        alerts = [*tick.alerts, *self._escalations(now, tick)] if self._config.alerts.enabled else []
         self._storage.save_tick(
             tick.samples,
             tick.forecasts,
@@ -239,6 +240,34 @@ class MonitoringLoop:
         for sample in tick.samples:
             self.last_sample_at[sample.output_id] = max(sample.timestamp, self.last_sample_at.get(sample.output_id, sample.timestamp))
         self.maybe_recalibrate(now)
+
+    def _escalations(self, now: datetime, tick: _TickResults) -> list[Alert]:
+        """Un incident confirmé et en cours que personne n'a pris en charge depuis `notifications.escalate_after`
+        émet UNE alerte `escalated` (l'escalade déjà émise se lit dans les alertes : pas de seconde). Jamais pour un incident
+        en maintenance, déjà expliqué par une cause amont, acquitté, ni qui se ferme à ce pas, ni tant qu'il est en
+        retour à la normale (la panne est déjà finie : on ne réveille pas le second groupe pour rien ; s'il rechute sans
+        prise en charge, l'escalade repart)."""
+        after = self._config.notifications.escalate_after
+        if after is None:
+            return []
+        escalations = []
+        for inc in self._storage.list_active_incidents():
+            closing = tick.incidents.get(inc.id)
+            if (
+                inc.opened_at is None or inc.acknowledged_at is not None or inc.escalated_at is not None
+                or inc.maintenance or inc.inhibited or now - inc.opened_at < after
+                or self._incident_manager.is_recovering(inc.output_id)
+                or (closing is not None and closing.status == IncidentStatus.CLOSED)
+            ):
+                continue
+            started = inc.started_at or inc.opened_at
+            minutes = round((now - inc.opened_at).total_seconds() / 60)
+            escalations.append(Alert(
+                incident_id=inc.id, output_id=inc.output_id, severity=inc.severity, event="escalated", timestamp=now,
+                message=f"Aucun accusé de réception depuis {minutes} min : {inc.incident_type.value} sur {inc.output_id}",
+                incident_type=inc.incident_type, duration_seconds=(now - started).total_seconds(), started_at=started,
+            ))
+        return escalations
 
     def _features(self, sample: TrafficSample, forecast: ForecastResult, baseline: LossBaseline) -> dict[str, float]:
         recent = self._recent[sample.output_id]

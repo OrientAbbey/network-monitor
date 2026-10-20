@@ -63,6 +63,7 @@ protocole détaillé dans « Mesures »). Évaluation : `python -m network_monit
 | Aucune vérité terrain en exploitation | verdict vrai/faux positif, précision mesurée sur les incidents jugés, re-balayage `--from-db` | `tests/test_feedback_maintenance.py`, e2e (le verdict change précision et rapport, puis se retire) |
 | Un moniteur qui s'arrête sans prévenir | `/metrics`, `/health/ready` (503 avec raisons), signal de vie externe, règles d'alerte d'exemple | `tests/test_observability.py` (serveur HTTP local), `promtool`, vrai Prometheus |
 | **URL secrètes écrites dans le journal** : `httpx` journalise l'URL complète à INFO (jeton Telegram, signal de vie) | logger `httpx` relevé à WARNING | `tests/test_observability.py` — **échouait avant le correctif** |
+| Une alerte sans réponse ne montait jamais : personne ne pouvait dire « je m'en occupe » | prise en charge (`PUT/DELETE /incidents/{id}/ack`) et escalade à un niveau (`notifications.escalate_after`) vers un second groupe | `tests/test_feedback_maintenance.py` (vraie boucle sur le Mock, 4 scénarios + table de conditions), `tests/test_incidents.py`, e2e |
 | Aucune intégration continue | `.github/workflows/ci.yml` | ❓ jamais exécutée ; `actionlint` propre ; mêmes commandes reproduites en local |
 
 ## Mesures (Mock ; à refaire sur données réelles)
@@ -127,6 +128,17 @@ Suite backend contre de **vrais services** (MariaDB 10.11.14, Prometheus 2.45.3 
 ### Mesure du point d'accès « mesure la plus proche »
 
 Requêtes émises par le tableau « Comparatif temporel » à chaque rafraîchissement (3 sorties), comptées dans Chromium contre le vrai backend : **24** requêtes `history` bornées avant, **1** requête `GET /outputs/nearest` après. Le test navigateur correspondant échoue sur l'ancien code. Backend : 9 tests (dont fenêtre de recherche, « le plus proche » et non « le dernier », validation) ; Vitest 52, Playwright 17.
+
+### Mesure de la prise en charge et de l'escalade
+
+Suite backend contre de vrais services (MariaDB 10.11.14, Prometheus 2.45.3) : **265 passés, 0 ignoré**. Vitest : 57. Playwright : 19, dont deux scénarios sur le vrai serveur (escalade réelle d'une panne amont, une seule fois, jamais pour l'aval ; prise en charge dans l'interface qui persiste et empêche l'escalade au-delà du délai).
+
+| Vérification | Résultat |
+|---|---|
+| Escalade sur la vraie boucle (Mock) | une seule alerte `escalated` par incident non pris en charge, entre 15 et 20 min après l'ouverture, reçue uniquement par le second groupe ; le groupe principal ne la reçoit pas |
+| Tests de mutation (backend) | acquittement ignoré, garde « une seule fois » retirée, rétablissement ignoré, maintenance ignorée, délai ignoré : chacune fait échouer au moins un test |
+| Test de mutation (navigateur, vrai serveur) | acquittements ignorés par le serveur → le scénario échoue (`escalated_at` renseigné au lieu de `null`) |
+| **Erreur de ma part, corrigée** | ma première hypothèse (« un incident bref est déjà en retour à la normale à l'échéance ») était fausse : l'instrumentation de la boucle a montré qu'il reste ouvert et oscille. La condition « en retour à la normale » est donc testée sur chaque cas séparément (`_escalations`) et sur le moteur (`is_recovering`), pas par un scénario de bout en bout |
 
 Image : sans Docker dans cet environnement, j'ai reproduit les étapes du `Dockerfile` à la main : build du front avec `VITE_API_BASE_URL=""` (le bundle ne contient plus l'adresse par défaut : même origine), environnement vierge avec le seul `requirements.txt` (aucun outil de dev, fuseau `Africa/Douala` disponible), démarrage en production sous un utilisateur sans privilèges. Constaté : `/` sert l'interface, le JS passe de 253 à 78 Ko en gzip, `/docs` et `/openapi.json` répondent 404, `PUT /config` répond 401 sans session et 200 avec, une seconde instance sur la même base est refusée avec un message explicite. Non vérifié : la construction de l'image elle-même, `HEALTHCHECK`, `read_only` et `cap_drop` du compose.
 

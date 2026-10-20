@@ -192,6 +192,17 @@ class IncidentFeedbackRow(Base):
     note: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class IncidentAckRow(Base):
+    """Prise en charge d'un incident par un opérateur, **hors** de la table des incidents (même raison que les
+    verdicts : le moteur réécrit la ligne de l'incident à chaque pas). Table nouvelle : `create_all` la crée dans une
+    base existante sans migration."""
+
+    __tablename__ = "incident_ack"
+    incident_id: Mapped[str] = mapped_column(String, primary_key=True)
+    by: Mapped[str] = mapped_column(String)
+    at: Mapped[datetime] = mapped_column(_TS)
+
+
 class MaintenanceRow(Base):
     __tablename__ = "maintenance_windows"
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -292,6 +303,11 @@ class Repository(ABC):
         self, incident_id: str, verdict: IncidentVerdict | None, by: str, at: datetime, note: str | None = None
     ) -> None:
         """Enregistre (ou, avec `verdict=None`, retire) le jugement d'un opérateur sur un incident."""
+        ...
+
+    @abstractmethod
+    def set_ack(self, incident_id: str, by: str | None, at: datetime) -> None:
+        """Enregistre (ou, avec `by=None`, retire) la prise en charge d'un incident par un opérateur."""
         ...
 
     @abstractmethod
@@ -703,7 +719,7 @@ class SqlAlchemyRepository(Repository):
         active_statuses = ["suspect", "open", "stale"]
         with self._session() as session:
             rows = session.query(IncidentRow).filter(IncidentRow.status.in_(active_statuses)).all()
-            return self._with_feedback(session, [_incident_from_row(r) for r in rows])
+            return self._with_operator_state(session, [_incident_from_row(r) for r in rows])
 
     def list_incidents(self, statuses: list[str] | None = None, limit: int = 50) -> list[Incident]:
         with self._session() as session:
@@ -711,25 +727,37 @@ class SqlAlchemyRepository(Repository):
             if statuses:
                 query = query.filter(IncidentRow.status.in_(statuses))
             rows = query.order_by(IncidentRow.last_seen_at.desc()).limit(limit).all()
-            return self._with_feedback(session, [_incident_from_row(r) for r in rows])
+            return self._with_operator_state(session, [_incident_from_row(r) for r in rows])
 
     def get_incident(self, incident_id: str) -> Incident | None:
         with self._session() as session:
             row = session.query(IncidentRow).filter(IncidentRow.id == incident_id).one_or_none()
-            return self._with_feedback(session, [_incident_from_row(row)])[0] if row is not None else None
+            return self._with_operator_state(session, [_incident_from_row(row)])[0] if row is not None else None
 
     @staticmethod
-    def _with_feedback(session: Session, incidents: list[Incident]) -> list[Incident]:
-        """Joint le jugement de l'opérateur (table à part) aux incidents lus."""
+    def _with_operator_state(session: Session, incidents: list[Incident]) -> list[Incident]:
+        """Joint aux incidents lus ce que les opérateurs et l'escalade y ont ajouté, hors de leur table : le jugement,
+        la prise en charge, et l'instant de l'alerte `escalated` s'il y en a eu une."""
         if not incidents:
             return incidents
-        rows = session.query(IncidentFeedbackRow).filter(IncidentFeedbackRow.incident_id.in_([i.id for i in incidents])).all()
-        by_id = {r.incident_id: r for r in rows}
+        ids = [i.id for i in incidents]
+        feedback = {r.incident_id: r for r in session.query(IncidentFeedbackRow).filter(IncidentFeedbackRow.incident_id.in_(ids))}
+        acks = {r.incident_id: r for r in session.query(IncidentAckRow).filter(IncidentAckRow.incident_id.in_(ids))}
+        escalated = dict(
+            session.query(AlertRow.incident_id, func.min(AlertRow.timestamp))
+            .filter(AlertRow.incident_id.in_(ids), AlertRow.event == "escalated")
+            .group_by(AlertRow.incident_id)
+        )
         for incident in incidents:
-            fb = by_id.get(incident.id)
+            fb = feedback.get(incident.id)
             if fb is not None:
                 incident.verdict = IncidentVerdict(fb.verdict)
                 incident.verdict_by, incident.verdict_at, incident.verdict_note = fb.by, _as_utc(fb.at), fb.note
+            ack = acks.get(incident.id)
+            if ack is not None:
+                incident.acknowledged_by, incident.acknowledged_at = ack.by, _as_utc(ack.at)
+            if incident.id in escalated:
+                incident.escalated_at = _as_utc(escalated[incident.id])
         return incidents
 
     def set_feedback(
@@ -742,6 +770,14 @@ class SqlAlchemyRepository(Repository):
                 session.merge(
                     IncidentFeedbackRow(incident_id=incident_id, verdict=verdict.value, by=by, at=_to_utc(at), note=note)
                 )
+            session.commit()
+
+    def set_ack(self, incident_id: str, by: str | None, at: datetime) -> None:
+        with self._session() as session:
+            if by is None:
+                session.query(IncidentAckRow).filter(IncidentAckRow.incident_id == incident_id).delete()
+            else:
+                session.merge(IncidentAckRow(incident_id=incident_id, by=by, at=_to_utc(at)))
             session.commit()
 
     @staticmethod
@@ -794,7 +830,7 @@ class SqlAlchemyRepository(Repository):
                 .order_by(IncidentRow.opened_at)
                 .all()
             )
-            return self._with_feedback(session, [_incident_from_row(r) for r in rows])
+            return self._with_operator_state(session, [_incident_from_row(r) for r in rows])
 
     def sample_stats(self, start: datetime, end: datetime) -> dict[str, SampleStats]:
         with self._session() as session:

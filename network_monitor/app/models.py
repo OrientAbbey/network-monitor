@@ -355,6 +355,11 @@ class Incident(BaseModel):
     verdict_at: datetime | None = None
     verdict_note: str | None = None
     """Renseignés depuis la table des retours (`PUT /incidents/{id}/feedback`), jamais par le moteur."""
+    acknowledged_by: str | None = None
+    acknowledged_at: datetime | None = None
+    """« Je m'en occupe » (`PUT /incidents/{id}/ack`) : table à part, jamais écrit par le moteur. Un incident acquitté n'est pas escaladé."""
+    escalated_at: datetime | None = None
+    """Instant de l'alerte `escalated` de cet incident, s'il y en a eu une (lu dans les alertes, jamais écrit ici)."""
 
     @model_validator(mode="after")
     def timestamps_are_ordered(self) -> Incident:

@@ -186,3 +186,19 @@ def test_multiple_outputs_are_tracked_independently():
     mgr.process(_result(0, 0.1, output_id="OUT_002"))
     active = {i.output_id: i.status for i in mgr.active_incidents()}
     assert active == {"OUT_001": IncidentStatus.OPEN}
+
+
+def test_manager_knows_when_an_incident_is_recovering():
+    """Utilisé par l'escalade : on ne réveille pas quelqu'un pour une panne qui est déjà revenue à la normale."""
+    mgr = _manager()
+    assert mgr.is_recovering("OUT_017") is False  # sortie inconnue
+    for m, s in [(0, 0.6), (5, 0.8), (10, 0.85), (15, 0.9)]:
+        mgr.process(_result(m, s))
+    assert mgr.active_incidents() and mgr.is_recovering("OUT_017") is False  # ouvert, anomalie en cours
+    mgr.process(_result(20, 0.1))  # sous close_score : retour à la normale à confirmer
+    assert mgr.is_recovering("OUT_017") is True
+    mgr.process(_result(25, 0.9))  # rechute avant la clôture
+    assert mgr.is_recovering("OUT_017") is False
+    for m in (30, 35, 40, 45):  # puis retour durable : l'incident se ferme
+        mgr.process(_result(m, 0.1))
+    assert mgr.active_incidents() == [] and mgr.is_recovering("OUT_017") is False
