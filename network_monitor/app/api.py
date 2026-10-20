@@ -528,6 +528,32 @@ def _ensure_known_output(output_id: str) -> None:
         raise HTTPException(status_code=404, detail=f"Sortie inconnue : {output_id}")
 
 
+_NEAREST_BEFORE, _NEAREST_AFTER = timedelta(minutes=35), timedelta(minutes=10)
+"""Tolérance de recherche autour d'un instant : au-delà, on dit « pas de mesure » plutôt que d'en inventer une."""
+_MAX_NEAREST_INSTANTS = 16
+
+
+@app.get("/outputs/nearest", response_model=dict[str, dict[str, TrafficSample | None]])
+def outputs_nearest(
+    ago_minutes: Annotated[
+        list[Annotated[int, Field(ge=0, le=_MAX_WINDOW_SPAN.days * 24 * 60)]], Query(min_length=1, max_length=_MAX_NEAREST_INSTANTS)
+    ],
+) -> dict[str, dict[str, TrafficSample | None]]:
+    """Pour chaque sortie et chaque `ago_minutes` (relatif à l'heure *serveur*), la mesure la plus proche de
+    `state.now - ago` dans [-35 min, +10 min], ou `null`. Remplace, pour le tableau comparatif, une requête
+    `history` par sortie et par instant (24 requêtes par rafraîchissement) par une seule."""
+    instants = sorted(set(ago_minutes))
+    result: dict[str, dict[str, TrafficSample | None]] = {}
+    for output_id in state.source.list_outputs():
+        found: dict[str, TrafficSample | None] = {}
+        for ago in instants:
+            target = state.now - timedelta(minutes=ago)
+            samples = state.storage.get_history(output_id, target - _NEAREST_BEFORE, target + _NEAREST_AFTER)
+            found[str(ago)] = min(samples, key=lambda x: abs(x.timestamp - target), default=None)
+        result[output_id] = found
+    return result
+
+
 @app.get("/outputs/{output_id}/history", response_model=list[TrafficSample])
 def output_history(
     output_id: str,

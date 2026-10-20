@@ -107,6 +107,10 @@ export const api = {
   // `days` : fenêtre calculée par le SERVEUR (son horloge, pas celle du navigateur).
   availability: (days: number) => request<AvailabilityReport>("/reports/availability", { params: { days } }),
   availabilityCsvUrl: (days: number) => new URL(`/reports/availability?format=csv&days=${days}`, API_BASE || window.location.origin).toString(),
+  // Pour chaque sortie, la mesure la plus proche de « maintenant − N minutes » (heure SERVEUR) : une requête au lieu d'une
+  // par sortie et par instant. Clés de la réponse : sortie, puis N en texte ; `null` si aucune mesure assez proche.
+  nearest: (agoMinutes: number[]) =>
+    request<Record<string, Record<string, TrafficSample | null>>>("/outputs/nearest", { params: { ago_minutes: agoMinutes.map(String) } }),
   alerts: (outputId?: string, limit = 20) => request<Alert[]>("/alerts", { params: { output_id: outputId, limit } }),
   // Verdict d'un opérateur (connecté) ; `null` le retire. Seul un incident confirmé peut être jugé (409 sinon).
   setFeedback: (id: string, verdict: Verdict | null) =>

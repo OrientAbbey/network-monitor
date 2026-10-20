@@ -20,6 +20,7 @@ vi.mock("./api", () => {
       monitoringStatus: vi.fn(async () => ({ running: true, simulated_now: new Date(T0).toISOString() })),
       getConfig: vi.fn(async () => cfg),
       history: vi.fn(async () => history),
+      nearest: vi.fn(async () => ({})),
       forecast: vi.fn(async () => []),
       forecastAhead: vi.fn(async () => []),
       availability: vi.fn(async () => ({
@@ -422,5 +423,38 @@ describe("Alertes retenues et disponibilité", () => {
     const row = await within(await screen.findByRole("region", { name: /disponibilité/i })).findByRole("row", { name: /OUT_001/ });
     expect(row.textContent).toMatch(/30 min/); // 1 800 s de maintenance
     expect(row.textContent).toMatch(/\+1 faux positif exclu\)/);
+  });
+});
+
+describe("Comparatif temporel", () => {
+  const point = (traffic: number, loss: number) => ({ timestamp: NOW, output_id: "OUT_001", traffic_mbps: traffic, loss_percent: loss });
+  const comparison = async () => within(await screen.findByRole("region", { name: /comparatif temporel/i }));
+
+  it("charge toutes les valeurs en UNE requête, sur les sept instants distincts, au lieu d'une par sortie et par instant", async () => {
+    render(<Dashboard />);
+    await waitFor(() => expect(api.nearest).toHaveBeenCalledTimes(1));
+    expect(api.nearest).toHaveBeenCalledWith([0, 5, 10, 1440, 1445, 10080, 10085]); // (0, 5, 1 j, 1 sem.) × (valeur, 5 min avant), sans doublon
+    // Le graphe lit encore l'historique, mais le tableau ne le fait plus : aucune requête `history` bornée par deux dates.
+    expect(vi.mocked(api.history).mock.calls.every(([, , until]) => until === undefined)).toBe(true);
+  });
+
+  it("affiche valeur, variation et « — » quand une mesure manque", async () => {
+    vi.mocked(api.nearest).mockResolvedValueOnce({
+      OUT_001: { "0": point(5000, 0.5), "5": point(4000, 0.4), "10": point(4000, 0.4), "1440": null, "1445": null, "10080": point(2500, 0.1), "10085": null },
+    });
+    render(<Dashboard />);
+    const row = (await (await comparison()).findByRole("row", { name: /OUT_001/ }));
+    const cells = within(row).getAllByRole("cell");
+    expect(cells[1].textContent).toMatch(/5\.00.*▲ 25\.0%/); // actuelle : 5 Gbps contre 4 Gbps cinq minutes plus tôt
+    expect(cells[2].textContent).toMatch(/4\.00.*–/); // précédente : 4 contre 4
+    expect(cells[3].textContent).toBe("—"); // −1 j : aucune mesure assez proche
+    expect(cells[4].textContent).toBe("2.50"); // −1 sem. : une valeur mais rien à comparer, pas de variation inventée
+  });
+
+  it("montre « — » partout si la requête échoue, sans planter", async () => {
+    vi.mocked(api.nearest).mockRejectedValueOnce(new Error("GET /outputs/nearest -> 500"));
+    render(<Dashboard />);
+    const row = await (await comparison()).findByRole("row", { name: /OUT_001/ });
+    expect(within(row).getAllByRole("cell").slice(1).every((c) => c.textContent === "—")).toBe(true);
   });
 });

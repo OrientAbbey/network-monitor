@@ -1,7 +1,7 @@
 """Tests de l'API FastAPI (§37)."""
 
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -192,6 +192,80 @@ def test_alerts_endpoint_lists_persisted_alerts(client):
     r = client.get("/alerts")
     assert r.status_code == 200 and isinstance(r.json(), list)
     assert client.get("/alerts", params={"output_id": "inconnue"}).status_code == 404
+
+
+def test_nearest_returns_what_history_would_in_a_single_request(client):
+    # Le stockage ne contient que ce qui a été mesuré depuis le démarrage (ARCHITECTURE §11) : on attend d'avoir ~70 min de
+    # mesures simulées pour que 30 et 45 min en arrière tombent au milieu des données, avec des échantillons des deux côtés
+    # de la cible. Alors seulement « le plus proche » se distingue de « le dernier » (à 0 et 5 min, les données s'arrêtent là).
+    _wait_until(lambda: all(len(client.get(f"/outputs/{o}/history", params={"span_hours": 3}).json()) >= 14 for o in ("OUT_001", "OUT_002", "OUT_003")))
+    state = api_module.state
+    state.stop()  # fige l'horloge : sinon `state.now` avance entre les deux lectures comparées
+    r = client.get("/outputs/nearest", params=[("ago_minutes", m) for m in (0, 5, 5, 30, 45)])  # le doublon est toléré
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"OUT_001", "OUT_002", "OUT_003"}
+    for output_id, by_ago in body.items():
+        assert set(by_ago) == {"0", "5", "30", "45"}
+        for ago, sample in by_ago.items():
+            target = state.now - timedelta(minutes=int(ago))
+            window = client.get(
+                f"/outputs/{output_id}/history",
+                params={"since": (target - timedelta(minutes=35)).isoformat(), "until": (target + timedelta(minutes=10)).isoformat()},
+            ).json()
+            assert window and sample is not None
+            expected = min(window, key=lambda x: abs(datetime.fromisoformat(x["timestamp"]) - target))
+            assert sample == expected  # le même échantillon, avec les mêmes champs, que le calcul fait jusqu'ici dans le navigateur
+            if ago in ("30", "45"):
+                assert any(datetime.fromisoformat(x["timestamp"]) > datetime.fromisoformat(sample["timestamp"]) for x in window)  # des mesures plus tardives existent
+
+
+def test_nearest_searches_the_documented_window_and_says_null_when_empty(client, monkeypatch):
+    _wait_until(lambda: all(o["latest_sample"] for o in client.get("/outputs").json()))
+    state = api_module.state
+    state.stop()
+    asked = []
+
+    def nothing(output_id, start, end):
+        asked.append((output_id, start, end))
+        return []
+
+    monkeypatch.setattr(state.storage, "get_history", nothing)
+    body = client.get("/outputs/nearest", params={"ago_minutes": 90}).json()
+    assert all(by_ago == {"90": None} for by_ago in body.values())  # pas de mesure : null, jamais une valeur inventée
+    target = state.now - timedelta(minutes=90)
+    assert {(o, s, e) for o, s, e in asked} == {(o, target - timedelta(minutes=35), target + timedelta(minutes=10)) for o in body}
+
+
+def test_nearest_picks_the_closest_sample_not_the_first_or_the_last(client, monkeypatch):
+    _wait_until(lambda: all(o["latest_sample"] for o in client.get("/outputs").json()))
+    state = api_module.state
+    state.stop()
+    target = state.now - timedelta(minutes=60)
+    base = state.storage.get_history("OUT_001", state.now - timedelta(hours=1), state.now)[0]
+    around = [base.model_copy(update={"timestamp": target + timedelta(minutes=m)}) for m in (-30, -2, 8)]
+    monkeypatch.setattr(state.storage, "get_history", lambda output_id, start, end: around)
+    got = client.get("/outputs/nearest", params={"ago_minutes": 60}).json()["OUT_001"]["60"]
+    assert datetime.fromisoformat(got["timestamp"]) == target - timedelta(minutes=2)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},  # au moins un instant
+        {"ago_minutes": -1},
+        {"ago_minutes": 31 * 24 * 60 + 1},  # au-delà de la plage maximale autorisée partout ailleurs
+        {"ago_minutes": "hier"},
+        [("ago_minutes", m) for m in range(17)],  # au plus 16 instants
+    ],
+)
+def test_nearest_rejects_invalid_requests(client, params):
+    assert client.get("/outputs/nearest", params=params).status_code == 422
+
+
+def test_nearest_accepts_the_maximum_size_and_range(client):
+    params = [("ago_minutes", m) for m in range(15)] + [("ago_minutes", 31 * 24 * 60)]
+    assert client.get("/outputs/nearest", params=params).status_code == 200
 
 
 def _wait_until(condition, timeout=20.0):

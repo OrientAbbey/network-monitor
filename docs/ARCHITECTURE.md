@@ -151,7 +151,7 @@ Un thread relit les envois dus toutes les 2 s :
 
 ## 7. API
 
-Lecture, sans connexion : `GET /health`, `/health/ready`, `/metrics`, `/outputs`, `/outputs/{id}/history|anomalies|forecast|forecast/ahead`,
+Lecture, sans connexion : `GET /health`, `/health/ready`, `/metrics`, `/outputs`, `/outputs/nearest` (la mesure la plus proche de « maintenant − N minutes », pour toutes les sorties en une requête : le tableau comparatif), `/outputs/{id}/history|anomalies|forecast|forecast/ahead`,
 `/incidents`, `/incidents/{id}`, `/alerts` (par défaut sans les signaux faibles ; `all=true` pour l'audit), `/maintenance`, `/reports/availability` (JSON ou CSV), `/reports/precision`, `/monitoring/status`, `/config`.
 Avec connexion (`Authorization: Bearer`, session obtenue par `POST /auth/login` ou jeton machine `NM_API_TOKEN`) :
 `PUT /config`, `POST /monitoring/start|stop`, `POST /maintenance`, `DELETE /maintenance/{id}`, `PUT /incidents/{id}/feedback`, `GET /notifications`, `POST /notifications/test/{canal}`.
@@ -184,8 +184,8 @@ mesures purgées vont dans `archive_dir/<sortie encodée>/<jour>.parquet`.
 
 Cadence : sorties/incidents/état toutes les 4 s, graphe déplié toutes les 5 s (incrémental : seulement les
 points postérieurs au dernier connu, invalidation des réponses en vol quand la fenêtre change), tableau comparatif
-toutes les 15 s, rapport de disponibilité toutes les 60 s. Le tableau comparatif reste coûteux : 8 requêtes par sortie et
-par rafraîchissement (4 fenêtres × valeur courante et précédente), faute d'endpoint « valeur la plus proche d'un instant ».
+toutes les 15 s, rapport de disponibilité toutes les 60 s. Le tableau comparatif fait **une seule requête** par
+rafraîchissement (`GET /outputs/nearest`, 7 instants distincts relatifs à l'horloge du serveur) ; il en faisait 24 pour 3 sorties.
 
 Accessibilité (vérifiée par axe-core dans un vrai navigateur, WCAG 2.x A/AA) : repères (`header`, `main`, `section`),
 lien d'évitement, zones `aria-live` pour alertes et incidents, graphe focalisable avec flèches/Origine/Fin/Échap, un seul

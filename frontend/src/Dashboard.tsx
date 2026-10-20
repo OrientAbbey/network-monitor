@@ -381,55 +381,31 @@ function TrendChip({ current, previous, formatValue, threshold }: {
   );
 }
 
-async function fetchNearest(outputId: string, targetDate: Date): Promise<TrafficSample | null> {
-  const since = new Date(targetDate.getTime() - 35 * 60_000);
-  const until = new Date(targetDate.getTime() + 10 * 60_000);
-  try {
-    const points = await api.history(outputId, since.toISOString(), until.toISOString());
-    if (!points.length) return null;
-    let best: TrafficSample | null = null;
-    let bestDist = Infinity;
-    for (const p of points) {
-      const d = Math.abs(new Date(p.timestamp).getTime() - targetDate.getTime());
-      if (d < bestDist) { bestDist = d; best = p; }
-    }
-    return best;
-  } catch {
-    return null;
-  }
-}
-
 type CellPair = { key: string; cur: TrafficSample | null; prev: TrafficSample | null };
 
-function SummaryTable({ outputIds, thresholds, serverNow }: { outputIds: string[]; thresholds: Thresholds; serverNow: Date | null }) {
+/** Fenêtres du tableau, en minutes avant « maintenant » ; chacune compare sa valeur à celle de 5 min plus tôt. */
+const SUMMARY_WINDOWS = [
+  { key: "now", ago: 0 },
+  { key: "prev", ago: 5 },
+  { key: "day", ago: 24 * 60 },
+  { key: "week", ago: 7 * 24 * 60 },
+];
+
+function SummaryTable({ outputIds, thresholds }: { outputIds: string[]; thresholds: Thresholds }) {
   const [rows, setRows] = useState<Record<string, CellPair[]>>({});
-  const serverNowRef = useRef(serverNow);
-  serverNowRef.current = serverNow;
 
   const refresh = useCallback(async () => {
-    const now = serverNowRef.current;
-    if (!now) return;
-    const windows = [
-      { key: "now", offset: 0 },
-      { key: "prev", offset: 5 * 60_000 },
-      { key: "day", offset: 24 * 3600_000 },
-      { key: "week", offset: 7 * 24 * 3600_000 },
-    ];
-    const next: Record<string, CellPair[]> = {};
-    await Promise.all(
-      outputIds.map(async (id: string) => {
-        const perWindow = await Promise.all(
-          windows.map(async (w) => {
-            const target = new Date(now.getTime() - w.offset);
-            const prevTarget = new Date(target.getTime() - 5 * 60_000);
-            const [cur, prev] = await Promise.all([fetchNearest(id, target), fetchNearest(id, prevTarget)]);
-            return { key: w.key, cur, prev };
-          })
-        );
-        next[id] = perWindow;
-      })
-    );
-    setRows(next);
+    if (outputIds.length === 0) return;
+    // Sept instants distincts, résolus d'un coup par le serveur sur SON horloge (jamais celle du navigateur).
+    const agos = [...new Set(SUMMARY_WINDOWS.flatMap((w) => [w.ago, w.ago + 5]))];
+    try {
+      const nearest = await api.nearest(agos);
+      setRows(Object.fromEntries(outputIds.map((id) => [id, SUMMARY_WINDOWS.map((w) => ({
+        key: w.key, cur: nearest[id]?.[String(w.ago)] ?? null, prev: nearest[id]?.[String(w.ago + 5)] ?? null,
+      }))])));
+    } catch {
+      setRows({}); // « — » partout plutôt que des valeurs périmées
+    }
   }, [outputIds.join(",")]);
 
   usePolling(refresh, 15000, [refresh]);
@@ -986,7 +962,7 @@ export default function Dashboard() {
             {tableExpanded ? "−" : "+"}
           </button>
         </div>
-        {tableExpanded && <SummaryTable outputIds={outputs.map((o) => o.output_id)} thresholds={deltaThresholds} serverNow={monitoringStatus ? new Date(monitoringStatus.simulated_now) : null} />}
+        {tableExpanded && <SummaryTable outputIds={outputs.map((o) => o.output_id)} thresholds={deltaThresholds} />}
       </section>
 
       <section className="nm-panel nm-table-panel" aria-labelledby="h-config">

@@ -124,6 +124,10 @@ Suite backend contre de **vrais services** (MariaDB 10.11.14, Prometheus 2.45.3 
 | Re-balayage `--from-db` (Mock, 1 incident long jugé vrai, 1 coupure de 20 min jugée fausse) | sur 162 réglages de la grille, 54 éliminent le faux positif en gardant le vrai, 108 le gardent ; sans réglage, le rejeu reproduit l'état d'origine |
 | Tests de mutation | topologie retirée du serveur e2e → tests d'inhibition en échec ; faux positifs exclus non affichés → test de verdict en échec ; rapprochement temporel du rejeu cassé → 2 tests en échec ; tolérance de péremption × 100 → test de santé en échec |
 
+### Mesure du point d'accès « mesure la plus proche »
+
+Requêtes émises par le tableau « Comparatif temporel » à chaque rafraîchissement (3 sorties), comptées dans Chromium contre le vrai backend : **24** requêtes `history` bornées avant, **1** requête `GET /outputs/nearest` après. Le test navigateur correspondant échoue sur l'ancien code. Backend : 9 tests (dont fenêtre de recherche, « le plus proche » et non « le dernier », validation) ; Vitest 52, Playwright 17.
+
 Image : sans Docker dans cet environnement, j'ai reproduit les étapes du `Dockerfile` à la main : build du front avec `VITE_API_BASE_URL=""` (le bundle ne contient plus l'adresse par défaut : même origine), environnement vierge avec le seul `requirements.txt` (aucun outil de dev, fuseau `Africa/Douala` disponible), démarrage en production sous un utilisateur sans privilèges. Constaté : `/` sert l'interface, le JS passe de 253 à 78 Ko en gzip, `/docs` et `/openapi.json` répondent 404, `PUT /config` répond 401 sans session et 200 avec, une seconde instance sur la même base est refusée avec un message explicite. Non vérifié : la construction de l'image elle-même, `HEALTHCHECK`, `read_only` et `cap_drop` du compose.
 
 ## Rectifications de la revue initiale

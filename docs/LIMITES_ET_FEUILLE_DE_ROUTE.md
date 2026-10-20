@@ -114,9 +114,9 @@ corrigé et mesuré). Rien n'y est caché derrière un « à peu près » : quan
 
 ### 2.7 Frontend
 
-- **Le tableau comparatif** émet 8 requêtes par sortie à chaque rafraîchissement de 15 s (4 fenêtres × valeur courante et précédente) : 24 pour
-  3 sorties, **240 pour 30 sorties (calcul, non mesuré)**, faute d'un point d'accès « valeur la plus proche d'un instant ». Le cycle global mesuré
-  (1,7 Ko) grâce à gzip/ETag cache le nombre de requêtes, pas leur coût côté serveur. C'est ce qui limitera l'interface avant la boucle.
+- **Le tableau comparatif** fait une seule requête HTTP par rafraîchissement de 15 s (mesuré : 24 avant, 1 maintenant, pour 3 sorties). Le coût n'a pas disparu,
+  il a changé de côté : le serveur fait 7 lectures de stockage par sortie (21 pour 3 sorties, **210 pour 30 sorties : calcul, non mesuré**), chacune bornée à 45 minutes
+  de mesures. À mesurer avant de passer à beaucoup de sorties. À −1 jour et −1 semaine, le tableau affiche « — » tant que le stockage ne remonte pas assez loin (§11 de l'architecture).
 - **Un seul navigateur testé** (Chromium). Ni Firefox, ni Safari, ni mobile réel (seulement une fenêtre de 375 px dans Chromium).
 - **Pas de test visuel de non-régression** (captures de référence).
 - **Textes en français uniquement**, non externalisés.
@@ -137,7 +137,7 @@ corrigé et mesuré). Rien n'y est caché derrière un « à peu près » : quan
 
 ## 3. Fonctionnalités proposées mais non réalisées
 
-**Réalisées depuis** (voir §1 et §2.8) : fenêtres de maintenance et inhibition amont/aval, retour « faux/vrai positif » et re-balayage des seuils, `/metrics` et signal de vie externe. Les numéros ci-dessous sont conservés.
+**Réalisées depuis** (voir §1 et §2.8) : fenêtres de maintenance et inhibition amont/aval, retour « faux/vrai positif » et re-balayage des seuils, `/metrics` et signal de vie externe, et le point d'accès « mesure la plus proche d'un instant » (`GET /outputs/nearest` : le tableau comparatif passe de 24 requêtes par rafraîchissement à 1, mesuré dans un vrai navigateur). Les numéros ci-dessous sont conservés.
 
 Chaque ligne : le besoin, d'où il vient, l'effort estimé (S ≈ 1 jour, M ≈ 2–4 jours, L > 4 jours) et comment savoir que c'est réussi.
 Les recherches datent du 1er octobre 2026 et **sont à refaire avant de s'y fier** (URLs non conservées).
@@ -151,7 +151,6 @@ Les recherches datent du 1er octobre 2026 et **sont à refaire avant de s'y fier
 | 8 | **Rôles** (lecture, opérateur, administrateur) et **SSO** | Aujourd'hui tout utilisateur connecté peut tout faire. | M–L | Un opérateur ne peut pas modifier les seuils ; connexion par l'annuaire de l'entreprise. |
 | 9 | **Corrélation entre sorties** (topologie) | L'inhibition amont/aval existe (topologie déclarée à la main) ; il reste, plus largement, remonter à la cause (liens partageant un équipement ou une alimentation). Les coupures d'électricité et de fibre sont citées par le régulateur comme principaux facteurs de disponibilité. | L | Un scénario de panne d'alimentation multi-sorties produit un seul incident « cause commune ». |
 | 10 | **WhatsApp** | Très utilisé dans la région, mais l'API entreprise n'est pas gratuite et n'a pas été évaluée. | ? | — |
-| 11 | **Endpoint « valeur la plus proche d'un instant »** | Supprime la plus grosse partie des requêtes du tableau comparatif (§2.7). | S | 24 requêtes → 1 par rafraîchissement. |
 | 12 | **Messages d'alerte configurables et multilingues** | Aujourd'hui fixes, en français. | S | Modèles de messages dans la configuration. |
 
 ## 4. Décisions reportées

@@ -334,3 +334,20 @@ test("créer puis annuler une maintenance : horaires relatifs à l'horloge du se
   const after = (await (await request.get("/maintenance")).json()) as { reason: string; state: string }[];
   expect(after.find((w) => w.reason === "E2E remplacement de carte")?.state).toBe("cancelled");
 });
+
+test("le comparatif charge ses valeurs en une requête par rafraîchissement, sans interroger l'historique par sortie et par instant", async ({ page }) => {
+  const nearest: URLSearchParams[] = [];
+  const boundedHistory: string[] = [];
+  page.on("request", (r) => {
+    const url = new URL(r.url());
+    if (url.pathname === "/outputs/nearest") nearest.push(url.searchParams);
+    if (/^\/outputs\/[^/]+\/history$/.test(url.pathname) && url.searchParams.has("until")) boundedHistory.push(r.url()); // l'ancienne méthode
+  });
+  await page.goto("/");
+  const row = page.getByRole("region", { name: /comparatif temporel/i }).getByRole("row", { name: /OUT_001/ });
+  await expect(row.getByRole("cell").nth(1)).toContainText(/\d+\.\d\d/, { timeout: 30_000 }); // une vraie valeur, issue du vrai backend
+  await expect(row.getByRole("cell").nth(3)).toHaveText("—"); // −1 j : le stockage ne remonte pas avant le démarrage, et le dit
+  expect(nearest.length).toBeGreaterThanOrEqual(1);
+  for (const params of nearest) expect(params.getAll("ago_minutes")).toEqual(["0", "5", "10", "1440", "1445", "10080", "10085"]);
+  expect(boundedHistory).toEqual([]); // avant : 3 sorties × 4 fenêtres × 2 instants = 24 requêtes par rafraîchissement
+});
