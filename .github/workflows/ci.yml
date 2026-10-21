@@ -85,6 +85,9 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm audit --omit=dev --audit-level=high
+      - name: Audit complet (dépendances de développement comprises, informatif)
+        run: npm audit --audit-level=high
+        continue-on-error: true # un avis sur le serveur de développement ne doit pas bloquer, mais doit se voir
 
   e2e:
     name: Tests de navigateur (Playwright)

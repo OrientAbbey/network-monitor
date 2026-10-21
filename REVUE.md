@@ -65,6 +65,7 @@ protocole détaillé dans « Mesures »). Évaluation : `python -m network_monit
 | **URL secrètes écrites dans le journal** : `httpx` journalise l'URL complète à INFO (jeton Telegram, signal de vie) | logger `httpx` relevé à WARNING | `tests/test_observability.py` — **échouait avant le correctif** |
 | Une alerte sans réponse ne montait jamais : personne ne pouvait dire « je m'en occupe » | prise en charge (`PUT/DELETE /incidents/{id}/ack`) et escalade à un niveau (`notifications.escalate_after`) vers un second groupe | `tests/test_feedback_maintenance.py` (vraie boucle sur le Mock, 4 scénarios + table de conditions), `tests/test_incidents.py`, e2e |
 | Tout utilisateur connecté pouvait tout faire, y compris modifier les seuils | trois rôles (lecteur, opérateur, administrateur) ; ancien format de `NM_USERS` conservé (= administrateur), nouveau format à rôle obligatoire, démarrage refusé si invalide | `tests/test_auth.py` (matrice rôle × endpoint, compatibilité, erreurs), Vitest, e2e à trois comptes |
+| Avis de sécurité apparu pendant ce lot sur `vite` 8.3.0–8.3.2 (3 failles de `launch-editor`, serveur de développement ; deux concernent Windows) | `vite` 8.3.1 → 8.3.5 dans le lockfile (correctifs seulement) ; audit complet informatif ajouté à la CI | `npm audit` : 0 vulnérabilité ; typage, 61 Vitest et build revalidés |
 | Aucune intégration continue | `.github/workflows/ci.yml` | ❓ jamais exécutée ; `actionlint` propre ; mêmes commandes reproduites en local |
 
 ## Mesures (Mock ; à refaire sur données réelles)
