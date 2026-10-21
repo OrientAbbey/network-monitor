@@ -6,7 +6,7 @@
  * ~14 s réelles) et le même un pas plus tard sur OUT_002, déclarée en aval de OUT_001 ; il va 8× plus vite
  * que la démonstration : les tests lisent ses effets dans l'interface.
  */
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 // Rien ne doit casser en silence : aucune erreur JS, aucun échec de chargement, aucune requête hors origine.
 const problemsByTest = new Map<string, string[]>();
@@ -231,10 +231,10 @@ test("sur un écran de téléphone, la page ne déborde pas horizontalement", as
   await context.close();
 });
 
-async function signIn(page: Page) {
+async function signIn(page: Page, user = "alice") {
   await page.goto("/");
   await page.getByRole("button", { name: "Déplier la configuration", exact: true }).click();
-  await page.getByLabel("Identifiant").fill("alice");
+  await page.getByLabel("Identifiant").fill(user);
   await page.getByLabel("Mot de passe").fill("e2e-pass");
   await page.getByRole("button", { name: /se connecter/i }).click();
   await expect(page.getByText(/connecté en tant que/i)).toBeVisible();
@@ -396,4 +396,61 @@ test("prendre en charge un incident en cours le dit dans l'interface, persiste c
   await panel.getByRole("button", { name: "Retirer la prise en charge de l'incident de OUT_003" }).click();
   await expect(panel.locator(".nm-log-row", { hasText: /OUT_003 — traffic_drop/ })).not.toContainText("pris en charge par");
   expect((await get()).acknowledged_by).toBeNull();
+});
+
+async function tokenOf(request: APIRequestContext, user: string) {
+  const res = await request.post("/auth/login", { data: { username: user, password: "e2e-pass" } });
+  const body = (await res.json()) as { access_token: string; role: string };
+  return { headers: { Authorization: `Bearer ${body.access_token}` }, role: body.role };
+}
+
+test("un lecteur voit tout mais ne peut rien modifier : l'interface le dit, et le serveur refuse", async ({ page, request }) => {
+  await signIn(page, "carol");
+  await expect(page.getByText(/connecté en tant que/i)).toContainText("carol (lecteur");
+  const verdict = incidentsPanel(page).getByRole("button", { name: "Juger l'incident de OUT_001 : faux positif" });
+  await expect(verdict).toBeDisabled({ timeout: 60_000 });
+  await expect(verdict).toHaveAttribute("title", "Réservé au rôle opérateur ou supérieur");
+  await expect(page.getByRole("region", { name: /maintenance planifiée/i }).getByRole("button", { name: "Planifier" })).toBeDisabled();
+  const save = page.getByRole("button", { name: /envoyer à l'API/i });
+  await expect(save).toBeDisabled();
+  await expect(save).toHaveAttribute("title", "Réservé au rôle administrateur ou supérieur");
+
+  // Désactiver un bouton n'est qu'un confort : c'est le serveur qui refuse, avec une raison lisible.
+  const { headers, role } = await tokenOf(request, "carol");
+  expect(role).toBe("viewer");
+  const incidents = (await (await request.get("/incidents")).json()) as { id: string; output_id: string }[];
+  const incident = incidents.find((i) => i.output_id === "OUT_001")!;
+  const refused = await request.put(`/incidents/${incident.id}/feedback`, { headers, data: { verdict: "false_positive" } });
+  expect(refused.status()).toBe(403);
+  expect(((await refused.json()) as { detail: string }).detail).toMatch(/« operator » est requis.*« viewer »/);
+  expect((await request.get("/notifications", { headers })).status()).toBe(200); // la lecture protégée reste permise
+});
+
+test("un opérateur juge et planifie, mais ne touche ni aux seuils ni à l'arrêt de la surveillance", async ({ page, request }) => {
+  await signIn(page, "bob");
+  await expect(page.getByText(/connecté en tant que/i)).toContainText("bob (opérateur");
+  await expect(incidentsPanel(page).getByRole("button", { name: "Juger l'incident de OUT_001 : faux positif" })).toBeEnabled({ timeout: 60_000 });
+  await expect(page.getByRole("region", { name: /maintenance planifiée/i }).getByRole("button", { name: "Planifier" })).toBeDisabled(); // pas de motif saisi
+  await expect(page.getByRole("button", { name: /envoyer à l'API/i })).toBeDisabled(); // réservé à l'administrateur
+
+  const { headers, role } = await tokenOf(request, "bob");
+  expect(role).toBe("operator");
+  expect((await request.put("/config", { headers, data: { open_score: 0.7 } })).status()).toBe(403);
+  expect((await request.post("/monitoring/stop", { headers })).status()).toBe(403);
+  expect((await request.get("/monitoring/status")).status()).toBe(200);
+  const incidents = (await (await request.get("/incidents")).json()) as { id: string; output_id: string }[];
+  const id = incidents.find((i) => i.output_id === "OUT_001")!.id;
+  expect((await request.put(`/incidents/${id}/feedback`, { headers, data: { verdict: "true_positive" } })).status()).toBe(200);
+  expect((await request.put(`/incidents/${id}/feedback`, { headers, data: { verdict: null } })).status()).toBe(200); // état rétabli
+});
+
+test("un compte au format historique (sans rôle) garde tous ses droits d'administrateur", async ({ page, request }) => {
+  await signIn(page, "alice");
+  await expect(page.getByText(/connecté en tant que/i)).toContainText("alice (administrateur");
+  await expect(page.getByRole("button", { name: /envoyer à l'API/i })).toBeEnabled();
+  const { headers, role } = await tokenOf(request, "alice");
+  expect(role).toBe("admin");
+  const config = (await (await request.get("/config")).json()) as { alerts: unknown; incident: { open_score: number } };
+  const same = await request.put("/config", { headers, data: { open_score: config.incident.open_score } });
+  expect(same.status()).toBe(200); // modifier la configuration passe, avec la valeur déjà en place
 });

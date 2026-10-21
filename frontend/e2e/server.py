@@ -33,7 +33,9 @@ from network_monitor.app import api, auth  # noqa: E402
 from network_monitor.app.models import Severity  # noqa: E402
 from network_monitor.data.mock import AnomalyScenario, ScenarioType  # noqa: E402
 
-os.environ["NM_USERS"] = json.dumps({"alice": auth.hash_password("e2e-pass")})
+_hash = auth.hash_password("e2e-pass")
+# alice : ancien format (sans rôle), donc administratrice : vérifie qu'un déploiement existant garde tous ses droits.
+os.environ["NM_USERS"] = json.dumps({"alice": _hash, "bob": {"hash": _hash, "role": "operator"}, "carol": {"hash": _hash, "role": "viewer"}})
 
 state = api.state
 state.seconds_per_tick = 0.25

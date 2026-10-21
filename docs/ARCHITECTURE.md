@@ -160,7 +160,7 @@ Un thread relit les envois dus toutes les 2 s :
 
 Lecture, sans connexion : `GET /health`, `/health/ready`, `/metrics`, `/outputs`, `/outputs/nearest` (la mesure la plus proche de « maintenant − N minutes », pour toutes les sorties en une requête : le tableau comparatif), `/outputs/{id}/history|anomalies|forecast|forecast/ahead`,
 `/incidents`, `/incidents/{id}`, `/alerts` (par défaut sans les signaux faibles ; `all=true` pour l'audit), `/maintenance`, `/reports/availability` (JSON ou CSV), `/reports/precision`, `/monitoring/status`, `/config`.
-Avec connexion (`Authorization: Bearer`, session obtenue par `POST /auth/login` ou jeton machine `NM_API_TOKEN`) :
+Avec connexion (`Authorization: Bearer`, session obtenue par `POST /auth/login` ou jeton machine `NM_API_TOKEN`), **selon le rôle** — `viewer` : `GET /notifications` ; `operator` (+) : maintenance, verdicts, prise en charge ; `admin` (+) : `PUT /config`, démarrage/arrêt, envois d'essai. Un rôle insuffisant donne 403 avec le rôle requis. Le rôle est relu dans `NM_USERS` à chaque requête (pas gravé dans le jeton) ; `app/auth.py` :
 `PUT /config`, `POST /monitoring/start|stop`, `POST /maintenance`, `DELETE /maintenance/{id}`, `PUT /incidents/{id}/feedback`, `PUT|DELETE /incidents/{id}/ack`, `GET /notifications`, `POST /notifications/test/{canal}`.
 
 Garde-fous : datetimes sans fuseau refusés (422), fenêtres limitées à 31 jours (rapports : 366), erreurs de

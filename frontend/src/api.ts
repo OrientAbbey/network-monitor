@@ -19,8 +19,12 @@ const TIMEOUT_MS = 10_000;
 let apiToken: string | undefined = import.meta.env.VITE_API_TOKEN;
 let session: Session | null = null;
 
+export type Role = "viewer" | "operator" | "admin";
+const RANK: Record<Role, number> = { viewer: 1, operator: 2, admin: 3 };
+
 export interface Session {
   username: string;
+  role: Role;
   expiresAt: Date;
 }
 
@@ -37,6 +41,15 @@ export function hasApiToken(): boolean {
 /** Session en cours (null si déconnecté, jeton machine ou session expirée). */
 export function currentSession(): Session | null {
   return hasApiToken() ? session : null;
+}
+
+/**
+ * Faux seulement si l'on SAIT que le compte connecté n'a pas ce rôle. Déconnecté ou jeton machine : vrai, c'est le serveur qui
+ * tranche (et qui reste, dans tous les cas, la seule autorité : désactiver un bouton n'est qu'un confort).
+ */
+export function canAct(minimum: Role): boolean {
+  const current = currentSession();
+  return current === null || RANK[current.role] >= RANK[minimum];
 }
 
 export function logout(): void {
@@ -83,13 +96,14 @@ interface LoginResponse {
   access_token: string;
   expires_in: number;
   username: string;
+  role: Role;
 }
 
 /** Ouvre une session. Le mot de passe n'est ni conservé ni réutilisé après l'appel. */
 export async function login(username: string, password: string): Promise<Session> {
   const res = await request<LoginResponse>("/auth/login", { method: "POST", body: { username, password } });
   apiToken = res.access_token;
-  session = { username: res.username, expiresAt: new Date(Date.now() + res.expires_in * 1000) };
+  session = { username: res.username, role: res.role, expiresAt: new Date(Date.now() + res.expires_in * 1000) };
   return session;
 }
 

@@ -14,7 +14,7 @@ Limites connues (liste complète, avec ce qui est vérifié ou non : `docs/LIMIT
 
 - Sources : Mock (défaut), rejeu CSV ou Parquet (Polars), table SQL en lecture seule (testée sur SQLite et MariaDB 10.11) et **Prometheus** (`query_range`, validée sur un vrai Prometheus avec node_exporter). Aucune n'a été éprouvée sur un vrai réseau ni sur des compteurs SNMP d'équipements.
 - Alertes : Telegram (groupe), webhook signé et SMS de groupe sont testés contre des serveurs **simulés**, jamais contre les vrais services. Premier essai réel : `POST /notifications/test/{canal}`.
-- Authentification : identifiant et mot de passe (`NM_USERS`, scrypt), session signée à durée limitée, limitation des essais. Ni annuaire, ni rôles : tout utilisateur connecté peut tout modifier.
+- Authentification : identifiant et mot de passe (`NM_USERS`, scrypt), session signée à durée limitée, limitation des essais, trois rôles (lecteur, opérateur, administrateur). Pas d'annuaire (SSO).
 - Seuils d'incident réglés par mesure sur le Mock seulement (96 scénarios) : 0,04 faux incident par sortie et par jour, 87 scénarios détectés sur 96 (les 9 manqués sont des intermittents épars). Voir `REVUE.md`.
 - L'image Docker n'a pas pu être construite dans l'environnement de développement (pas de Docker) : ses étapes ont été reproduites à la main, voir `REVUE.md`. La CI (`.github/workflows/ci.yml`) la construit et la teste, mais **elle n'a pas encore tourné** : le premier `push` dira ce qu'elle vaut.
 - Le schéma SQLite est créé au démarrage sans migration : après une évolution du modèle de données, supprimer `network_monitor.db` (rien à conserver à ce stade).
@@ -68,7 +68,7 @@ Dockerfile, docker-compose.yml, .env.example   Déploiement en conteneur
 python -m venv .venv && source .venv/bin/activate   # Windows : .venv\Scripts\activate
 pip install -r requirements-dev.txt
 python -m network_monitor.app.auth hash        # génère le hachage d'un mot de passe
-export NM_USERS='{"alice": "<hachage>"}'        # utilisateurs autorisés (Windows : set NM_USERS=...)
+export NM_USERS='{"alice": {"hash": "<hachage>", "role": "admin"}, "bob": {"hash": "<hachage>", "role": "operator"}}'  # (Windows : set NM_USERS=...)
 export NM_AUTH_SECRET=$(python -c "import secrets; print(secrets.token_hex(32))")  # clé de signature des sessions
 # jeton machine optionnel pour des scripts : export NM_API_TOKEN=change-me
 python -m uvicorn network_monitor.app.api:app --reload
@@ -77,6 +77,12 @@ python -m uvicorn network_monitor.app.api:app --reload
 L'API calibre automatiquement 3 sorties Mock et lance le monitoring au
 démarrage (compter quelques secondes). Documentation interactive sur
 `http://127.0.0.1:8000/docs` (masquée si `NM_ENV` ≠ `development`).
+
+**Rôles.** `viewer` : lectures protégées. `operator` : en plus, prise en charge, verdicts et maintenance. `admin` : en plus, seuils (`PUT /config`),
+démarrage et arrêt de la surveillance, envois d'essai. Le rôle est **obligatoire** dans le nouveau format de `NM_USERS`. L'ancien format `{"alice": "<hachage>"}` reste
+valable et donne les droits d'administrateur (le service le signale au démarrage) : un déploiement existant ne perd rien en se mettant à jour. Le jeton machine
+`NM_API_TOKEN` est administrateur, sauf si `NM_API_TOKEN_ROLE` dit autrement. Changer un rôle demande de redémarrer le service ; les sessions déjà ouvertes n'ont pas à être refaites.
+Un format invalide (rôle inconnu ou absent, JSON cassé) empêche le démarrage au lieu de se découvrir à la première requête.
 
 Variables d'environnement : `NM_USERS`, `NM_AUTH_SECRET`, `NM_TOKEN_TTL_MINUTES` (60 par défaut), `NM_API_TOKEN` (jeton machine des endpoints de
 contrôle ; sans lui ils répondent 503), `NM_CORS_ORIGINS` (origines

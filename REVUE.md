@@ -64,6 +64,7 @@ protocole détaillé dans « Mesures »). Évaluation : `python -m network_monit
 | Un moniteur qui s'arrête sans prévenir | `/metrics`, `/health/ready` (503 avec raisons), signal de vie externe, règles d'alerte d'exemple | `tests/test_observability.py` (serveur HTTP local), `promtool`, vrai Prometheus |
 | **URL secrètes écrites dans le journal** : `httpx` journalise l'URL complète à INFO (jeton Telegram, signal de vie) | logger `httpx` relevé à WARNING | `tests/test_observability.py` — **échouait avant le correctif** |
 | Une alerte sans réponse ne montait jamais : personne ne pouvait dire « je m'en occupe » | prise en charge (`PUT/DELETE /incidents/{id}/ack`) et escalade à un niveau (`notifications.escalate_after`) vers un second groupe | `tests/test_feedback_maintenance.py` (vraie boucle sur le Mock, 4 scénarios + table de conditions), `tests/test_incidents.py`, e2e |
+| Tout utilisateur connecté pouvait tout faire, y compris modifier les seuils | trois rôles (lecteur, opérateur, administrateur) ; ancien format de `NM_USERS` conservé (= administrateur), nouveau format à rôle obligatoire, démarrage refusé si invalide | `tests/test_auth.py` (matrice rôle × endpoint, compatibilité, erreurs), Vitest, e2e à trois comptes |
 | Aucune intégration continue | `.github/workflows/ci.yml` | ❓ jamais exécutée ; `actionlint` propre ; mêmes commandes reproduites en local |
 
 ## Mesures (Mock ; à refaire sur données réelles)
@@ -139,6 +140,17 @@ Suite backend contre de vrais services (MariaDB 10.11.14, Prometheus 2.45.3) : *
 | Tests de mutation (backend) | acquittement ignoré, garde « une seule fois » retirée, rétablissement ignoré, maintenance ignorée, délai ignoré : chacune fait échouer au moins un test |
 | Test de mutation (navigateur, vrai serveur) | acquittements ignorés par le serveur → le scénario échoue (`escalated_at` renseigné au lieu de `null`) |
 | **Erreur de ma part, corrigée** | ma première hypothèse (« un incident bref est déjà en retour à la normale à l'échéance ») était fausse : l'instrumentation de la boucle a montré qu'il reste ouvert et oscille. La condition « en retour à la normale » est donc testée sur chaque cas séparément (`_escalations`) et sur le moteur (`is_recovering`), pas par un scénario de bout en bout |
+
+### Mesure des rôles
+
+Backend : matrice complète rôle × endpoint (4 comptes × 10 endpoints protégés) ; compatibilité vérifiée par les tests d'authentification **déjà existants**, inchangés (71 passés avant toute nouvelle règle). Vitest : 61. Playwright : 22, avec un serveur déclarant trois comptes (`alice` en ancien format, `bob` opérateur, `carol` lectrice).
+
+| Vérification | Résultat |
+|---|---|
+| Tests de mutation (backend) | endpoint opérateur ouvert aux lecteurs → 2 tests en échec ; vérification de rôle supprimée → au moins 4 tests en échec ; ancien format qui perd les droits d'administrateur → 3 tests en échec |
+| Test de mutation (navigateur, vrai serveur) | rôles non vérifiés → les scénarios lecteur et opérateur échouent (200 reçu au lieu de 403) ; celui du compte historique passe, à raison |
+| **Erreur de ma part, corrigée** | mon script de modification avait remplacé la signature de la dépendance `require_role` au lieu de celle de `start_monitoring` (chaîne présente deux fois) : récursion infinie à l'import, et `stop_monitoring` resté non protégé. Détecté par les tests, et par une vérification stricte de chaque signature ajoutée ensuite |
+| **Formulation corrigée** | j'avais écrit qu'un changement de rôle « prend effet tout de suite » : vrai dans un test qui modifie l'environnement du processus, faux en exploitation, où il faut redémarrer. Docstrings et documentation corrigées |
 
 Image : sans Docker dans cet environnement, j'ai reproduit les étapes du `Dockerfile` à la main : build du front avec `VITE_API_BASE_URL=""` (le bundle ne contient plus l'adresse par défaut : même origine), environnement vierge avec le seul `requirements.txt` (aucun outil de dev, fuseau `Africa/Douala` disponible), démarrage en production sous un utilisateur sans privilèges. Constaté : `/` sert l'interface, le JS passe de 253 à 78 Ko en gzip, `/docs` et `/openapi.json` répondent 404, `PUT /config` répond 401 sans session et 200 avec, une seconde instance sur la même base est refusée avec un message explicite. Non vérifié : la construction de l'image elle-même, `HEALTHCHECK`, `read_only` et `cap_drop` du compose.
 

@@ -7,7 +7,13 @@ Authentification des endpoints de contrôle (§37).
 - Session : `POST /auth/login` renvoie un jeton signé (HMAC-SHA256, clé `NM_AUTH_SECRET`) qui
   expire au bout de `NM_TOKEN_TTL_MINUTES` (60 par défaut). Sans `NM_AUTH_SECRET`, une clé
   aléatoire est tirée au démarrage : les sessions ne survivent pas à un redémarrage.
-- Machine : `NM_API_TOKEN` reste accepté tel quel (scripts, supervision) ; il n'a pas d'expiration.
+- Machine : `NM_API_TOKEN` reste accepté tel quel (scripts, supervision) ; il n'a pas d'expiration. Son rôle est
+  `NM_API_TOKEN_ROLE` (administrateur par défaut, comme avant l'introduction des rôles).
+- Rôles : `viewer` (lectures protégées) < `operator` (prise en charge, verdicts, maintenance) < `admin` (configuration,
+  démarrage et arrêt, envois d'essai). Dans `NM_USERS`, `{"alice": "<hash>"}` (ancien format) reste valable et donne
+  `admin` ; `{"bob": {"hash": "<hash>", "role": "operator"}}` exige un rôle explicite. Le rôle est relu à chaque requête
+  (il n'est pas gravé dans le jeton) : rétrograder ou retirer quelqu'un s'applique dès que le service relit son
+  environnement, c'est-à-dire à son redémarrage, sans attendre l'expiration des sessions déjà ouvertes (si `NM_AUTH_SECRET` est fixée).
 - Essais : 5 échecs en 5 minutes pour un même (utilisateur, adresse) bloquent la connexion.
 """
 
@@ -22,8 +28,9 @@ import os
 import secrets
 import sys
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import IntEnum
 
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2**14, 8, 1
 _MAXMEM = 64 * 1024 * 1024
@@ -108,12 +115,39 @@ class LoginThrottle:
         self._failures.pop((username, client), None)
 
 
+class AuthConfigError(ValueError):
+    """`NM_USERS`, `NM_API_TOKEN_ROLE` ou un rôle mal formés : le service refuse de démarrer plutôt que d'ouvrir ou fermer des droits au hasard."""
+
+
+class Role(IntEnum):
+    """Droits croissants : chaque rôle peut tout ce que peut le précédent."""
+
+    VIEWER = 1
+    OPERATOR = 2
+    ADMIN = 3
+
+    @classmethod
+    def parse(cls, text: object) -> Role:
+        try:
+            return cls[str(text).strip().upper()]
+        except KeyError:
+            raise AuthConfigError(f"rôle inconnu « {text} » (attendu : viewer, operator ou admin)") from None
+
+
+STATIC_SUBJECT = "api-token"
+"""Identité du jeton machine : un utilisateur ne peut pas porter ce nom (il se confondrait avec lui)."""
+
+
 @dataclass(frozen=True)
 class AuthSettings:
     users: dict[str, str]
     secret: bytes
     ttl: timedelta
     static_token: str | None
+    roles: dict[str, Role] = field(default_factory=dict)
+    static_role: Role = Role.ADMIN
+    legacy_users: tuple[str, ...] = ()
+    """Utilisateurs déclarés dans l'ancien format (sans rôle) : ils gardent les droits d'administrateur."""
 
     @property
     def configured(self) -> bool:
@@ -125,13 +159,42 @@ _fallback_secret = secrets.token_bytes(32)
 
 def load_settings() -> AuthSettings:
     """Lit l'environnement à chaque appel : la configuration change sans redémarrer les tests."""
-    users = json.loads(os.environ.get("NM_USERS") or "{}")
+    try:
+        declared = json.loads(os.environ.get("NM_USERS") or "{}")
+    except json.JSONDecodeError as exc:
+        raise AuthConfigError(f"NM_USERS n'est pas un JSON valide ({exc.msg})") from None
+    if not isinstance(declared, dict):
+        raise AuthConfigError('NM_USERS doit être un objet JSON : {"alice": "<hash>"} ou {"bob": {"hash": "<hash>", "role": "operator"}}')
+    hashes: dict[str, str] = {}
+    roles: dict[str, Role] = {}
+    legacy: list[str] = []
+    for name, entry in declared.items():
+        if name == STATIC_SUBJECT:
+            raise AuthConfigError(f"NM_USERS : le nom « {STATIC_SUBJECT} » est réservé au jeton machine")
+        if isinstance(entry, str):  # ancien format : aucun rôle déclaré, donc les droits qu'il avait toujours eus
+            hashes[name], roles[name] = entry, Role.ADMIN
+            legacy.append(name)
+        elif isinstance(entry, dict) and isinstance(entry.get("hash"), str) and "role" in entry and set(entry) <= {"hash", "role"}:
+            try:
+                roles[name] = Role.parse(entry["role"])
+            except AuthConfigError as exc:
+                raise AuthConfigError(f"NM_USERS : utilisateur « {name} » : {exc}") from None
+            hashes[name] = entry["hash"]
+        else:
+            raise AuthConfigError(f'NM_USERS : l\'entrée de « {name} » doit être un hachage, ou {{"hash": "...", "role": "viewer|operator|admin"}} (rôle obligatoire)')
     secret = os.environ.get("NM_AUTH_SECRET")
+    try:
+        static_role = Role.parse(os.environ.get("NM_API_TOKEN_ROLE") or "admin")
+    except AuthConfigError as exc:
+        raise AuthConfigError(f"NM_API_TOKEN_ROLE : {exc}") from None
     return AuthSettings(
-        users={str(k): str(v) for k, v in users.items()},
+        users=hashes,
         secret=secret.encode() if secret else _fallback_secret,
         ttl=timedelta(minutes=float(os.environ.get("NM_TOKEN_TTL_MINUTES", "60"))),
         static_token=os.environ.get("NM_API_TOKEN") or None,
+        roles=roles,
+        static_role=static_role,
+        legacy_users=tuple(legacy),
     )
 
 
@@ -144,8 +207,13 @@ def authenticate(settings: AuthSettings, username: str, password: str) -> bool:
 def subject_for(settings: AuthSettings, bearer: str, now: datetime | None = None) -> str | None:
     """Identité derrière un jeton porteur : jeton machine, ou jeton de session valide."""
     if settings.static_token and hmac.compare_digest(bearer.encode(), settings.static_token.encode()):
-        return "api-token"
+        return STATIC_SUBJECT
     return verify_token(bearer, settings.secret, now)
+
+
+def role_of(settings: AuthSettings, subject: str) -> Role | None:
+    """Rôle actuel d'une identité authentifiée ; None si cet utilisateur n'existe plus (session d'un compte retiré)."""
+    return settings.static_role if subject == STATIC_SUBJECT else settings.roles.get(subject)
 
 
 if __name__ == "__main__":  # pragma: no cover

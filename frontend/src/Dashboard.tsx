@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, type KeyboardEvent, type MouseEvent } from "react";
-import { api, currentSession, hasApiToken, login, logout, type Session } from "./api";
+import { api, canAct, currentSession, hasApiToken, login, logout, type Role, type Session } from "./api";
 import { decimate, mergeSeries, nearestIndex, pointerToTime, type Point } from "./chart";
 import { usePolling } from "./polling";
 import type {
@@ -562,8 +562,20 @@ function AvailabilityPanel() {
 const NOT_LOGGED_IN = "Connectez-vous (panneau Configuration) pour effectuer cette action.";
 
 /** Message lisible pour un échec d'action protégée : session absente ou expirée (401), authentification non configurée (503). */
+const ROLE_LABEL: Record<Role, string> = { viewer: "lecteur", operator: "opérateur", admin: "administrateur" };
+
+/** Infobulle d'un bouton désactivé parce que le compte connecté n'a pas le rôle requis (sinon rien : le bouton reste actif). */
+const needs = (minimum: Role): string | undefined => (canAct(minimum) ? undefined : `Réservé au rôle ${ROLE_LABEL[minimum]} ou supérieur`);
+
 function actionError(err: unknown): string {
   const msg = errorMessage(err);
+  if (msg.includes(" 403 ")) {
+    try {
+      return String(JSON.parse(msg.slice(msg.indexOf(" 403 ") + 5)).detail); // le serveur dit quel rôle manque
+    } catch {
+      return "Droits insuffisants pour cette action.";
+    }
+  }
   if (msg.includes(" 401 ")) return NOT_LOGGED_IN;
   if (msg.includes(" 503 ")) return "Authentification non configurée sur le serveur : action impossible.";
   return "Rejeté par l'API : " + msg;
@@ -641,7 +653,7 @@ function IncidentsPanel({ incidents }: { incidents: Incident[] }) {
                 {owner && <span className="nm-tag">pris en charge par {owner}</span>}
                 {live && (
                   <span className="nm-verdicts">
-                    <button type="button" className="range-btn" onClick={() => void takeCharge(inc, Boolean(owner))}
+                    <button type="button" className="range-btn" disabled={!canAct("operator")} title={needs("operator")} onClick={() => void takeCharge(inc, Boolean(owner))}
                       aria-label={owner ? `Retirer la prise en charge de l'incident de ${inc.output_id}` : `Prendre en charge l'incident de ${inc.output_id}`}>
                       {owner ? "Retirer la prise en charge" : "Prendre en charge"}
                     </button>
@@ -650,13 +662,13 @@ function IncidentsPanel({ incidents }: { incidents: Incident[] }) {
                 {inc.opened_at && (
                   <span className="nm-verdicts">
                     {(["false_positive", "true_positive"] as Verdict[]).map((v) => (
-                      <button key={v} type="button" className={`range-btn${verdict === v ? " active" : ""}`} aria-pressed={verdict === v}
+                      <button key={v} type="button" className={`range-btn${verdict === v ? " active" : ""}`} aria-pressed={verdict === v} disabled={!canAct("operator")} title={needs("operator")}
                         aria-label={`Juger l'incident de ${inc.output_id} : ${VERDICT_LABEL[v]}`} onClick={() => void judge(inc, v)}>
                         {v === "false_positive" ? "Faux positif" : "Vrai incident"}
                       </button>
                     ))}
                     {verdict && (
-                      <button type="button" className="range-btn" aria-label={`Retirer le verdict de l'incident de ${inc.output_id}`} onClick={() => void judge(inc, null)}>
+                      <button type="button" className="range-btn" disabled={!canAct("operator")} title={needs("operator")} aria-label={`Retirer le verdict de l'incident de ${inc.output_id}`} onClick={() => void judge(inc, null)}>
                         Retirer le verdict
                       </button>
                     )}
@@ -724,7 +736,7 @@ function MaintenancePanel({ outputIds }: { outputIds: string[] }) {
               {w.output_id ?? "Toutes les sorties"} — {formatWhen(w.start)} → {formatWhen(w.end)} — {w.reason}
               <span className="nm-tag">{MAINTENANCE_STATE[w.state]}</span>
               {(w.state === "upcoming" || w.state === "active") && (
-                <button type="button" className="range-btn" aria-label={`Annuler la maintenance « ${w.reason} »`} onClick={() => void act(() => api.cancelMaintenance(w.id))}>
+                <button type="button" className="range-btn" disabled={!canAct("operator")} title={needs("operator")} aria-label={`Annuler la maintenance « ${w.reason} »`} onClick={() => void act(() => api.cancelMaintenance(w.id))}>
                   Annuler
                 </button>
               )}
@@ -749,7 +761,7 @@ function MaintenancePanel({ outputIds }: { outputIds: string[] }) {
         <label>Motif
           <input className="settings-input" style={{ width: 220 }} maxLength={200} value={reason} onChange={(e) => setReason(e.target.value)} />
         </label>
-        <button type="button" className="settings-reset" disabled={!reason.trim() || duration <= 0} onClick={() => void create()}>Planifier</button>
+        <button type="button" className="settings-reset" disabled={!reason.trim() || duration <= 0 || !canAct("operator")} title={needs("operator")} onClick={() => void create()}>Planifier</button>
         {!hasApiToken() && <span className="settings-field-hint">{NOT_LOGGED_IN}</span>}
       </fieldset>
     </section>
@@ -796,7 +808,7 @@ function SettingsPanel({ config, deltaThresholds, onDeltaThresholdsChange, onSav
         {saveError && <p className="settings-warning" role="alert">{saveError}</p>}
         {session ? (
           <p className="settings-field-hint" role="status">
-            Connecté en tant que <strong>{session.username}</strong> (session valable jusqu'à{" "}
+            Connecté en tant que <strong>{session.username}</strong> ({ROLE_LABEL[session.role]}, session valable jusqu'à{" "}
             {session.expiresAt.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}).{" "}
             <button type="button" className="settings-reset" onClick={() => { logout(); setSession(null); }}>Se déconnecter</button>
           </p>
@@ -810,7 +822,7 @@ function SettingsPanel({ config, deltaThresholds, onDeltaThresholdsChange, onSav
             <span id="login-hint" className="settings-field-hint">Session à durée limitée, gardée en mémoire : effacée au rechargement de la page, jamais écrite dans le navigateur.</span>
           </fieldset>
         )}
-        <button type="button" className="settings-reset" disabled={saving} onClick={() => onSave(draft)}>
+        <button type="button" className="settings-reset" disabled={saving || !canAct("admin")} title={needs("admin")} onClick={() => onSave(draft)}>
           {saving ? "Envoi à l'API…" : "Envoyer à l'API"}
         </button>
       </div>
@@ -883,7 +895,7 @@ export default function Dashboard() {
       });
       setConfig(updated);
     } catch (err) {
-      setSaveError("Rejeté par l'API : " + errorMessage(err));
+      setSaveError(errorMessage(err).includes(" 403 ") ? actionError(err) : "Rejeté par l'API : " + errorMessage(err));
     } finally {
       setSaving(false);
     }

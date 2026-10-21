@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 from collections import Counter
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -103,6 +104,31 @@ def require_token(request: Request, authorization: Annotated[str | None, Header(
         logger.warning("Accès refusé à %s depuis %s", request.url.path, _client(request))
         raise HTTPException(status_code=401, detail="Jeton d'authentification invalide, expiré ou absent")
     return subject
+
+
+def require_role(minimum: auth.Role) -> Callable[..., str]:
+    """Dépendance : une identité authentifiée **et** au moins le rôle demandé (403 sinon). Le rôle est relu dans `NM_USERS` à chaque
+    requête : rétrograder un compte s'applique dès le redémarrage, sans attendre l'expiration de ses sessions, et la session d'un compte
+    retiré est refusée (401)."""
+
+    def dependency(subject: Annotated[str, Depends(require_token)]) -> str:
+        role = auth.role_of(auth.load_settings(), subject)
+        if role is None:
+            raise HTTPException(status_code=401, detail="Ce compte n'existe plus : se reconnecter")
+        if role < minimum:
+            logger.warning("Droits insuffisants pour %s (rôle %s, rôle requis %s)", subject, role.name.lower(), minimum.name.lower())
+            raise HTTPException(
+                status_code=403,
+                detail=f"Droits insuffisants : le rôle « {minimum.name.lower()} » est requis (le vôtre : « {role.name.lower()} »)",
+            )
+        return subject
+
+    return dependency
+
+
+ViewerSubject = Annotated[str, Depends(require_role(auth.Role.VIEWER))]
+OperatorSubject = Annotated[str, Depends(require_role(auth.Role.OPERATOR))]
+AdminSubject = Annotated[str, Depends(require_role(auth.Role.ADMIN))]
 
 
 def _client(request: Request) -> str:
@@ -271,6 +297,12 @@ state = MonitoringState(_initial_config())
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings = auth.load_settings()  # une configuration d'authentification mal formée empêche de démarrer (AuthConfigError), au lieu de se découvrir à la première requête
+    if settings.legacy_users:
+        logger.warning(
+            "NM_USERS : %s déclaré(s) sans rôle (ancien format) : droits d'administrateur. Déclarer un rôle : "
+            '{"nom": {"hash": "...", "role": "operator"}}.', ", ".join(settings.legacy_users),
+        )
     state.lock.acquire()  # refuse de démarrer si une autre instance tient déjà la base
     if not _is_development and state.config.source.type == "mock":
         logger.warning(
@@ -369,6 +401,8 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     expires_in: int
     username: str
+    role: str
+    """`viewer`, `operator` ou `admin` : sert à l'interface à n'afficher que ce que le compte peut faire (le serveur contrôle de toute façon)."""
 
 
 class AlertOut(BaseModel):
@@ -645,7 +679,7 @@ class FeedbackIn(BaseModel):
 
 @app.put("/incidents/{incident_id}/feedback", response_model=Incident)
 def set_incident_feedback(
-    incident_id: str, body: FeedbackIn, subject: Annotated[str, Depends(require_token)]
+    incident_id: str, body: FeedbackIn, subject: OperatorSubject
 ) -> Incident:
     """Un opérateur juge un incident confirmé : vrai ou faux positif. C'est la seule vérité terrain disponible
     en exploitation : elle alimente la précision mesurée (`/reports/precision`), exclut les faux positifs du
@@ -670,7 +704,7 @@ def _active_confirmed_incident(incident_id: str) -> Incident:
 
 
 @app.put("/incidents/{incident_id}/ack", response_model=Incident)
-def acknowledge_incident(incident_id: str, subject: Annotated[str, Depends(require_token)]) -> Incident:
+def acknowledge_incident(incident_id: str, subject: OperatorSubject) -> Incident:
     """« Je m'en occupe » : l'incident n'est plus escaladé (`notifications.escalate_after`). Une prise en charge déjà
     enregistrée est remplacée (la dernière personne qui dit s'en occuper l'emporte)."""
     incident = _active_confirmed_incident(incident_id)
@@ -680,7 +714,7 @@ def acknowledge_incident(incident_id: str, subject: Annotated[str, Depends(requi
 
 
 @app.delete("/incidents/{incident_id}/ack", response_model=Incident)
-def release_incident(incident_id: str, subject: Annotated[str, Depends(require_token)]) -> Incident:
+def release_incident(incident_id: str, subject: OperatorSubject) -> Incident:
     """Retire la prise en charge : le délai d'escalade repart de l'ouverture de l'incident, pas de ce retrait."""
     incident = state.storage.get_incident(incident_id)
     if incident is None:
@@ -769,7 +803,7 @@ def list_maintenance(days: Annotated[float, Query(gt=0, le=366)] = 7) -> list[Ma
 
 
 @app.post("/maintenance", response_model=MaintenanceOut, status_code=201)
-def create_maintenance(body: MaintenanceIn, subject: Annotated[str, Depends(require_token)]) -> MaintenanceOut:
+def create_maintenance(body: MaintenanceIn, subject: OperatorSubject) -> MaintenanceOut:
     """Planifie une maintenance : pendant la fenêtre, les incidents de la sortie sont enregistrés mais ne
     notifient personne ; son temps est exclu de la disponibilité ; la recalibration l'ignore."""
     _require_aware(body.start, body.end)
@@ -805,7 +839,7 @@ def create_maintenance(body: MaintenanceIn, subject: Annotated[str, Depends(requ
 
 
 @app.delete("/maintenance/{window_id}", response_model=MaintenanceOut)
-def cancel_maintenance(window_id: str, subject: Annotated[str, Depends(require_token)]) -> MaintenanceOut:
+def cancel_maintenance(window_id: str, subject: OperatorSubject) -> MaintenanceOut:
     """Annule une fenêtre (conservée pour l'audit). Un incident en cours qui était retenu par elle
     est annoncé au tick suivant."""
     now = state.now
@@ -906,7 +940,7 @@ class NotificationOut(BaseModel):
 
 @app.get("/notifications", response_model=list[NotificationOut])
 def list_notifications(
-    _subject: Annotated[str, Depends(require_token)],
+    _subject: ViewerSubject,
     status: Annotated[Literal["pending", "sent", "failed"] | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[NotificationOut]:
@@ -922,7 +956,7 @@ def list_notifications(
 
 
 @app.post("/notifications/test/{channel}")
-def test_notification(channel: str, subject: Annotated[str, Depends(require_token)]) -> dict:
+def test_notification(channel: str, subject: AdminSubject) -> dict:
     """Envoie un message d'essai immédiat sur un canal (vérifier un groupe Telegram, un numéro, un webhook)."""
     if state.notifier is None or channel not in state.notifier.channels:
         raise HTTPException(status_code=404, detail=f"Canal inconnu ou notifications désactivées : {channel}")
@@ -950,18 +984,19 @@ def login(body: LoginRequest, request: Request) -> LoginResponse:
         access_token=auth.issue_token(body.username, settings.secret, settings.ttl),
         expires_in=int(settings.ttl.total_seconds()),
         username=body.username,
+        role=settings.roles[body.username].name.lower(),
     )
 
 
 @app.post("/monitoring/start", response_model=MonitoringStatus)
-def start_monitoring(subject: Annotated[str, Depends(require_token)]) -> MonitoringStatus:
+def start_monitoring(subject: AdminSubject) -> MonitoringStatus:
     logger.info("Monitoring démarré par %s", subject)
     state.start()
     return monitoring_status()
 
 
 @app.post("/monitoring/stop", response_model=MonitoringStatus)
-def stop_monitoring(subject: Annotated[str, Depends(require_token)]) -> MonitoringStatus:
+def stop_monitoring(subject: AdminSubject) -> MonitoringStatus:
     logger.info("Monitoring arrêté par %s", subject)
     state.stop()
     return monitoring_status()
@@ -973,7 +1008,7 @@ def get_config() -> AppConfig:
 
 
 @app.put("/config", response_model=AppConfig)
-def update_config(update: ConfigUpdate, subject: Annotated[str, Depends(require_token)]) -> AppConfig:
+def update_config(update: ConfigUpdate, subject: AdminSubject) -> AppConfig:
     """
     Met à jour à chaud le sous-ensemble modifiable de la configuration
     (§35). Reconstruit un AppConfig complet et le valide avant toute prise

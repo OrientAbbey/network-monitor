@@ -10,7 +10,8 @@ vi.mock("./api", () => {
   const cfg = { incident: { open_score: 0.75, close_score: 0.4, warning_score: 0.5 }, alerts: { enabled: true, critical_score: 0.8 } };
   return {
     currentSession: vi.fn(() => null),
-    login: vi.fn(async (username: string) => ({ username, expiresAt: new Date(Date.now() + 3_600_000) })),
+    login: vi.fn(async (username: string) => ({ username, role: "admin", expiresAt: new Date(Date.now() + 3_600_000) })),
+    canAct: vi.fn(() => true), // par défaut : rôle inconnu ou suffisant, le serveur tranche
     logout: vi.fn(),
     hasApiToken: vi.fn(() => false),
     api: {
@@ -42,7 +43,7 @@ vi.mock("./api", () => {
   };
 });
 
-import { api, hasApiToken, login, logout } from "./api";
+import { api, canAct, hasApiToken, login, logout } from "./api";
 import Dashboard, { DetailChart } from "./Dashboard";
 import type { Alert, Incident, MaintenanceWindow, PrecisionReport } from "./types";
 
@@ -50,6 +51,7 @@ const visibility = { traffic: true, loss: true, baseline: false, prediction: fal
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(hasApiToken).mockReturnValue(false); // clearAllMocks ne remet pas les valeurs de retour : chaque test repart déconnecté
+  vi.mocked(canAct).mockReturnValue(true);
 });
 afterEach(cleanup);
 
@@ -219,7 +221,7 @@ describe("Dashboard", () => {
     await user.type(screen.getByLabelText("Mot de passe"), "s3cret");
     await user.click(connect);
     expect(login).toHaveBeenCalledWith("alice", "s3cret");
-    expect(await screen.findByText(/connecté en tant que/i)).toBeTruthy();
+    expect((await screen.findByText(/connecté en tant que/i)).textContent).toMatch(/alice \(administrateur, session valable/);
     expect(screen.queryByLabelText("Mot de passe")).toBeNull(); // le champ disparaît avec la session
     expect(localStorage.length + sessionStorage.length).toBe(0);
     await user.click(screen.getByRole("button", { name: /se déconnecter/i }));
@@ -521,5 +523,79 @@ describe("Prise en charge et escalade", () => {
     await user.click(await take(panel));
     expect((await panel.findByRole("alert")).textContent).toMatch(/Rejeté par l'API.*en cours/);
     expect(panel.queryByText(/pris en charge par/)).toBeNull();
+  });
+});
+
+describe("Rôles", () => {
+  const asRole = (role: "viewer" | "operator" | "admin") => {
+    const rank = { viewer: 1, operator: 2, admin: 3 };
+    vi.mocked(canAct).mockImplementation((minimum) => rank[role] >= rank[minimum]);
+  };
+  const win = { id: "w", output_id: "OUT_001", start: NOW, end: NOW, reason: "Travaux", created_by: "a", cancelled_at: null, state: "upcoming" as const };
+  const everything = async () => {
+    vi.mocked(api.incidents).mockResolvedValue([incident({ verdict: "false_positive" })]);
+    vi.mocked(api.maintenance).mockResolvedValue([win]);
+    render(<Dashboard />);
+    await incidentsPanel();
+    return {
+      incidents: within(await incidentsPanel()),
+      maintenance: within(await screen.findByRole("region", { name: /maintenance planifiée/i })),
+    };
+  };
+  afterEach(() => {
+    vi.mocked(api.incidents).mockReset();
+    vi.mocked(api.maintenance).mockReset();
+  });
+
+  it("un lecteur voit tout mais ne peut agir sur rien : boutons désactivés, avec la raison", async () => {
+    asRole("viewer");
+    const { incidents, maintenance } = await everything();
+    const actions = [
+      ...(await incidents.findAllByRole("button", { name: /Juger l'incident|Retirer le verdict|Prendre en charge/ })),
+      await maintenance.findByRole("button", { name: /Annuler la maintenance/ }),
+    ];
+    expect(actions.length).toBeGreaterThanOrEqual(5);
+    for (const button of actions) {
+      expect((button as HTMLButtonElement).disabled).toBe(true);
+      expect(button.getAttribute("title")).toBe("Réservé au rôle opérateur ou supérieur");
+    }
+    expect(incidents.getByText("faux positif")).toBeTruthy(); // la lecture reste intacte
+  });
+
+  it("un opérateur agit sur les incidents et la maintenance, mais pas sur la configuration", async () => {
+    asRole("operator");
+    const { incidents, maintenance } = await everything();
+    const buttons = [
+      ...(await incidents.findAllByRole("button", { name: /Juger l'incident|Prendre en charge/ })),
+      await maintenance.findByRole("button", { name: /Annuler la maintenance/ }),
+    ];
+    expect(buttons.every((b) => !(b as HTMLButtonElement).disabled && !b.getAttribute("title"))).toBe(true);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /déplier la configuration/i }));
+    const save = screen.getByRole("button", { name: /envoyer à l.API/i }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    expect(save.title).toBe("Réservé au rôle administrateur ou supérieur");
+  });
+
+  it("un administrateur peut enregistrer la configuration", async () => {
+    asRole("admin");
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    await user.click(await screen.findByRole("button", { name: /déplier la configuration/i }));
+    expect((screen.getByRole("button", { name: /envoyer à l.API/i }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("affiche le message du serveur quand il refuse faute de droits, même si l'interface ne le savait pas", async () => {
+    vi.mocked(hasApiToken).mockReturnValue(true); // rôle inconnu de l'interface (jeton machine) : le bouton reste actif
+    vi.mocked(api.incidents).mockResolvedValue([incident()]);
+    vi.mocked(api.acknowledge).mockRejectedValueOnce(
+      new Error('PUT /incidents/inc-1/ack -> 403 {"detail":"Droits insuffisants : le rôle « operator » est requis (le vôtre : « viewer »)"}'),
+    );
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    const panel = within(await incidentsPanel());
+    await user.click(await panel.findByRole("button", { name: "Prendre en charge l'incident de OUT_001" }));
+    expect((await panel.findByRole("alert")).textContent).toBe("Droits insuffisants : le rôle « operator » est requis (le vôtre : « viewer »)");
+    vi.mocked(api.incidents).mockReset();
   });
 });

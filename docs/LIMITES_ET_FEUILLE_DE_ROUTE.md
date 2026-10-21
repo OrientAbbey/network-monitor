@@ -90,8 +90,11 @@ corrigé et mesuré). Rien n'y est caché derrière un « à peu près » : quan
 
 ### 2.5 Sécurité et accès
 
-- **Un seul niveau de droits** : tout utilisateur connecté peut tout modifier (`PUT /config`, démarrage/arrêt, envois d'essai). Pas de SSO/LDAP,
-  pas de révocation d'une session avant son expiration, pas de renouvellement.
+- **Trois rôles, pas de SSO** : `viewer` < `operator` < `admin` (README). Pas de SSO/LDAP ; pas de révocation d'une session avant son expiration autrement qu'en
+  retirant le compte puis en redémarrant (le rôle est relu dans l'environnement, qui ne change qu'au redémarrage) ; pas de renouvellement. Le **jeton machine est administrateur par
+  défaut** (compatibilité) : c'est un secret partagé, sans expiration ni identité individuelle (`NM_API_TOKEN_ROLE=viewer` pour un script de supervision). L'interface désactive les
+  boutons selon le rôle appris à la connexion, mais seul le serveur fait foi (le rôle d'une session ouverte peut avoir changé depuis). Il n'y a pas de journal d'audit : seul le nom
+  de l'opérateur est conservé sur une prise en charge ou un verdict, pas qui a modifié les seuils (il figure seulement dans les journaux du service).
 - **Limiteur de connexions en mémoire** (réinitialisé au redémarrage) ; derrière un proxy, il voit une seule adresse tant qu'uvicorn n'est pas lancé
   avec `--proxy-headers --forwarded-allow-ips` (non fait dans l'image).
 - **`NM_ENV` vaut `development` par défaut** : `/docs` et `/openapi.json` sont alors exposés. L'image Docker fixe `production` ; un lancement
@@ -142,7 +145,7 @@ corrigé et mesuré). Rien n'y est caché derrière un « à peu près » : quan
 
 ## 3. Fonctionnalités proposées mais non réalisées
 
-**Réalisées depuis** (voir §1 et §2.8) : fenêtres de maintenance et inhibition amont/aval, retour « faux/vrai positif » et re-balayage des seuils, `/metrics` et signal de vie externe, l'acquittement et l'escalade à un niveau, et le point d'accès « mesure la plus proche d'un instant » (`GET /outputs/nearest` : le tableau comparatif passe de 24 requêtes par rafraîchissement à 1, mesuré dans un vrai navigateur). Les numéros ci-dessous sont conservés.
+**Réalisées depuis** (voir §1 et §2.8) : fenêtres de maintenance et inhibition amont/aval, retour « faux/vrai positif » et re-balayage des seuils, `/metrics` et signal de vie externe, l'acquittement et l'escalade à un niveau, les trois rôles (lecteur, opérateur, administrateur), et le point d'accès « mesure la plus proche d'un instant » (`GET /outputs/nearest` : le tableau comparatif passe de 24 requêtes par rafraîchissement à 1, mesuré dans un vrai navigateur). Les numéros ci-dessous sont conservés.
 
 Chaque ligne : le besoin, d'où il vient, l'effort estimé (S ≈ 1 jour, M ≈ 2–4 jours, L > 4 jours) et comment savoir que c'est réussi.
 Les recherches datent du 1er octobre 2026 et **sont à refaire avant de s'y fier** (URLs non conservées).
@@ -152,7 +155,7 @@ Les recherches datent du 1er octobre 2026 et **sont à refaire avant de s'y fier
 | 2 | **Planification de capacité** | Pratique d'opérateurs relevée en recherche : lancer la procédure d'augmentation à 50 % d'utilisation, l'achever à 70 % (95e centile d'échantillons de 5 min), en tenant compte du délai de réalisation. Demande la capacité de chaque lien (non disponible aujourd'hui) et les prévisions longues. | M | « Jours avant 70 % » par lien, avec un intervalle, validé sur un export réel. |
 | 5 | **Connecteur Zabbix** | Zabbix stocke son historique en base (`history_uint` : `itemid`, `clock`, `value`, `ns`), lisible en SQL. Non écrit : schéma connu par la documentation, jamais essayé ; il faut gérer compteurs → débit (remises à zéro, bouclage) ou valeurs déjà exprimées en débit selon le gabarit. | M | Contrat de source vérifié sur une vraie base Zabbix. |
 | 6 | **Rapports** : PDF, envoi programmé, exclusion des maintenances, indicateurs réglementaires | Le ministère camerounais a demandé des outils d'évaluation automatisés et le remboursement automatique du crédit data en cas de panne, ce qui exige des débuts et fins précis (déjà rétro-datés). Amende globale de 2,6 milliards FCFA en juillet 2025 (source de presse). **Indicateurs exacts de l'ART non trouvés.** | M | Rapport mensuel conforme à la liste exacte des indicateurs, obtenue auprès de l'ART. |
-| 8 | **Rôles** (lecture, opérateur, administrateur) et **SSO** | Aujourd'hui tout utilisateur connecté peut tout faire. | M–L | Un opérateur ne peut pas modifier les seuils ; connexion par l'annuaire de l'entreprise. |
+| 8 | **SSO** (annuaire de l'entreprise) | Les trois rôles existent ; les comptes se déclarent encore à la main dans `NM_USERS`. | M–L | Connexion par l'annuaire de l'entreprise (les rôles viendraient de ses groupes). |
 | 9 | **Corrélation entre sorties** (topologie) | L'inhibition amont/aval existe (topologie déclarée à la main) ; il reste, plus largement, remonter à la cause (liens partageant un équipement ou une alimentation). Les coupures d'électricité et de fibre sont citées par le régulateur comme principaux facteurs de disponibilité. | L | Un scénario de panne d'alimentation multi-sorties produit un seul incident « cause commune ». |
 | 10 | **WhatsApp** | Très utilisé dans la région, mais l'API entreprise n'est pas gratuite et n'a pas été évaluée. | ? | — |
 | 12 | **Messages d'alerte configurables et multilingues** | Aujourd'hui fixes, en français. | S | Modèles de messages dans la configuration. |
