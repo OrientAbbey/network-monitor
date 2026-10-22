@@ -28,6 +28,7 @@ import csv
 import io
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
+from typing import NamedTuple
 
 from network_monitor.app.models import (
     Incident,
@@ -36,7 +37,9 @@ from network_monitor.app.models import (
     Severity,
 )
 
-_RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
+_SEVERITY_RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
+
+Interval = tuple[datetime, datetime]
 
 
 @dataclass
@@ -83,34 +86,154 @@ class AvailabilityReport:
         return buf.getvalue()
 
 
-def _union(intervals: list[tuple[datetime, datetime]]) -> list[tuple[datetime, datetime]]:
-    merged: list[tuple[datetime, datetime]] = []
-    for lo, hi in sorted(intervals):
-        if merged and lo <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+def _union(intervals: list[Interval]) -> list[Interval]:
+    """Fusionne les intervalles qui se chevauchent ou se touchent."""
+    merged: list[Interval] = []
+    for begin, finish in sorted(intervals):
+        if merged and begin <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], finish))
         else:
-            merged.append((lo, hi))
+            merged.append((begin, finish))
     return merged
 
 
-def _seconds(intervals: list[tuple[datetime, datetime]]) -> float:
-    return sum((hi - lo).total_seconds() for lo, hi in intervals)
+def _total_seconds(intervals: list[Interval]) -> float:
+    return sum((finish - begin).total_seconds() for begin, finish in intervals)
 
 
-def _minus(intervals: list[tuple[datetime, datetime]], cut: list[tuple[datetime, datetime]]) -> list[tuple[datetime, datetime]]:
-    """`intervals` privé de `cut` (les deux listes sont des unions triées)."""
-    out = []
-    for lo, hi in intervals:
-        cursor = lo
-        for c_lo, c_hi in cut:
-            if c_hi <= cursor or c_lo >= hi:
+def _subtract(intervals: list[Interval], removed: list[Interval]) -> list[Interval]:
+    """`intervals` privé de `removed` (les deux listes sont des unions triées)."""
+    remaining: list[Interval] = []
+    for begin, finish in intervals:
+        cursor = begin
+        for removed_begin, removed_finish in removed:
+            if removed_finish <= cursor or removed_begin >= finish:
                 continue
-            if c_lo > cursor:
-                out.append((cursor, c_lo))
-            cursor = max(cursor, c_hi)
-        if cursor < hi:
-            out.append((cursor, hi))
-    return out
+            if removed_begin > cursor:
+                remaining.append((cursor, removed_begin))
+            cursor = max(cursor, removed_finish)
+        if cursor < finish:
+            remaining.append((cursor, finish))
+    return remaining
+
+
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _round_or_none(value: float | None, digits: int) -> float | None:
+    return None if value is None else round(value, digits)
+
+
+class _ReportPeriod(NamedTuple):
+    """La fenêtre demandée, l'instant courant qui borne les incidents encore ouverts, et l'intervalle entre deux mesures."""
+
+    start: datetime
+    end: datetime
+    now: datetime
+    interval: timedelta
+
+    @property
+    def horizon(self) -> datetime:
+        """Fin de ce qui a pu être observé : une période en cours n'a pas d'avenir à rapporter."""
+        return min(self.end, self.now)
+
+
+class _IncidentSpan(NamedTuple):
+    incident: Incident
+    start: datetime
+    end: datetime
+
+
+def _confirmed_incident_spans(
+    incidents: list[Incident], output_id: str, observed: Interval, now: datetime, include_false_positives: bool
+) -> tuple[list[_IncidentSpan], int]:
+    """Les incidents confirmés de la sortie, rognés à la période observée, et le nombre de faux positifs écartés."""
+    observed_from, horizon = observed
+    spans: list[_IncidentSpan] = []
+    excluded_false_positives = 0
+    for incident in incidents:
+        if incident.output_id != output_id or incident.opened_at is None:
+            continue  # jamais confirmé : pas un incident
+        if incident.verdict == IncidentVerdict.FALSE_POSITIVE and not include_false_positives:
+            excluded_false_positives += 1
+            continue
+        began = incident.started_at or incident.opened_at
+        ended = incident.ended_at or incident.closed_at or (now if incident.is_active else incident.last_seen_at)
+        span_start, span_end = max(began, observed_from), min(ended, horizon)
+        if span_start < span_end:
+            spans.append(_IncidentSpan(incident, span_start, span_end))
+    return spans, excluded_false_positives
+
+
+def _maintenance_intervals(windows: list[MaintenanceWindow], output_id: str, observed: Interval) -> list[Interval]:
+    """Les fenêtres de maintenance actives (non annulées) de la sortie ou de toutes, rognées à la période observée."""
+    observed_from, horizon = observed
+    clipped = [
+        (max(window.start, observed_from), min(window.end, horizon))
+        for window in windows
+        if window.cancelled_at is None and window.output_id in (None, output_id)
+    ]
+    return _union([(begin, finish) for begin, finish in clipped if begin < finish])
+
+
+def _coverage_percent(stats: SampleStats, observed_seconds: float, interval: timedelta) -> float:
+    """Part des mesures attendues effectivement reçues (une mesure à chaque borne de la période observée)."""
+    if not stats.first:
+        return 0.0
+    expected_samples = observed_seconds / interval.total_seconds() + 1
+    return min(100.0, 100.0 * stats.count / expected_samples)
+
+
+def _output_availability(
+    output_id: str,
+    stats: SampleStats,
+    period: _ReportPeriod,
+    incidents: list[Incident],
+    maintenance: list[MaintenanceWindow],
+    downtime_severity: Severity,
+    include_false_positives: bool,
+) -> OutputAvailability:
+    # Période réellement observée : de la première mesure conservée (au plus tôt `start`) à `horizon`.
+    observed_from = max(period.start, stats.first) if stats.first else period.horizon
+    observed = (observed_from, period.horizon)
+    spans, excluded_false_positives = _confirmed_incident_spans(incidents, output_id, observed, period.now, include_false_positives)
+
+    maintenance_intervals = _maintenance_intervals(maintenance, output_id, observed)
+    downtime_intervals = _subtract(
+        _union([(span.start, span.end) for span in spans if _SEVERITY_RANK[span.incident.severity] >= _SEVERITY_RANK[downtime_severity]]),
+        maintenance_intervals,
+    )
+    degraded_intervals = _subtract(_subtract(_union([(span.start, span.end) for span in spans]), downtime_intervals), maintenance_intervals)
+
+    observed_seconds = max((period.horizon - observed_from).total_seconds(), 0.0)
+    maintenance_seconds = _total_seconds(maintenance_intervals)
+    due_seconds = observed_seconds - maintenance_seconds  # la maintenance planifiée n'est pas du temps « dû »
+    downtime_seconds = _total_seconds(downtime_intervals)
+    availability_percent = max(0.0, 100.0 * (1 - downtime_seconds / due_seconds)) if due_seconds > 0 else None
+
+    incident_durations = [(span.end - span.start).total_seconds() for span in spans]
+    detection_delays = [
+        (span.incident.opened_at - max(span.incident.started_at or span.incident.opened_at, period.start)).total_seconds()
+        for span in spans
+        if span.incident.opened_at
+    ]
+    return OutputAvailability(
+        output_id=output_id,
+        period_seconds=(period.end - period.start).total_seconds(),
+        monitored_from=observed_from if stats.first else None,
+        monitored_seconds=round(observed_seconds, 1),
+        maintenance_seconds=round(maintenance_seconds, 1),
+        false_positives_excluded=excluded_false_positives,
+        incidents=len(spans),
+        downtime_seconds=round(downtime_seconds, 1),
+        degraded_seconds=round(_total_seconds(degraded_intervals), 1),
+        availability_percent=_round_or_none(availability_percent, 4),
+        coverage_percent=round(_coverage_percent(stats, observed_seconds, period.interval), 2),
+        mttd_seconds=_round_or_none(_mean(detection_delays), 1),
+        mttr_seconds=_round_or_none(_mean(incident_durations), 1),
+        longest_incident_seconds=round(max(incident_durations), 1) if incident_durations else None,
+    )
 
 
 def build_report(
@@ -130,63 +253,11 @@ def build_report(
     observée ne peut pas remonter plus loin que la première mesure conservée)."""
     if end <= start:
         raise ValueError("la fin de période doit suivre son début")
-    horizon = min(end, now)
-    period = (end - start).total_seconds()
+    period = _ReportPeriod(start, end, now, interval)
     report = AvailabilityReport(start, end, downtime_severity.value)
-
     for output_id in outputs:
         stats = samples.get(output_id, SampleStats(0, None))
-        # Période réellement observée : de la première mesure conservée (au plus tôt `start`) à `horizon`.
-        observed_from = max(start, stats.first) if stats.first else horizon
-        mine = []
-        excluded_fp = 0
-        for i in incidents:
-            if i.output_id != output_id or i.opened_at is None:
-                continue  # jamais confirmé : pas un incident
-            if i.verdict == IncidentVerdict.FALSE_POSITIVE and not include_false_positives:
-                excluded_fp += 1
-                continue
-            lo = i.started_at or i.opened_at
-            hi = i.ended_at or i.closed_at or (now if i.is_active else i.last_seen_at)
-            lo, hi = max(lo, observed_from), min(hi, horizon)
-            if lo < hi:
-                mine.append((i, lo, hi))
-
-        planned = _union([
-            (max(w.start, observed_from), min(w.end, horizon))
-            for w in (maintenance or [])
-            if w.cancelled_at is None and (w.output_id is None or w.output_id == output_id)
-            and max(w.start, observed_from) < min(w.end, horizon)
-        ])
-        down = _minus(_union([(lo, hi) for i, lo, hi in mine if _RANK[i.severity] >= _RANK[downtime_severity]]), planned)
-        degraded = _minus(_minus(_union([(lo, hi) for i, lo, hi in mine]), down), planned)
-
-        maintenance_s = _seconds(planned)
-        observed = max((horizon - observed_from).total_seconds(), 0.0)
-        expected = observed / interval.total_seconds() + 1  # une mesure à chaque borne de la période
-        coverage = min(100.0, 100.0 * stats.count / expected) if stats.first else 0.0
-        down_s = _seconds(down)
-        effective = observed - maintenance_s  # la maintenance planifiée n'est pas du temps « dû »
-        availability = max(0.0, 100.0 * (1 - down_s / effective)) if effective > 0 else None
-
-        durations = [(hi - lo).total_seconds() for _i, lo, hi in mine]
-        detect = [(i.opened_at - max(i.started_at or i.opened_at, start)).total_seconds() for i, _lo, _hi in mine if i.opened_at]
         report.outputs.append(
-            OutputAvailability(
-                output_id=output_id,
-                period_seconds=period,
-                monitored_from=observed_from if stats.first else None,
-                monitored_seconds=round(observed, 1),
-                maintenance_seconds=round(maintenance_s, 1),
-                false_positives_excluded=excluded_fp,
-                incidents=len(mine),
-                downtime_seconds=round(down_s, 1),
-                degraded_seconds=round(_seconds(degraded), 1),
-                availability_percent=None if availability is None else round(availability, 4),
-                coverage_percent=None if coverage is None else round(coverage, 2),
-                mttd_seconds=round(sum(detect) / len(detect), 1) if detect else None,
-                mttr_seconds=round(sum(durations) / len(durations), 1) if durations else None,
-                longest_incident_seconds=round(max(durations), 1) if durations else None,
-            )
+            _output_availability(output_id, stats, period, incidents, maintenance or [], downtime_severity, include_false_positives)
         )
     return report
