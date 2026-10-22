@@ -3,12 +3,12 @@ Modèles de données communs du système de surveillance réseau.
 
 Ce module ne contient aucune logique métier : il définit uniquement les
 contrats de données partagés entre les couches DataSource, ForecastModel,
-AnomalyDetector et IncidentManager (cf. cahier des charges §5, §23, §24).
+AnomalyDetector et IncidentManager.
 
 Choix d'implémentation : Pydantic v2 est utilisé plutôt que des
 dataclasses simples, afin de bénéficier gratuitement de la validation
-d'entrée (contraintes du §3) et d'une compatibilité directe avec FastAPI
-pour l'exposition future d'une API (§37).
+d'entrée et d'une compatibilité directe avec FastAPI
+pour l'exposition future d'une API.
 """
 
 from __future__ import annotations
@@ -18,14 +18,12 @@ from enum import Enum
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-# ---------------------------------------------------------------------------
-# Enums
-# ---------------------------------------------------------------------------
+# --- Enums ---
 
 
 class DataQualityFlag(str, Enum):
     """
-    Drapeaux de qualité posés lors de la validation d'une mesure (§31).
+    Drapeaux de qualité posés lors de la validation d'une mesure.
 
     MISSING et TEMPORAL_GAP couvrent l'absence de donnée (respectivement
     une mesure ponctuelle manquante et un trou détecté dans la série).
@@ -42,7 +40,7 @@ class DataQualityFlag(str, Enum):
 
 
 class ForecastModelName(str, Enum):
-    """Modèles de forecasting disponibles en V1 (§10)."""
+    """Modèles de forecasting disponibles en V1."""
 
     SEASONAL_BASELINE = "seasonal_baseline"
     HOLT_WINTERS = "holt_winters"
@@ -50,9 +48,8 @@ class ForecastModelName(str, Enum):
 
 class IncidentStatus(str, Enum):
     """
-    États persistés du moteur d'incidents (§19, révisé pour inclure
-    SUSPECT comme état à part entière et STALE pour les trous de données
-    prolongés pendant un incident OPEN, §31).
+    États persistés du moteur d'incidents, dont SUSPECT (état à part entière)
+    et STALE (trous de données prolongés pendant un incident OPEN).
 
     NORMAL n'est pas un état persisté : l'absence d'incident n'a pas
     besoin d'être matérialisée.
@@ -65,7 +62,7 @@ class IncidentStatus(str, Enum):
 
 
 class Severity(str, Enum):
-    """Niveaux de sévérité d'un incident (§26)."""
+    """Niveaux de sévérité d'un incident."""
 
     INFO = "info"
     WARNING = "warning"
@@ -73,26 +70,24 @@ class Severity(str, Enum):
 
 
 class IncidentType(str, Enum):
-    """Types d'incidents initiaux V1 (§23)."""
+    """Types d'incidents initiaux V1."""
 
     TRAFFIC_DROP = "traffic_drop"
     TRAFFIC_SPIKE = "traffic_spike"
     HIGH_LOSS = "high_loss"
     TRAFFIC_DROP_WITH_HIGH_LOSS = "traffic_drop_with_high_loss"
-    CONGESTION = "congestion"  # trafic en hausse ET pertes en hausse (§25, cas 4)
+    CONGESTION = "congestion"  # trafic en hausse ET pertes en hausse
     PROGRESSIVE_DEGRADATION = "progressive_degradation"
     INTERMITTENT_DEGRADATION = "intermittent_degradation"
 
 
-# ---------------------------------------------------------------------------
-# Mesures brutes
-# ---------------------------------------------------------------------------
+# --- Mesures brutes ---
 
 
 class RawMeasurement(BaseModel):
     """
     Mesure brute non validée, telle que reçue de la source avant l'étape
-    de validation (§4 "Data Validation", §31).
+    de validation.
 
     Contrairement à TrafficSample, aucune contrainte de valeur n'est
     appliquée ici au-delà du typage : détecter une valeur négative ou une
@@ -108,7 +103,7 @@ class RawMeasurement(BaseModel):
 
 class TrafficSample(BaseModel):
     """
-    Format canonique d'une mesure (§3). Contrat strict et minimal :
+    Format canonique d'une mesure. Contrat strict et minimal :
     toute normalisation depuis une source réelle doit converger vers
     exactement ces quatre champs.
     """
@@ -122,13 +117,13 @@ class TrafficSample(BaseModel):
     @classmethod
     def timestamp_must_be_timezone_aware(cls, v: datetime) -> datetime:
         if v.tzinfo is None:
-            raise ValueError("timestamp doit être timezone-aware (§3)")
+            raise ValueError("timestamp doit être timezone-aware")
         return v
 
 
 class ValidatedSample(BaseModel):
     """
-    Résultat de l'étape de validation (§31), en amont du feature
+    Résultat de l'étape de validation, en amont du feature
     engineering. `sample` est None lorsque la donnée est totalement
     absente (trou temporel) plutôt qu'invalide mais présente.
 
@@ -162,13 +157,11 @@ class ValidatedSample(BaseModel):
         return not self._BLOCKING_FLAGS.intersection(self.quality_flags)
 
 
-# ---------------------------------------------------------------------------
-# Forecasting
-# ---------------------------------------------------------------------------
+# --- Forecasting ---
 
 
 class ForecastResult(BaseModel):
-    """Résultat d'une prévision de trafic pour un horizon donné (§13)."""
+    """Résultat d'une prévision de trafic pour un horizon donné."""
 
     output_id: str
     timestamp: datetime
@@ -189,21 +182,19 @@ class ForecastResult(BaseModel):
 
     @property
     def interval_width_mbps(self) -> float:
-        """Largeur de l'intervalle attendu, utilisée pour normaliser le score (§16.1)."""
+        """Largeur de l'intervalle attendu, utilisée pour normaliser le score."""
         return self.upper_bound_mbps - self.lower_bound_mbps
 
 
-# ---------------------------------------------------------------------------
-# Détection d'anomalies
-# ---------------------------------------------------------------------------
+# --- Détection d'anomalies ---
 
 
 class AnomalyResult(BaseModel):
     """
-    Sortie combinée de la détection statistique (§14-§16).
+    Sortie combinée de la détection statistique.
 
     Plusieurs scores explicites sont conservés plutôt qu'un score opaque
-    unique, conformément au §16. La normalisation retenue (§16.1) est
+    unique. La normalisation retenue est
     fondée sur la position de l'observation par rapport à l'intervalle
     prédictif ou à la dispersion historique robuste, pas sur un z-score
     classique.
@@ -222,29 +213,27 @@ class AnomalyResult(BaseModel):
     traffic_out_of_interval: bool = False
 
     data_gap: bool = False
-    """Mesure manquante au moment du calcul (§31) : les scores ci-dessus
+    """Mesure manquante au moment du calcul : les scores ci-dessus
     reflètent alors une donnée imputée ou une absence de signal, pas une
     observation réelle."""
 
     features: dict[str, float] = Field(default_factory=dict)
-    """Features calculées pour cette observation (§9) : V1 toujours,
+    """Features calculées pour cette observation : V1 toujours,
     étendues si activées."""
     isolation_score: float | None = Field(default=None, ge=0, le=1)
-    """Score de l'Isolation Forest (§17), si activé. Enrichissement uniquement :
+    """Score de l'Isolation Forest, si activé. Enrichissement uniquement :
     il n'entre dans aucun score ci-dessus."""
 
 
-# ---------------------------------------------------------------------------
-# Incidents
-# ---------------------------------------------------------------------------
+# --- Incidents ---
 
 
 class IncidentEvidence(BaseModel):
     """
-    Une preuve horodatée justifiant l'état d'un incident (§24).
+    Une preuve horodatée justifiant l'état d'un incident.
 
     Objectif explicite : rendre chaque incident compréhensible sans
-    connaître le fonctionnement interne du modèle (§28).
+    connaître le fonctionnement interne du modèle.
     """
 
     timestamp: datetime
@@ -262,7 +251,7 @@ class IncidentEvidence(BaseModel):
     isolation_score: float | None = Field(default=None, ge=0, le=1)
 
     data_gap: bool = False
-    """Trou de données pendant un incident OPEN (§31) : le chrono de
+    """Trou de données pendant un incident OPEN : le chrono de
     persistance est alors suspendu, pas réinitialisé, pour ce point."""
 
 
@@ -291,7 +280,7 @@ class MaintenanceWindow(BaseModel):
     def _ordered_and_aware(self) -> MaintenanceWindow:
         for name in ("start", "end", "created_at"):
             if getattr(self, name).tzinfo is None:
-                raise ValueError(f"{name} doit inclure un fuseau horaire (§3)")
+                raise ValueError(f"{name} doit inclure un fuseau horaire")
         if self.end <= self.start:
             raise ValueError("la fin d'une fenêtre de maintenance doit suivre son début")
         return self
@@ -306,11 +295,11 @@ class MaintenanceWindow(BaseModel):
 
 class Incident(BaseModel):
     """
-    Cycle de vie complet d'un incident (§19-§23).
+    Cycle de vie complet d'un incident.
 
-    `suspected_at` marque l'entrée en état SUSPECT (score >= warning_score,
-    §19) tandis que `opened_at` marque le franchissement effectif
-    d'open_score pendant minimum_duration (§20). Cette distinction est
+    `suspected_at` marque l'entrée en état SUSPECT (score >= warning_score)
+    tandis que `opened_at` marque le franchissement effectif
+    d'open_score pendant minimum_duration. Cette distinction est
     nécessaire pour que `duration_seconds` reflète la durée réelle de
     l'incident confirmé, pas la durée depuis le premier signal faible.
     """

@@ -1,5 +1,5 @@
 """
-Authentification des endpoints de contrôle (§37).
+Authentification des endpoints de contrôle.
 
 - Utilisateurs : `NM_USERS`, un objet JSON `{"alice": "<hash>"}`. Les mots de passe ne sont
   jamais stockés : seul un hachage scrypt salé l'est. Générer un hachage :

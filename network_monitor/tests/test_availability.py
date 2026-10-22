@@ -1,4 +1,4 @@
-"""Rapport de disponibilité (§33) : union des intervalles, rétro-datage, couverture, API et CSV."""
+"""Rapport de disponibilité : union des intervalles, rétro-datage, couverture, API et CSV."""
 
 import csv
 import io

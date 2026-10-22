@@ -1,4 +1,4 @@
-"""Contrat commun des sources de données (§6) : Mock, CSV, SQL."""
+"""Contrat commun des sources de données : Mock, CSV, SQL."""
 
 import csv
 import os

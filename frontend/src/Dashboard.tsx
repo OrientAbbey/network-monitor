@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, type KeyboardEvent, type MouseEvent } from "react";
 import { api, canAct, currentSession, hasApiToken, login, logout, type Role, type Session } from "./api";
-import { decimate, mergeSeries, nearestIndex, pointerToTime, type Point } from "./chart";
+import { decimate, mergeSeries, nearestIndex, pointerToTime } from "./chart";
 import { usePolling } from "./polling";
 import type {
   Alert, AppConfigView, AvailabilityReport, ForecastPoint, Incident, MaintenanceWindow, MonitoringStatus, OutputSummary, PrecisionReport,
@@ -804,7 +804,7 @@ function SettingsPanel({ config, deltaThresholds, onDeltaThresholdsChange, onSav
           onChange={(v) => setDraft({ ...draft, open_score: v })} />
         <NumberField label="Seuil CLOSED (close_score)" value={draft.close_score} min={0} max={1} step={0.01}
           onChange={(v) => setDraft({ ...draft, close_score: v })} />
-        {orderIssue && <p className="settings-warning">Incohérent : il faut close_score &lt; warning_score &lt; open_score. L'enregistrement sera refusé par l'API (§21).</p>}
+        {orderIssue && <p className="settings-warning">Incohérent : il faut close_score &lt; warning_score &lt; open_score. L'enregistrement sera refusé par l'API.</p>}
         {saveError && <p className="settings-warning" role="alert">{saveError}</p>}
         {session ? (
           <p className="settings-field-hint" role="status">

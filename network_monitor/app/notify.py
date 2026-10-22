@@ -1,5 +1,5 @@
 """
-Alertes sortantes (§27, §28) : Telegram (groupe), webhook signé, SMS (groupe).
+Alertes sortantes : Telegram (groupe), webhook signé, SMS (groupe).
 
 Fonctionnement — un « outbox » transactionnel :
 1. À chaque tick, `plan()` transforme les alertes confirmées en envois (une ligne par alerte et
@@ -122,9 +122,7 @@ _CATALOG: dict[str, dict[str, Any]] = {
 }
 
 
-# ---------------------------------------------------------------------------------------------
-# Sérialisation et mise en forme
-# ---------------------------------------------------------------------------------------------
+# --- Sérialisation et mise en forme ---
 
 
 def alert_to_dict(alert: Alert) -> dict[str, Any]:
@@ -192,7 +190,7 @@ def _line(alert: dict[str, Any], tz: ZoneInfo, cat: dict[str, Any]) -> str:
 
 
 def format_text(alerts: list[dict[str, Any]], tz: ZoneInfo, limit: int = 4000, lang: str = "fr", templates: Mapping[str, str] | None = None) -> str:
-    """Message lisible sans connaître le fonctionnement du modèle (§28) : quoi, où, depuis quand, combien.
+    """Message lisible sans connaître le fonctionnement du modèle : quoi, où, depuis quand, combien.
     `lang` choisit le catalogue ; `templates` (événement → modèle) remplace le message intégré des événements qu'il nomme."""
     cat = _catalog(lang)
     if len(alerts) == 1:
@@ -257,9 +255,7 @@ def format_sms(alerts: list[dict[str, Any]], tz: ZoneInfo, lang: str = "fr", tem
     return cat["sms_many"].format(n=len(alerts), opened=opened, closed=len(alerts) - opened, outputs=outputs)[:160]
 
 
-# ---------------------------------------------------------------------------------------------
-# Canaux
-# ---------------------------------------------------------------------------------------------
+# --- Canaux ---
 
 
 class DeliveryError(Exception):
@@ -429,9 +425,7 @@ class SmsNotifier(Channel):
 _CHANNELS = {"telegram": TelegramNotifier, "webhook": WebhookNotifier, "sms": SmsNotifier}
 
 
-# ---------------------------------------------------------------------------------------------
-# Planification et envoi
-# ---------------------------------------------------------------------------------------------
+# --- Planification et envoi ---
 
 
 class NotificationDispatcher:

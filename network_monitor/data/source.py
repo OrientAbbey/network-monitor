@@ -1,5 +1,5 @@
 """
-Interface DataSource (§6) et validation des données (§4 "Data Validation", §31).
+Interface DataSource et validation des données.
 
 Le moteur d'analyse ne doit jamais dépendre directement de MockDataSource :
 il dépend uniquement du contrat abstrait `DataSource`. Toute source réelle
@@ -21,7 +21,7 @@ from network_monitor.app.models import (
 
 
 class DataSource(ABC):
-    """Contrat commun à toute source de données, Mock ou réelle (§6)."""
+    """Contrat commun à toute source de données, Mock ou réelle."""
 
     @abstractmethod
     def load_history(self, start: datetime, end: datetime, output_id: str | None = None) -> list[TrafficSample]:
@@ -29,7 +29,7 @@ class DataSource(ABC):
 
         `output_id` restreint le résultat à une sortie : la calibration charge
         ainsi une sortie à la fois, au lieu de garder l'historique de toutes
-        les sorties en mémoire en même temps (§8).
+        les sorties en mémoire en même temps.
         """
         raise NotImplementedError
 
@@ -40,18 +40,18 @@ class DataSource(ABC):
 
     @abstractmethod
     def get_interval(self) -> timedelta:
-        """Fréquence native de la source (§3)."""
+        """Fréquence native de la source."""
         raise NotImplementedError
 
     @abstractmethod
     def list_outputs(self) -> list[str]:
-        """Sorties connues de la source, nécessaire pour détecter une sortie inconnue (§31)."""
+        """Sorties connues de la source, nécessaire pour détecter une sortie inconnue."""
         raise NotImplementedError
 
 
 class DataValidator:
     """
-    Étape "Data Validation" du pipeline (§4).
+    Étape "Data Validation" du pipeline.
 
     Détecte, sans jamais planter sur une valeur invalide : sortie inconnue,
     doublon, valeur négative, perte hors bornes, données arrivant en retard.
@@ -73,7 +73,7 @@ class DataValidator:
         self._last_valid_timestamp: dict[str, datetime] = {}
         self._missing_emitted_until: dict[str, datetime] = {}
         """Dernier créneau déjà signalé MISSING par `missing_slots`, pour ne
-        jamais réémettre deux fois le même trou (idempotence, §31)."""
+        jamais réémettre deux fois le même trou (idempotence)."""
 
     def validate_batch(
         self, raw_measurements: list[RawMeasurement], now: datetime | None = None

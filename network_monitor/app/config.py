@@ -1,5 +1,5 @@
 """
-Configuration du système (§35). Chargée via `yaml.safe_load` uniquement
+Configuration du système. Chargée via `yaml.safe_load` uniquement
 (jamais `yaml.load`), pour empêcher l'exécution de code arbitraire depuis
 un fichier de configuration non fiable.
 
@@ -66,7 +66,7 @@ class LossDetectionConfig(BaseModel):
 
 
 class IsolationForestConfig(BaseModel):
-    """Détecteur optionnel de confirmation (§17). Ne décide jamais seul
+    """Détecteur optionnel de confirmation. Ne décide jamais seul
     d'ouvrir un incident : son score enrichit les preuves, rien d'autre."""
 
     enabled: bool = False
@@ -81,7 +81,7 @@ class ExtendedFeaturesConfig(BaseModel):
 
 
 class DetectionConfig(BaseModel):
-    """Paramètres de la détection statistique (§17-§20). La détection du
+    """Paramètres de la détection statistique. La détection du
     trafic n'est jamais désactivable indépendamment : sans elle il n'y a
     plus de détection du tout. Seule la composante pertes l'est (`loss.enabled`)."""
 
@@ -120,14 +120,14 @@ class IncidentConfig(BaseModel):
     merge_window: timedelta = timedelta(minutes=20)
     min_suspect_steps: int = Field(default=3, ge=1, le=12)
     """Nombre de pas au-dessus de `warning_score` avant qu'un SUSPECT tolère des creux
-    (incident intermittent, §22). En dessous, un creux le referme aussitôt : un ou deux
+    (incident intermittent). En dessous, un creux le referme aussitôt : un ou deux
     pics isolés sont le bruit ordinaire de la mesure. Mesuré sur le Mock (8 jeux, 96
     scénarios) : à 2, 94 scénarios détectés et 37 faux incidents ; à 3, 87 détectés et 10
     faux incidents — la différence est faite des intermittents dont un seul pas sur trois
     tombe dans la fenêtre « actif », que le pas de 5 min ne distingue pas du bruit."""
     """Une nouvelle anomalie survenant dans cette fenêtre après la fermeture
     d'un incident sur la même sortie rouvre ce même incident au lieu d'en
-    créer un nouveau (§22 : un incident intermittent doit rester un seul
+    créer un nouveau (un incident intermittent doit rester un seul
     incident)."""
     per_output_overrides: dict[str, IncidentOutputOverride] = Field(default_factory=dict)
 
@@ -138,7 +138,7 @@ class IncidentConfig(BaseModel):
 
     @model_validator(mode="after")
     def _thresholds_ordered(self) -> IncidentConfig:
-        # §21 : les trois seuils doivent être strictement ordonnés, sans quoi
+        # Les trois seuils doivent être strictement ordonnés, sans quoi
         # un incident peut s'ouvrir sans être jamais passé par l'état SUSPECT
         # (ou l'inverse : un score "warning" au-dessus du score d'ouverture).
         if not (self.close_score < self.warning_score < self.open_score):
@@ -169,7 +169,7 @@ class AlertsConfig(BaseModel):
 
 class ForecastConfig(BaseModel):
     models: list[str] = Field(default_factory=lambda: ["seasonal_baseline", "holt_winters"])
-    """Modèles candidats pour la sélection automatique (§8). Retirer un nom de
+    """Modèles candidats pour la sélection automatique. Retirer un nom de
     cette liste l'exclut de la sélection, même s'il resterait autrement le
     meilleur candidat."""
 
@@ -185,7 +185,7 @@ class HistoryConfig(BaseModel):
 
 
 class RecalibrationConfig(BaseModel):
-    """Recalibration périodique des modèles de prévision (§32)."""
+    """Recalibration périodique des modèles de prévision."""
 
     enabled: bool = True
     interval: timedelta = timedelta(hours=24)
@@ -217,7 +217,7 @@ class PrometheusOutput(BaseModel):
 
 
 class SourceConfig(BaseModel):
-    """Source de données (§6) : Mock (défaut), rejeu CSV, ou table SQL."""
+    """Source de données : Mock (défaut), rejeu CSV, ou table SQL."""
 
     type: Literal["mock", "csv", "parquet", "sql", "prometheus"] = "mock"
     path: str | None = None
@@ -380,7 +380,7 @@ Channel = Annotated[TelegramChannel | WebhookChannel | SmsChannel, Field(discrim
 
 
 class NotificationsConfig(BaseModel):
-    """Alertes sortantes (§27). Les secrets (jetons, mots de passe, URL) ne sont jamais ici :
+    """Alertes sortantes. Les secrets (jetons, mots de passe, URL) ne sont jamais ici :
     chaque canal nomme la variable d'environnement qui les porte."""
 
     enabled: bool = False
@@ -487,7 +487,7 @@ class StorageConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
-    """Racine de la configuration (§35)."""
+    """Racine de la configuration."""
 
     source: SourceConfig = SourceConfig()
     storage: StorageConfig = StorageConfig()

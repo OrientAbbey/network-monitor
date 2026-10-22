@@ -1,4 +1,4 @@
-"""Vérifications rapides des contraintes définies sur les modèles (§3, §13, §16, §19-24)."""
+"""Vérifications rapides des contraintes définies sur les modèles."""
 
 from datetime import datetime, timedelta, timezone
 

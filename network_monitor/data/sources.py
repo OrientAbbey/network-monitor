@@ -1,5 +1,5 @@
 """
-Sources de données réelles (§6) : relecture d'un export CSV, lecture d'une
+Sources de données réelles : relecture d'un export CSV, lecture d'une
 table SQL. Chacune n'a qu'à convertir ses lignes en `TrafficSample` pour
 respecter le contrat `DataSource` ; le moteur d'analyse ne les distingue pas
 du Mock.
@@ -279,7 +279,7 @@ class PrometheusDataSource(DataSource):
 
     Les instants sont ceux d'une grille alignée sur l'époque (multiples de `interval`), commune
     à l'historique et au temps réel. Prometheus n'évalue que sur cette grille et omet les points
-    sans donnée : un trou de collecte reste un trou (§31), jamais une valeur inventée.
+    sans donnée : un trou de collecte reste un trou, jamais une valeur inventée.
 
     Source « live » : `get_latest()` interroge jusqu'à `maintenant - lag` et n'avance son curseur
     qu'après une réponse réussie, donc une panne de Prometheus ne perd rien : le tick suivant
@@ -393,7 +393,7 @@ class PrometheusDataSource(DataSource):
 
 
 def build_source(config: AppConfig) -> DataSource:
-    """Construit la source choisie par `source.type` (§35)."""
+    """Construit la source choisie par `source.type`."""
     src = config.source
     interval = config.monitoring.interval
     if src.type == "csv":

@@ -69,7 +69,7 @@ export function pointerToTime(
  * Fusionne de nouveaux points dans une série affichée (rafraîchissement incrémental) : dédoublonne
  * par horodatage (le nouveau point l'emporte : une valeur peut être corrigée), trie, et abandonne
  * ce qui sort de la fenêtre `spanMs` mesurée depuis le point le plus récent — l'horloge du
- * navigateur n'intervient pas (§13).
+ * navigateur n'intervient pas.
  */
 export function mergeSeries<T extends { timestamp: string }>(prev: T[], incoming: T[], spanMs: number): T[] {
   if (incoming.length === 0 && prev.length === 0) return prev;

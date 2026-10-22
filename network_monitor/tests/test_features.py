@@ -1,4 +1,4 @@
-"""Features (§9), Isolation Forest (§17) et écriture groupée d'un tick (§29)."""
+"""Features, Isolation Forest et écriture groupée d'un tick."""
 
 from collections import deque
 from datetime import datetime, timedelta, timezone

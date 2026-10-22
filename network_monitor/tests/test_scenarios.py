@@ -1,5 +1,5 @@
 """
-Tests de scénarios de bout en bout (§34) : Mock -> Forecast -> Detection ->
+Tests de scénarios de bout en bout : Mock -> Forecast -> Detection ->
 Incident, pour chaque type minimal requis. Chaque test vérifie le
 comportement observable (un incident s'est ouvert ou non) sans jamais
 transmettre la vérité terrain du Mock au détecteur.
@@ -22,7 +22,7 @@ OUTPUT = "OUT_001"
 
 def _run(scenario: AnomalyScenario | None, ticks: int) -> list[IncidentRow]:
     """Calibre sur 40 jours (sous le seuil de 45j : baseline saisonnière, rapide et stable ;
-    suffisamment au-dessus du minimum de 30j pour un taux de faux positifs réaliste, cf. §11),
+    suffisamment au-dessus du minimum de 30j pour un taux de faux positifs réaliste),
     injecte éventuellement un scénario, exécute `ticks` pas et renvoie les lignes
     d'incident enregistrées pour la sortie testée."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -121,7 +121,7 @@ def test_long_incident_stays_open_across_many_ticks():
     [ScenarioType.PROGRESSIVE_RECOVERY, ScenarioType.COMBINED],
 )
 def test_remaining_scenario_types_run_without_error(scenario_type):
-    """Les deux derniers types du §7 (non listés explicitement au §34) doivent au moins
+    """Les deux derniers types de scénario doivent au moins
     s'exécuter sans erreur ; leur détection n'est pas garantie à ce niveau de sévérité."""
     rows = _run(_scenario(scenario_type, duration_minutes=40), ticks=20)
     assert isinstance(rows, list)  # ne doit pas lever d'exception

@@ -1,5 +1,5 @@
 """
-Stockage (§29) : tables séparées (mesures, prévisions, anomalies,
+Stockage : tables séparées (mesures, prévisions, anomalies,
 incidents, alertes) pour éviter qu'un incident ne duplique les observations
 brutes.
 
@@ -78,7 +78,7 @@ def _opt_utc(dt: datetime | None) -> datetime | None:
 
 
 def _as_utc(dt: datetime) -> datetime:
-    """Ré-attache le fuseau UTC à la lecture (perdu par le driver SQLite, §3 exige timezone-aware)."""
+    """Ré-attache le fuseau UTC à la lecture (perdu par le driver SQLite : toute date doit être timezone-aware)."""
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
@@ -121,7 +121,7 @@ class AnomalyRow(Base):
     loss_deviation_points: Mapped[float | None] = mapped_column(Float, nullable=True)
     traffic_out_of_interval: Mapped[bool] = mapped_column(Boolean, default=False)
     isolation_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    features: Mapped[dict[str, float]] = mapped_column(JSON, default=dict)  # §9
+    features: Mapped[dict[str, float]] = mapped_column(JSON, default=dict)
 
 
 class IncidentRow(Base):
@@ -144,8 +144,8 @@ class IncidentRow(Base):
     maintenance: Mapped[bool] = mapped_column(Boolean, default=False)
     root_cause_incident_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     inhibited: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Les preuves sont propres à l'incident (résumés, pas les mesures brutes,
-    # §29) : un JSON compact est plus simple qu'une table de jointure pour
+    # Les preuves sont propres à l'incident (résumés, pas les mesures brutes) :
+    # un JSON compact est plus simple qu'une table de jointure pour
     # un volume par incident qui reste faible (plafonné, cf. IncidentManager).
     evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
 
@@ -153,7 +153,7 @@ class IncidentRow(Base):
 
 
 class AlertRow(Base):
-    """Une ligne par alerte émise (§27) : trace d'audit légère, découplée du
+    """Une ligne par alerte émise : trace d'audit légère, découplée du
     cycle de vie de l'incident (contrairement à IncidentRow, jamais mise à
     jour en place — chaque alerte est un fait ponctuel)."""
 
@@ -234,7 +234,7 @@ class NotificationRow(Base):
 
 
 class Repository(ABC):
-    """Abstraction de stockage (§29), non couplée au Mock ni aux algorithmes."""
+    """Abstraction de stockage, non couplée au Mock ni aux algorithmes."""
 
     @abstractmethod
     def save_samples(self, samples: list[TrafficSample]) -> None: ...

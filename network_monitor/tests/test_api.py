@@ -1,4 +1,4 @@
-"""Tests de l'API FastAPI (§37)."""
+"""Tests de l'API FastAPI."""
 
 import time
 from datetime import datetime, timedelta
@@ -181,7 +181,7 @@ def test_window_is_bounded(client):
 
 
 def test_span_hours_is_relative_to_server_clock(client):
-    """La fenêtre relative suit l'horloge simulée du serveur, pas celle du client (§13)."""
+    """La fenêtre relative suit l'horloge simulée du serveur, pas celle du client."""
     oid = client.get("/outputs").json()[0]["output_id"]
     _wait_until(lambda: len(client.get(f"/outputs/{oid}/history", params={"span_hours": 12}).json()) >= 3)
     status = client.get("/monitoring/status").json()

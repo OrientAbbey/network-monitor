@@ -1,7 +1,6 @@
 """
-Features étendues (§9.2), isolées du pipeline V1 : calculées seulement si
-`detection.extended_features.enabled` est activé, ou par l'Isolation Forest
-(§17), qui est leur seul consommateur.
+Features étendues, isolées du pipeline V1 : calculées seulement si
+`detection.extended_features.enabled` est activé, ou par l'Isolation Forest, qui est leur seul consommateur.
 """
 
 from __future__ import annotations

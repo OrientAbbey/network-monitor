@@ -1,5 +1,5 @@
 """
-Archive Parquet des mesures brutes (§29) : ce que la purge retire de la base n'est pas perdu,
+Archive Parquet des mesures brutes : ce que la purge retire de la base n'est pas perdu,
 il est rangé en colonnes compressées — un dossier par sortie, un fichier par jour. Relisible
 telle quelle par `ParquetDataSource` (rejeu, contre-expertise d'un incident, évaluation).
 """

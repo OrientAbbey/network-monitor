@@ -1,5 +1,5 @@
 """
-Rapport de disponibilité (§33) : combien de temps chaque sortie a été en incident sur une période,
+Rapport de disponibilité : combien de temps chaque sortie a été en incident sur une période,
 calculé à partir des incidents confirmés et de leurs dates **rétro-datées** (`started_at` →
 `ended_at`), pas des dates de confirmation et de fermeture.
 

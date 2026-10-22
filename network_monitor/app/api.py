@@ -1,5 +1,5 @@
 """
-API FastAPI (§37) : expose le système de monitoring en HTTP.
+API FastAPI : expose le système de monitoring en HTTP.
 
 Couche fine au-dessus de MonitoringLoop / Repository / IncidentManager —
 aucune logique métier propre ici, uniquement sérialisation et orchestration
@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 # Cela bloquerait le démarrage de l'API (le lifespan attend la calibration
 # avant de répondre aux requêtes). En contexte de démonstration/développement
 # avec source Mock, un historique plus court reste sous le seuil et retombe
-# sur la Seasonal Baseline, nettement plus rapide (§11). Un déploiement réel
+# sur la Seasonal Baseline, nettement plus rapide. Un déploiement réel
 # peut toujours passer AppConfig.defaults() explicitement à MonitoringState.
 #
 # Ne jamais muter cet objet en place : chaque MonitoringState en prend une
@@ -78,13 +78,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_API_CONFIG = AppConfig(history=HistoryConfig(minimum=timedelta(days=30), preferred=timedelta(days=40)))
 
 _MAX_WINDOW_SPAN = timedelta(days=31)
-"""Plage maximale pour un `since`/`until` explicite (§3) : évite qu'une
+"""Plage maximale pour un `since`/`until` explicite : évite qu'une
 requête mal bornée ne tente de sérialiser des mois de mesures en une fois."""
 
 
 def require_token(request: Request, authorization: Annotated[str | None, Header()] = None) -> str:
     """
-    Dépendance FastAPI protégeant les endpoints de contrôle (§37). Renvoie l'identité
+    Dépendance FastAPI protégeant les endpoints de contrôle. Renvoie l'identité
     authentifiée (nom d'utilisateur, ou "api-token" pour le jeton machine), journalisée
     par les endpoints qui modifient l'état.
 
@@ -136,9 +136,7 @@ def _client(request: Request) -> str:
     return request.client.host if request.client else "inconnu"
 
 
-# ---------------------------------------------------------------------------
-# État du service : configuration, boucle, thread d'exécution
-# ---------------------------------------------------------------------------
+# --- État du service : configuration, boucle, thread d'exécution ---
 
 
 @dataclass
@@ -163,13 +161,13 @@ class MonitoringState:
     (app/main.py) est bloquant et n'a pas de notion de rythme réel, donc
     l'API pilote elle-même l'avancée du temps simulé, à un rythme accéléré
     (`seconds_per_tick`) adapté à une démonstration plutôt qu'aux 5 minutes
-    réelles qu'implique §3 du cahier des charges.
+    réelles d'un déploiement.
     """
 
     def __init__(self, config: AppConfig | None = None, db_url: str | None = None) -> None:
         # Copie profonde : cette instance ne doit jamais pouvoir muter
         # DEFAULT_API_CONFIG (ni la config passée par l'appelant), qu'elle
-        # vienne d'ici ou d'un futur PUT /config (§35).
+        # vienne d'ici ou d'un futur PUT /config.
         self.config = (config or DEFAULT_API_CONFIG).model_copy(deep=True)
         archive = ParquetArchive(self.config.storage.archive_dir) if self.config.storage.archive_dir else None
         db_url = db_url or self.config.storage.database_url
@@ -355,9 +353,7 @@ app.add_middleware(
 )
 
 
-# ---------------------------------------------------------------------------
-# Schémas de réponse spécifiques à l'API (au-delà des modèles du cœur métier)
-# ---------------------------------------------------------------------------
+# --- Schémas de réponse spécifiques à l'API (au-delà des modèles du cœur métier) ---
 
 
 class OutputSummary(BaseModel):
@@ -374,14 +370,14 @@ class MonitoringStatus(BaseModel):
     server_time: datetime
     """Heure réelle du serveur (UTC) — permet au client de mesurer l'écart
     avec `simulated_now` au lieu de comparer `simulated_now` à sa propre
-    horloge locale, qui peut être en avance ou en retard (§13)."""
+    horloge locale, qui peut être en avance ou en retard."""
     interval_seconds: float
     seconds_per_tick: float
     outputs: list[str]
 
 
 class ConfigUpdate(BaseModel):
-    """Sous-ensemble modifiable à chaud de la configuration (§35, §21)."""
+    """Sous-ensemble modifiable à chaud de la configuration."""
 
     open_score: float | None = Field(default=None, ge=0.0, le=1.0)
     close_score: float | None = Field(default=None, ge=0.0, le=1.0)
@@ -406,7 +402,7 @@ class LoginResponse(BaseModel):
 
 
 class AlertOut(BaseModel):
-    """Représentation API d'une alerte (§27/§28)."""
+    """Représentation API d'une alerte."""
 
     incident_id: str
     output_id: str
@@ -447,9 +443,7 @@ class AlertOut(BaseModel):
         )
 
 
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
+# --- Endpoints ---
 
 
 @app.get("/health")
@@ -544,7 +538,7 @@ def _parse_window(
         if value is not None and value.tzinfo is None:
             raise HTTPException(
                 status_code=422,
-                detail=f"`{label}` doit inclure un fuseau horaire (ex. suffixe Z ou +00:00), §3",
+                detail=f"`{label}` doit inclure un fuseau horaire (ex. suffixe Z ou +00:00)",
             )
     end = until or state.now
     start = since or (end - default_span)
@@ -599,7 +593,7 @@ def output_history(
     """`span_hours` demande une fenêtre relative à l'heure *serveur*
     (`state.now`), pas à l'heure du client : c'est ce que le dashboard doit
     utiliser plutôt que de reconstruire `since`/`until` depuis `new Date()`
-    (§13 — l'horloge simulée avance à un rythme différent de l'horloge réelle)."""
+    (l'horloge simulée avance à un rythme différent de l'horloge réelle)."""
     _ensure_known_output(output_id)
     if span_hours is not None and since is None and until is None:
         since = state.now - timedelta(hours=span_hours)
@@ -644,7 +638,7 @@ def output_forecast_ahead(
     horizon_minutes: Annotated[int, Query(ge=5, le=24 * 60)] = 35,
 ) -> list[ForecastResult]:
     """
-    Prévision à la demande au-delà de l'instant simulé courant (§13) —
+    Prévision à la demande au-delà de l'instant simulé courant —
     alimente la courbe "Prédiction" du dashboard, calculée à la volée à
     partir du modèle déjà calibré, sans rien persister.
     """
@@ -857,7 +851,7 @@ def list_alerts(
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     all: Annotated[bool, Query(description="inclut les signaux faibles (suspect, retour à la normale, non confirmés)")] = False,
 ) -> list[AlertOut]:
-    """Historique des alertes émises (§27), les plus récentes d'abord. Par défaut, seulement les
+    """Historique des alertes émises, les plus récentes d'abord. Par défaut, seulement les
     alertes qui ont compté : un signal faible résorbé sans jamais avoir été confirmé n'en est pas une
     (`all=true` pour tout voir : audit, mise au point des seuils)."""
     if output_id is not None:
@@ -1010,8 +1004,7 @@ def get_config() -> AppConfig:
 @app.put("/config", response_model=AppConfig)
 def update_config(update: ConfigUpdate, subject: AdminSubject) -> AppConfig:
     """
-    Met à jour à chaud le sous-ensemble modifiable de la configuration
-    (§35). Reconstruit un AppConfig complet et le valide avant toute prise
+    Met à jour à chaud le sous-ensemble modifiable de la configuration. Reconstruit un AppConfig complet et le valide avant toute prise
     d'effet (jamais d'affectation directe d'attribut, qui contournerait les
     validateurs, ex. l'ordre close < warning < open).
     """

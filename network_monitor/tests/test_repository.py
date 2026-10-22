@@ -1,4 +1,4 @@
-"""Tests du stockage : round-trip et séparation des tables (§29, §34)."""
+"""Tests du stockage : round-trip et séparation des tables."""
 
 from datetime import datetime, timedelta, timezone
 
@@ -92,7 +92,7 @@ def test_closed_incident_is_not_listed_as_active(repo):
 
 
 def test_forecasts_and_anomalies_do_not_affect_raw_measurements_table(repo):
-    """§29 : les tables doivent rester indépendantes les unes des autres."""
+    """Les tables doivent rester indépendantes les unes des autres."""
     repo.save_forecasts(
         [
             ForecastResult(

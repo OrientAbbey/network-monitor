@@ -1,4 +1,4 @@
-"""Tests unitaires de la détection (§14-§16)."""
+"""Tests unitaires de la détection."""
 
 from datetime import datetime, timezone
 
@@ -57,7 +57,7 @@ def test_traffic_outside_interval_has_positive_score():
     assert deviation_pct < 0  # baisse de trafic
 
 
-# --- detect_loss_anomaly : non-régression sur la saturation (§15) --------
+# --- detect_loss_anomaly : non-régression sur la saturation --------
 
 
 def test_loss_within_normal_band_has_zero_score():
@@ -77,7 +77,7 @@ def test_loss_far_beyond_dispersion_has_high_score():
 
 
 def test_loss_baseline_dispersion_is_floored():
-    """Une sortie à variance quasi nulle ne doit pas devenir hypersensible (§15)."""
+    """Une sortie à variance quasi nulle ne doit pas devenir hypersensible."""
     history = [_sample(loss=0.05) for _ in range(50)]  # dispersion historique ~0
     baseline = LossBaseline.from_history(history, loss_std_floor=0.05)
     assert baseline.dispersion >= 0.05

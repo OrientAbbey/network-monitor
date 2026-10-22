@@ -1,5 +1,5 @@
 """
-Évaluation de la détection contre la vérité terrain du Mock (§33).
+Évaluation de la détection contre la vérité terrain du Mock.
 
 Rapproche les incidents détectés (confirmés : `opened_at` renseigné) des
 scénarios injectés par recouvrement temporel sur la même sortie, puis calcule
@@ -96,7 +96,7 @@ def standard_scenarios(
 
 
 def evaluate(scenarios: list[AnomalyScenario], incidents: list[Incident], observed_days: float) -> dict:
-    """Métriques §33 pour un jeu de scénarios réels et d'incidents détectés."""
+    """Métriques de détection pour un jeu de scénarios réels et d'incidents détectés."""
     # (incident, ouverture) : `opened_at` est garanti non nul pour les incidents confirmés.
     confirmed = [(i, i.opened_at) for i in incidents if i.opened_at is not None]
     matched: set[str] = set()
@@ -201,14 +201,6 @@ def replay(cap: Capture, incident: dict | None = None) -> dict:
         if inc is not None:
             touched[inc.id] = inc
     return evaluate(cap.scenarios, list(touched.values()), cap.days)
-
-
-def run_evaluation(
-    seed: int, days: float, scenarios: list[AnomalyScenario] | None = None, incident: dict | None = None
-) -> dict:
-    """Une exécution complète (capture + rejeu). `incident` surcharge des champs de
-    `IncidentConfig` (ex. `{"minimum_duration": "15m"}`)."""
-    return replay(capture(seed, days, scenarios), incident)
 
 
 GRID: dict[str, list] = {

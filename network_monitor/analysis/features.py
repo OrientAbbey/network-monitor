@@ -1,5 +1,5 @@
 """
-Features V1 (§9.1) : celles que la détection consomme réellement.
+Features V1 : celles que la détection consomme réellement.
 
 `traffic_vs_expected` et `loss_vs_expected` contextualisent la mesure brute
 par rapport à l'attendu ; `rolling_std_1h` mesure la volatilité récente ;

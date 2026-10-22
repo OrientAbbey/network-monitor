@@ -1,6 +1,6 @@
 """
-Boucle temps réel (§30) : assemble les modules sans logique métier propre.
-Chaque étape correspond explicitement à une étape du §30 pour rester lisible.
+Boucle temps réel : assemble les modules sans logique métier propre.
+Chaque étape de `run_tick` est numérotée en commentaire pour rester lisible.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class _TickResults:
-    """Résultats d'un tick, écrits ensemble en une seule transaction (§29)."""
+    """Résultats d'un tick, écrits ensemble en une seule transaction."""
 
     samples: list[TrafficSample] = field(default_factory=list)
     forecasts: list[ForecastResult] = field(default_factory=list)
@@ -54,9 +54,9 @@ class _TickResults:
 
 class MonitoringLoop:
     """
-    Exécute, à chaque tick, les étapes 1 à 11 du §30 pour toutes les sorties
+    Exécute, à chaque tick, les étapes 1 à 11 pour toutes les sorties
     connues. Ne connaît aucun détail d'implémentation des modules qu'elle
-    orchestre — c'est le rôle de chacun d'eux (§4).
+    orchestre — c'est le rôle de chacun d'eux.
     """
 
     def __init__(
@@ -84,7 +84,7 @@ class MonitoringLoop:
         self._forecast_models: dict[str, ForecastModel] = {}
         self._loss_baselines: dict[str, LossBaseline] = {}
         self._forests: dict[str, IsolationForestDetector] = {}
-        # Mesures précédentes de chaque sortie (1 h), pour les features glissantes (§9).
+        # Mesures précédentes de chaque sortie (1 h), pour les features glissantes.
         self._recent: dict[str, deque[TrafficSample]] = {
             o: deque(maxlen=history_steps(source.get_interval())) for o in source.list_outputs()
         }
@@ -104,7 +104,7 @@ class MonitoringLoop:
         """
         Prévision à la demande au-delà de `from_time`, sans faire progresser
         la boucle ni rien persister — sert la courbe "prédiction" du
-        dashboard (§13), à partir du modèle déjà calibré pour cette sortie.
+        dashboard, à partir du modèle déjà calibré pour cette sortie.
         """
         model = self._forecast_models.get(output_id)
         if model is None:
@@ -112,13 +112,13 @@ class MonitoringLoop:
         return model.predict(from_time, horizon, self._source.get_interval())
 
     def calibrate(self, now: datetime) -> None:
-        """Calibration initiale (§8) : un modèle et une baseline de pertes par sortie."""
+        """Calibration initiale : un modèle et une baseline de pertes par sortie."""
         self._recompute_models(now, exclude_ranges=None)
         self._last_calibrated_at = now
 
     def maybe_recalibrate(self, now: datetime) -> None:
         """
-        Recalibration périodique (§32) : hors du chemin critique de `run_tick`,
+        Recalibration périodique : hors du chemin critique de `run_tick`,
         ne s'exécute que si `recalibration.interval` s'est écoulé depuis la
         dernière calibration. Les plages couvertes par un incident actif sont
         exclues de l'historique réajusté, pour ne pas apprendre l'anomalie en
@@ -205,7 +205,7 @@ class MonitoringLoop:
             self._recent[output_id].extend(tail)
 
     def run_tick(self, now: datetime) -> None:
-        """Un pas de la boucle (§30, étapes 1 à 11)."""
+        """Un pas de la boucle (étapes 1 à 11)."""
         # Fenêtres de maintenance : relues à chaque pas (quelques lignes) pour qu'une fenêtre créée ou
         # annulée par l'API s'applique au tick suivant, sans redémarrage.
         self._maintenance = self._storage.list_maintenance(now - timedelta(days=1), now + timedelta(days=1))
@@ -224,9 +224,9 @@ class MonitoringLoop:
 
         # 11. persister tout le tick en une transaction. Un incident jamais
         # confirmé (jamais passé par OPEN) n'est pas écrit : ce n'est que du
-        # bruit résorbé seul (§19), voir `incident_worth_persisting`. Un
+        # bruit résorbé seul, voir `incident_worth_persisting`. Un
         # incident tout juste fermé, lui, l'est (il ne réapparaîtrait plus
-        # dans active_incidents(), §29).
+        # dans active_incidents()).
         alerts = [*tick.alerts, *self._escalations(now, tick)] if self._config.alerts.enabled else []
         self._storage.save_tick(
             tick.samples,
@@ -284,7 +284,7 @@ class MonitoringLoop:
             return  # sortie non calibrée : rien à comparer
 
         if not validated.is_usable:
-            # 5-7. pas de comparaison possible : anomalie neutre marquant le trou (§31).
+            # 5-7. pas de comparaison possible : anomalie neutre marquant le trou.
             gap_result = AnomalyResult(
                 output_id=output_id,
                 timestamp=validated.timestamp,
@@ -309,7 +309,7 @@ class MonitoringLoop:
             sample, forecast, baseline, self._persistence, self._config.incident.open_score,
             loss_enabled=self._config.detection.loss.enabled,
         )
-        # Features (§9) et score Isolation Forest (§17) : enrichissement, sans
+        # Features et score Isolation Forest : enrichissement, sans
         # effet sur les scores ci-dessus ni sur la décision d'ouvrir un incident.
         anomaly.features = self._features(sample, forecast, baseline)
         forest = self._forests.get(output_id)

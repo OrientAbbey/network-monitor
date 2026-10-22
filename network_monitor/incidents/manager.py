@@ -1,7 +1,7 @@
 """
-Moteur d'incidents (§19-§27) : transforme des scores d'anomalie ponctuels
-en incidents avec hystérésis (§21), sans jamais dépendre d'un algorithme de
-détection particulier (§4).
+Moteur d'incidents : transforme des scores d'anomalie ponctuels
+en incidents avec hystérésis, sans jamais dépendre d'un algorithme de
+détection particulier.
 """
 
 from __future__ import annotations
@@ -38,14 +38,14 @@ class _OutputState:
     last_closed_incident: Incident | None = None
     last_closed_at: datetime | None = None
     """Dernier incident confirmé (opened_at non None) fermé pour cette sortie,
-    conservé pendant `merge_window` (§22) pour rouvrir le même incident si une
+    conservé pendant `merge_window` pour rouvrir le même incident si une
     nouvelle anomalie survient peu après, plutôt que d'en ouvrir un autre."""
 
 
 def incident_worth_persisting(incident: Incident) -> bool:
     """
     Un incident qui n'a jamais franchi open_score est un signal faible qui
-    s'est résorbé seul (§19) — il n'apporte rien à l'historique et ne doit
+    s'est résorbé seul — il n'apporte rien à l'historique et ne doit
     pas être écrit en base : sur 7 jours de trafic normal, c'est ~99% des
     lignes générées sans ce filtre. `opened_at` reste renseigné même après
     fermeture, donc ce test reste vrai pour un incident confirmé qui vient
@@ -55,7 +55,7 @@ def incident_worth_persisting(incident: Incident) -> bool:
 
 
 def _classify_type(traffic_score: float, loss_score: float, traffic_deviation_pct: float | None) -> IncidentType:
-    """Type « instantané » d'un incident, d'après son signal le plus marqué (§23, §25)."""
+    """Type « instantané » d'un incident, d'après son signal le plus marqué."""
     traffic_relevant = traffic_score > 0.3
     loss_relevant = loss_score > 0.3
     rising_traffic = (traffic_deviation_pct or 0.0) > 0
@@ -69,7 +69,7 @@ def _classify_type(traffic_score: float, loss_score: float, traffic_deviation_pc
     return IncidentType.HIGH_LOSS
 
 
-# Seuils du motif temporel (§23), choisis avec le banc d'évaluation
+# Seuils du motif temporel, choisis avec le banc d'évaluation
 # (`analysis/evaluation.py`, exactitude des types sur scénarios injectés).
 _PATTERN_MIN_POINTS = 6
 _PATTERN_MIN_PEAK = 20.0  # magnitude sous laquelle l'écart ressemble à du bruit
@@ -142,11 +142,11 @@ def _incident_type(evidence: list[IncidentEvidence]) -> IncidentType:
 @dataclass
 class Alert:
     """
-    Une alerte, toujours liée à un événement du moteur d'incidents (§27).
+    Une alerte, toujours liée à un événement du moteur d'incidents.
 
-    Porte directement le contenu attendu par §27/§28 (type, durée, trafic
+    Porte directement le contenu utile (type, durée, trafic
     attendu/observé, pertes) pour rester lisible sans consulter l'incident :
-    "compréhensible sans connaître le fonctionnement interne du modèle" (§28).
+    "compréhensible sans connaître le fonctionnement interne du modèle".
     """
 
     incident_id: str
@@ -175,8 +175,8 @@ class Alert:
 
 class IncidentManager:
     """
-    Gestionnaire du cycle de vie des incidents (§19-§27), à états
-    SUSPECT / OPEN / STALE / CLOSED (§19, révisé). Indépendant des
+    Gestionnaire du cycle de vie des incidents, à états
+    SUSPECT / OPEN / STALE / CLOSED. Indépendant des
     algorithmes de detection : ne consomme que des `AnomalyResult`.
     """
 
@@ -206,7 +206,7 @@ class IncidentManager:
 
     def update_config(self, config: IncidentConfig, critical_score: float | None = None) -> None:
         """
-        Remplace la configuration à chaud (§35), typiquement depuis l'API
+        Remplace la configuration à chaud, typiquement depuis l'API
         (PUT /config). N'affecte que les décisions futures : les incidents
         déjà ouverts continuent d'évoluer normalement, sans être recalculés
         rétroactivement avec les nouveaux seuils.
@@ -344,7 +344,7 @@ class IncidentManager:
     def _process_no_incident(
         self, result, state: _OutputState, min_duration, expected_traffic, expected_loss, observed_traffic, observed_loss
     ) -> list[Alert]:
-        """Aucun incident en cours : entrée en SUSPECT, ou réouverture (§22)."""
+        """Aucun incident en cours : entrée en SUSPECT, ou réouverture."""
         alerts: list[Alert] = []
         score = result.joint_anomaly_score
 
@@ -363,7 +363,7 @@ class IncidentManager:
 
     def _try_reopen(self, state: _OutputState, episode_start: datetime) -> Incident | None:
         """Rouvre le dernier incident confirmé de cette sortie si le nouvel épisode a commencé
-        moins de `merge_window` après sa fin (§22 : un incident intermittent reste un seul
+        moins de `merge_window` après sa fin (un incident intermittent reste un seul
         incident, pas une suite d'incidents distincts). N'est appelé qu'à la **confirmation**
         du nouvel épisode : un pic de bruit juste après la fin d'un incident ne le prolonge pas."""
         closed, closed_at = state.last_closed_incident, state.last_closed_at
@@ -387,7 +387,7 @@ class IncidentManager:
         score = result.joint_anomaly_score
 
         if incident.status == IncidentStatus.STALE:
-            # Une mesure valide reprend après un trou prolongé (§31) :
+            # Une mesure valide reprend après un trou prolongé :
             # l'incident redevient OPEN, il n'est jamais resté "résolu".
             incident.status = IncidentStatus.OPEN
 
@@ -402,7 +402,7 @@ class IncidentManager:
         if incident.status == IncidentStatus.SUSPECT:
             if score < self._config.warning_score:
                 # Un creux isolé ne referme pas le SUSPECT : un incident intermittent
-                # (§22) retombe sous le seuil à chaque période et doit rester un seul
+                # retombe sous le seuil à chaque période et doit rester un seul
                 # incident. Le SUSPECT ne se referme qu'après `recovery_duration` de calme.
                 if state.below_warning_since is None:
                     state.below_warning_since = result.timestamp
@@ -469,7 +469,7 @@ class IncidentManager:
             new_severity = self._severity_for(score)
             severity_changed = new_severity != incident.severity
             incident.severity = new_severity
-            # Anti-spam (§27) : une alerte par événement du moteur, pas une par
+            # Anti-spam : une alerte par événement du moteur, pas une par
             # tick — seul un changement de sévérité ou de type justifie une mise à jour.
             if severity_changed or type_changed:
                 alerts.append(self._alert(incident, "updated", result.timestamp, self._describe(incident)))
@@ -488,16 +488,16 @@ class IncidentManager:
                 self._reset(state, incident)
             return alerts
 
-        # Entre close_score et open_score : incident maintenu tel quel (hystérésis, §21).
+        # Entre close_score et open_score : incident maintenu tel quel (hystérésis).
         state.below_close_since = None
         return alerts
 
-    # -- Trous de données (§31) --------------------------------------------------
+    # -- Trous de données --------------------------------------------------
 
     def _handle_data_gap(self, result: AnomalyResult, state: _OutputState) -> list[Alert]:
         """
         Une mesure MISSING ne fait ni progresser ni régresser le chrono de
-        persistance (§31). Un incident OPEN reste OPEN, avec une preuve
+        persistance. Un incident OPEN reste OPEN, avec une preuve
         `data_gap=True`, jusqu'à une limite dure (`stale_after`) au-delà de
         laquelle il passe en STALE.
         """
@@ -528,7 +528,7 @@ class IncidentManager:
             output_id=result.output_id,
             status=IncidentStatus.SUSPECT,
             severity=Severity.INFO,
-            incident_type=IncidentType.TRAFFIC_DROP,  # affiné à l'ouverture (§23)
+            incident_type=IncidentType.TRAFFIC_DROP,  # affiné à l'ouverture
             last_seen_at=result.timestamp,
             score=result.joint_anomaly_score,
         )
@@ -606,7 +606,7 @@ class IncidentManager:
     def _reset(self, state: _OutputState, closed_incident: Incident | None = None) -> None:
         if closed_incident is not None and closed_incident.opened_at is not None:
             # Incident confirmé (pas un simple signal faible résorbé) :
-            # mémorisé pour une éventuelle réouverture (§22, merge_window).
+            # mémorisé pour une éventuelle réouverture (merge_window).
             state.last_closed_incident = closed_incident
             state.last_closed_at = closed_incident.ended_at or closed_incident.closed_at
         state.incident = None

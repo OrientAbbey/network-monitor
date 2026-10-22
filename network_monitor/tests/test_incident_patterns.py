@@ -1,4 +1,4 @@
-"""Motifs d'incident (§22-§23) : intermittent = un seul incident, progressif, brusque, bruit isolé."""
+"""Motifs d'incident : intermittent = un seul incident, progressif, brusque, bruit isolé."""
 
 from datetime import datetime, timedelta, timezone
 

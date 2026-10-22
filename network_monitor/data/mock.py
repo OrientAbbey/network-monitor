@@ -1,8 +1,8 @@
 """
-Implémentation Mock de DataSource (§7).
+Implémentation Mock de DataSource.
 
 Sert à la fois de source de données pour développer/tester le système sans
-source réelle, et d'environnement de validation (§33) grâce à sa vérité
+source réelle, et d'environnement de validation grâce à sa vérité
 terrain interne, jamais transmise au détecteur.
 """
 
@@ -17,14 +17,12 @@ from pydantic import BaseModel, Field
 from network_monitor.app.models import Severity, TrafficSample
 from network_monitor.data.source import DataSource
 
-# ---------------------------------------------------------------------------
-# Profils de sortie
-# ---------------------------------------------------------------------------
+# --- Profils de sortie ---
 
 
 class OutputProfile(BaseModel):
     """
-    Comportement "normal" d'une sortie réseau (§7 : saisonnalité quotidienne
+    Comportement "normal" d'une sortie réseau (saisonnalité quotidienne
     et hebdomadaire, bruit, heures de pointe/creuses, échelle propre).
     """
 
@@ -46,7 +44,7 @@ class OutputProfile(BaseModel):
 
     # Niveau et dispersion habituels des pertes. Certaines sorties ont une
     # dispersion volontairement quasi nulle pour exercer le plancher
-    # loss_std_floor (§15) côté détection.
+    # loss_std_floor côté détection.
     base_loss_percent: float = 0.15
     loss_noise_std: float = 0.05
 
@@ -77,13 +75,11 @@ DEFAULT_PROFILES: list[OutputProfile] = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Scénarios d'anomalie
-# ---------------------------------------------------------------------------
+# --- Scénarios d'anomalie ---
 
 
 class ScenarioType(str, Enum):
-    """Les dix scénarios d'anomalie requis par le §7."""
+    """Les dix scénarios d'anomalie de la démonstration."""
 
     TRAFFIC_DROP = "traffic_drop"
     TRAFFIC_SPIKE = "traffic_spike"
@@ -99,9 +95,9 @@ class ScenarioType(str, Enum):
 
 class AnomalyScenario(BaseModel):
     """
-    Vérité terrain interne d'un scénario injecté (§7). Ce modèle n'est
+    Vérité terrain interne d'un scénario injecté. Ce modèle n'est
     jamais transmis au détecteur : il sert uniquement à générer le signal
-    et, plus tard, à évaluer les performances du système (§33).
+    et, plus tard, à évaluer les performances du système.
     """
 
     scenario_id: str
@@ -129,7 +125,7 @@ def _scenario_effect(scenario: AnomalyScenario, elapsed: np.ndarray) -> tuple[np
 
     Le mapping type -> forme d'effet est un choix d'implémentation du
     Mock, pas une spécification du cahier des charges au-delà de la
-    liste des dix types attendus (§7).
+    liste des dix types attendus.
     """
     e = np.clip(elapsed, 0.0, 1.0)
     t = scenario.type
@@ -174,7 +170,7 @@ def _scenario_effect(scenario: AnomalyScenario, elapsed: np.ndarray) -> tuple[np
     if t == ScenarioType.COMBINED:
         # Choix d'implémentation : dégradation progressive du trafic
         # combinée à des pics de pertes intermittents, pour représenter
-        # un scénario multi-anomalies réaliste (§7, point 10).
+        # un scénario multi-anomalies réaliste.
         traffic_factor = 1.0 - scenario.traffic_drop_fraction * e
         phase = np.mod(e * 4.0, 1.0)
         loss_offset = np.where(phase < 0.3, scenario.loss_offset_points, 0.0)
@@ -183,14 +179,12 @@ def _scenario_effect(scenario: AnomalyScenario, elapsed: np.ndarray) -> tuple[np
     return np.ones_like(e), np.zeros_like(e)
 
 
-# ---------------------------------------------------------------------------
-# MockDataSource
-# ---------------------------------------------------------------------------
+# --- MockDataSource ---
 
 
 class MockDataSource(DataSource):
     """
-    Générateur Mock (§7). Fonctionne immédiatement sans source réelle,
+    Générateur Mock. Fonctionne immédiatement sans source réelle,
     supporte génération historique (`load_history`) et continue
     (`get_latest`), et permet l'injection contrôlée de scénarios via
     `add_scenario`.
@@ -244,8 +238,7 @@ class MockDataSource(DataSource):
 
     def ground_truth(self) -> list[AnomalyScenario]:
         """
-        Vérité terrain complète (§7). À usage exclusif de l'évaluation
-        (§33) — ne doit jamais être transmise au détecteur pendant son
+        Vérité terrain complète. À usage exclusif de l'évaluation — ne doit jamais être transmise au détecteur pendant son
         fonctionnement normal.
         """
         return list(self._scenarios)

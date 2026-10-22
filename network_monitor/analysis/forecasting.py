@@ -1,9 +1,9 @@
 """
-Forecasting (§10-§13) : interface commune + deux implémentations V1.
+Forecasting : interface commune + deux implémentations V1.
 
-Holt-Winters ne porte que la saisonnalité quotidienne (§10.B) ; l'effet
+Holt-Winters ne porte que la saisonnalité quotidienne ; l'effet
 hebdomadaire est porté par la Seasonal Baseline. Le trafic est modélisé en
-interne via log1p (§9.3) — jamais exposé tel quel en dehors de ce module.
+interne via log1p — jamais exposé tel quel en dehors de ce module.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from network_monitor.app.models import ForecastModelName, ForecastResult, TrafficSample
 
 # Quantile normal à 80% bilatéral, utilisé pour dimensionner l'intervalle
-# prédictif (§13). Valeur fixe et documentée plutôt qu'un choix implicite.
+# prédictif. Valeur fixe et documentée plutôt qu'un choix implicite.
 _Z_80 = 1.2816
 _FORECAST_CONFIDENCE = 0.80
 
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ResidualReport:
-    """Écart entre une observation et sa prévision (§14)."""
+    """Écart entre une observation et sa prévision."""
 
     residual_mbps: float
     relative_residual: float
@@ -38,7 +38,7 @@ class ResidualReport:
 
 
 def compute_residual(sample: TrafficSample, forecast: ForecastResult) -> ResidualReport:
-    """Calcule le résidu et l'écart relatif d'une observation par rapport à sa prévision (§14)."""
+    """Calcule le résidu et l'écart relatif d'une observation par rapport à sa prévision."""
     residual = sample.traffic_mbps - forecast.predicted_traffic_mbps
     relative = residual / forecast.predicted_traffic_mbps if forecast.predicted_traffic_mbps > 0 else 0.0
     out_of_interval = not (forecast.lower_bound_mbps <= sample.traffic_mbps <= forecast.upper_bound_mbps)
@@ -51,7 +51,7 @@ def compute_residual(sample: TrafficSample, forecast: ForecastResult) -> Residua
 
 
 class ForecastModel(ABC):
-    """Interface commune à tout modèle de prévision (§36 : remplaçable sans toucher au reste)."""
+    """Interface commune à tout modèle de prévision (remplaçable sans toucher au reste)."""
 
     name: ForecastModelName
 
@@ -69,7 +69,7 @@ class ForecastModel(ABC):
 class SeasonalBaselineModel(ForecastModel):
     """
     Référence par (jour de semaine, créneau), avec créneaux voisins inclus
-    pour rester robuste avec peu d'historique (§10.A). Médiane privilégiée
+    pour rester robuste avec peu d'historique. Médiane privilégiée
     à la moyenne.
     """
 
@@ -95,7 +95,7 @@ class SeasonalBaselineModel(ForecastModel):
             buckets.setdefault((sample.timestamp.weekday(), slot), []).append(sample.traffic_mbps)
         self._buckets = buckets
         self._slots_per_day = slots_per_day
-        # Dispersion relative globale (§10.A) : avec peu d'historique, un
+        # Dispersion relative globale : avec peu d'historique, un
         # bucket isolé (peu d'occurrences du même jour/créneau) peut
         # sous-estimer sa vraie variabilité par pur effet d'échantillonnage.
         # Ce plancher, mesuré sur l'ensemble des buckets, stabilise
@@ -172,7 +172,7 @@ class SeasonalBaselineModel(ForecastModel):
 
 class HoltWintersModel(ForecastModel):
     """
-    Holt-Winters additif en espace log1p (§9.3, §10.B). Ne porte que la
+    Holt-Winters additif en espace log1p. Ne porte que la
     saisonnalité quotidienne : `seasonal_periods` = nombre de points par jour.
     """
 
@@ -187,7 +187,7 @@ class HoltWintersModel(ForecastModel):
         """Dernier horodatage de la série ayant servi à l'ajustement. `predict()`
         s'en sert pour situer `from_time` dans la série interne du modèle : une
         prévision demandée plusieurs heures après cette date doit avancer d'autant
-        de pas, pas repartir de la fin de l'ajustement à chaque appel (§13)."""
+        de pas, pas repartir de la fin de l'ajustement à chaque appel."""
 
     def fit(self, history: list[TrafficSample]) -> None:
         history = sorted(history, key=lambda s: s.timestamp)
@@ -253,9 +253,7 @@ class HoltWintersModel(ForecastModel):
         return results
 
 
-# ---------------------------------------------------------------------------
-# Sélection de modèle (§11)
-# ---------------------------------------------------------------------------
+# --- Sélection de modèle ---
 
 
 def select_model(
@@ -268,9 +266,9 @@ def select_model(
     """
     Choisit le meilleur modèle par backtesting simple (erreur absolue sur
     la fenêtre de validation), avec repli automatique sur la baseline
-    saisonnière si l'historique est trop court (§11).
+    saisonnière si l'historique est trop court.
 
-    `allowed_models` (config `forecast.models`, §35) restreint les candidats
+    `allowed_models` (config `forecast.models`) restreint les candidats
     évalués à leurs noms (`"seasonal_baseline"`, `"holt_winters"`) ; `None`
     autorise les deux, comme avant l'ajout de cette option.
     """
@@ -336,9 +334,7 @@ def _backtest_mae(
     return float(np.mean(errors)) if errors else math.inf
 
 
-# ---------------------------------------------------------------------------
-# Utilitaires internes
-# ---------------------------------------------------------------------------
+# --- Utilitaires internes ---
 
 
 def _infer_interval(history: list[TrafficSample]) -> timedelta:
@@ -347,7 +343,7 @@ def _infer_interval(history: list[TrafficSample]) -> timedelta:
         delta = history[i].timestamp - history[0].timestamp
         if delta.total_seconds() > 0:
             return delta
-    return timedelta(minutes=5)  # valeur par défaut (§3) si un seul point
+    return timedelta(minutes=5)  # valeur par défaut si un seul point
 
 
 def _slots_per_day(interval: timedelta) -> int:

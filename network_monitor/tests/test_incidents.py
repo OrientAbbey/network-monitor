@@ -1,4 +1,4 @@
-"""Tests du moteur d'incidents : hystérésis, persistance, trous de données (§34)."""
+"""Tests du moteur d'incidents : hystérésis, persistance, trous de données."""
 
 from datetime import datetime, timedelta, timezone
 
@@ -32,7 +32,7 @@ def _manager(**overrides) -> IncidentManager:
 
 
 def test_isolated_anomaly_does_not_open_incident():
-    """Une anomalie isolée ne doit pas immédiatement créer un incident (§20)."""
+    """Une anomalie isolée ne doit pas immédiatement créer un incident."""
     mgr = _manager()
     events = []
     for m, s in [(0, 0.1), (5, 0.85), (10, 0.1), (15, 0.1)]:
@@ -42,7 +42,7 @@ def test_isolated_anomaly_does_not_open_incident():
 
 
 def test_persistent_anomaly_opens_incident_after_minimum_duration():
-    """Anomalie persistante >= open_score pendant minimum_duration -> ouverture (§20)."""
+    """Anomalie persistante >= open_score pendant minimum_duration -> ouverture."""
     mgr = _manager()
     events = []
     for m, s in [(0, 0.6), (5, 0.8), (10, 0.85), (15, 0.9)]:
@@ -52,7 +52,7 @@ def test_persistent_anomaly_opens_incident_after_minimum_duration():
 
 
 def test_hysteresis_prevents_flapping_around_threshold():
-    """Un score oscillant entre close_score et open_score ne doit pas fermer l'incident (§21)."""
+    """Un score oscillant entre close_score et open_score ne doit pas fermer l'incident."""
     mgr = _manager()
     for m, s in [(0, 0.6), (10, 0.85), (20, 0.5), (30, 0.85), (40, 0.5)]:
         mgr.process(_result(m, s))
@@ -60,18 +60,18 @@ def test_hysteresis_prevents_flapping_around_threshold():
 
 
 def test_full_lifecycle_suspect_open_recovering_closed():
-    """Cycle complet incluant la durée de récupération (§22)."""
+    """Cycle complet incluant la durée de récupération."""
     mgr = _manager()
     events = []
     for m, s in [(0, 0.6), (10, 0.85), (20, 0.9), (25, 0.3), (35, 0.1)]:
         events += [a.event for a in mgr.process(_result(m, s))[0]]
-    # Pas de "updated" : la sévérité n'a pas changé entre 0.85 et 0.9 (§27, anti-spam).
+    # Pas de "updated" : la sévérité n'a pas changé entre 0.85 et 0.9 (anti-spam).
     assert events == ["suspect", "opened", "recovering", "closed"]
     assert mgr.active_incidents() == []
 
 
 def test_open_incident_does_not_emit_an_alert_per_tick():
-    """Un incident OPEN stable ne doit pas générer une alerte à chaque mesure (§27)."""
+    """Un incident OPEN stable ne doit pas générer une alerte à chaque mesure."""
     mgr = _manager()
     events = []
     for m in range(0, 120, 5):
@@ -81,7 +81,7 @@ def test_open_incident_does_not_emit_an_alert_per_tick():
 
 
 def test_confirmed_new_episode_within_merge_window_reopens_same_incident():
-    """§22 : un incident intermittent reste un seul incident, pas une suite d'incidents."""
+    """Un incident intermittent reste un seul incident, pas une suite d'incidents."""
     mgr = _manager()
     first = None
     for m, s in [(0, 0.6), (10, 0.85), (20, 0.9), (25, 0.1), (35, 0.1)]:
@@ -127,7 +127,7 @@ def test_incident_dates_are_retro_dated():
 
 
 def test_unconfirmed_suspect_is_not_worth_persisting():
-    """Un signal faible résorbé sans jamais ouvrir n'est que du bruit (§19)."""
+    """Un signal faible résorbé sans jamais ouvrir n'est que du bruit."""
     from network_monitor.incidents.manager import incident_worth_persisting
 
     mgr = _manager()
@@ -142,7 +142,7 @@ def test_unconfirmed_suspect_is_not_worth_persisting():
 
 
 def test_missing_data_suspends_but_does_not_reset_persistence():
-    """Une donnée MISSING pendant un incident OPEN ne doit ni le fermer ni le faire progresser (§31)."""
+    """Une donnée MISSING pendant un incident OPEN ne doit ni le fermer ni le faire progresser."""
     mgr = _manager()
     for m, s in [(0, 0.6), (10, 0.85)]:
         mgr.process(_result(m, s))
@@ -155,7 +155,7 @@ def test_missing_data_suspends_but_does_not_reset_persistence():
 
 
 def test_prolonged_gap_marks_incident_stale_then_recovers_on_valid_data():
-    """Au-delà de stale_after, l'incident passe STALE puis redevient OPEN à la reprise (§31)."""
+    """Au-delà de stale_after, l'incident passe STALE puis redevient OPEN à la reprise."""
     mgr = _manager()
     for m, s in [(0, 0.6), (10, 0.85)]:
         mgr.process(_result(m, s))
@@ -169,7 +169,7 @@ def test_prolonged_gap_marks_incident_stale_then_recovers_on_valid_data():
 
 
 def test_per_output_override_changes_minimum_duration():
-    """Les durées d'hystérésis sont surchargeables par sortie (§21)."""
+    """Les durées d'hystérésis sont surchargeables par sortie."""
     from network_monitor.app.config import IncidentOutputOverride
 
     mgr = _manager(per_output_overrides={"OUT_017": IncidentOutputOverride(minimum_duration=timedelta(minutes=20))})

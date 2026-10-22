@@ -1,7 +1,7 @@
 """
-Détection d'anomalies (§14-§16, §25).
+Détection d'anomalies.
 
-Normalisation unique et partagée (§16.1) : score = min(1, écart / référence),
+Normalisation unique et partagée : score = min(1, écart / référence),
 jamais un z-score classique — plus robuste aux queues épaisses et
 directement interprétable.
 """
@@ -22,13 +22,13 @@ from network_monitor.analysis.features_extended import (
 from network_monitor.analysis.forecasting import SeasonalBaselineModel, compute_residual
 from network_monitor.app.models import AnomalyResult, ForecastResult, TrafficSample
 
-# Même quantile que l'intervalle de prévision (§13) : une bande "normale"
+# Même quantile que l'intervalle de prévision : une bande "normale"
 # à ~80% de couverture, pas un seuil à 1 dispersion (trop sensible au bruit).
 _LOSS_BAND_Z = 1.2816
 
 
 def normalized_score(deviation: float, reference: float) -> float:
-    """Normalisation commune (§16.1) : borne l'écart entre 0 et 1."""
+    """Normalisation commune : borne l'écart entre 0 et 1."""
     if reference <= 0:
         return 1.0 if deviation != 0 else 0.0
     return float(min(1.0, abs(deviation) / reference))
@@ -37,7 +37,7 @@ def normalized_score(deviation: float, reference: float) -> float:
 @dataclass
 class LossBaseline:
     """
-    Baseline robuste des pertes pour une sortie (§15) : niveau habituel
+    Baseline robuste des pertes pour une sortie : niveau habituel
     (médiane) et dispersion (MAD), avec un plancher pour éviter qu'une
     sortie très stable ne devienne hypersensible.
     """
@@ -57,9 +57,9 @@ class LossBaseline:
 
 def detect_traffic_anomaly(sample: TrafficSample, forecast: ForecastResult) -> tuple[float, float, bool]:
     """
-    Détection trafic (§14) : renvoie (score, écart_relatif_%, hors_intervalle).
+    Détection trafic : renvoie (score, écart_relatif_%, hors_intervalle).
     Une variation à l'intérieur de l'intervalle prédictif n'est pas une
-    anomalie (§13) : le score n'est non nul qu'en dehors de l'intervalle.
+    anomalie : le score n'est non nul qu'en dehors de l'intervalle.
     """
     residual = compute_residual(sample, forecast)
     if not residual.out_of_interval:
@@ -76,9 +76,9 @@ def detect_traffic_anomaly(sample: TrafficSample, forecast: ForecastResult) -> t
 
 def detect_loss_anomaly(sample: TrafficSample, baseline: LossBaseline) -> tuple[float, float]:
     """
-    Détection pertes (§15) : renvoie (score, écart en points de %).
+    Détection pertes : renvoie (score, écart en points de %).
 
-    Même logique que le trafic (§16.1) : une déviation à l'intérieur d'une
+    Même logique que le trafic : une déviation à l'intérieur d'une
     bande "normale" (~80% de couverture, cohérent avec la confiance retenue
     pour le forecasting) n'est pas une anomalie. Score nul sous la baseline et dans
     cette bande, croissant ensuite avec l'excès — pas un ratio brut, qui
@@ -86,7 +86,7 @@ def detect_loss_anomaly(sample: TrafficSample, baseline: LossBaseline) -> tuple[
     """
     deviation = sample.loss_percent - baseline.median_loss_percent
     normal_band = _LOSS_BAND_Z * baseline.dispersion
-    # Seule une *hausse* des pertes est une anomalie (§25 : « augmentation des pertes »).
+    # Seule une *hausse* des pertes est une anomalie.
     # Des pertes inférieures à l'habitude ne le sont jamais : sur une sortie stable, un
     # bruit qui écrête les pertes à 0 % passait sinon pour un incident sévère.
     if deviation <= normal_band:
@@ -99,8 +99,8 @@ def detect_loss_anomaly(sample: TrafficSample, baseline: LossBaseline) -> tuple[
 class PersistenceTracker:
     """
     Suit, par sortie, le nombre de pas consécutifs où le score combiné
-    dépasse un seuil (§22), pour alimenter l'hystérésis du moteur
-    d'incidents (§21).
+    dépasse un seuil, pour alimenter l'hystérésis du moteur
+    d'incidents.
     """
 
     interval_seconds: float
@@ -117,8 +117,8 @@ class PersistenceTracker:
 
 def combine_scores(traffic_score: float, loss_score: float) -> float:
     """
-    Score combiné (§16, §25) : le maximum domine, mais la co-occurrence
-    renforce la confiance (cas 3 du §25 : trafic↓↓↓ + pertes↑↑↑) sans jamais
+    Score combiné : le maximum domine, mais la co-occurrence
+    renforce la confiance (trafic↓↓↓ + pertes↑↑↑) sans jamais
     dépasser 1 ni supprimer les scores individuels.
     """
     base = max(traffic_score, loss_score)
@@ -136,7 +136,7 @@ def build_anomaly_result(
     data_gap: bool = False,
     loss_enabled: bool = True,
 ) -> AnomalyResult:
-    """Assemble un AnomalyResult complet à partir d'une observation validée (§16).
+    """Assemble un AnomalyResult complet à partir d'une observation validée.
 
     `loss_enabled=False` (configuration `detection.loss.enabled`) désactive
     la composante pertes : seule la détection trafic contribue au score.
@@ -168,7 +168,7 @@ def build_anomaly_result(
 
 class IsolationForestDetector:
     """
-    Détecteur optionnel de confirmation (§17), propre à une sortie.
+    Détecteur optionnel de confirmation, propre à une sortie.
 
     Indépendant des règles statistiques : il apprend, sur l'historique, à
     isoler les combinaisons inhabituelles de features contextualisées par
@@ -206,7 +206,6 @@ class IsolationForestDetector:
     inhabituelle (score 1) — c'est exactement ce que « pire que tout l'historique » veut dire."""
 
     def __init__(self, output_id: str, interval: timedelta, n_estimators: int = 100) -> None:
-        self._output_id = output_id
         self._interval = interval
         self._n_estimators = n_estimators
         self._baseline = SeasonalBaselineModel(output_id)
