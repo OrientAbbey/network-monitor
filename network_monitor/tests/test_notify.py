@@ -7,6 +7,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import ClassVar
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -458,3 +459,141 @@ def test_api_notification_endpoints_require_authentication_and_test_a_channel(en
         assert json.loads(servers.requests[-1].content)["chat_id"] == "-1001234"
         assert c.get("/notifications", headers=auth).json() == []
     state.storage.dispose()
+
+
+# -- langue et modèles de messages ---------------------------------------------------------------------------------------
+
+
+def _d(alert):
+    return alert_to_dict(alert)
+
+
+def test_every_language_translates_everything_and_in_particular_every_incident_type():
+    """Ajouter un type d'incident, un événement ou une clé sans la traduire doit casser CE test, pas un message envoyé à 3 h du matin."""
+    from network_monitor.app.notify import _CATALOG
+
+    fr, en = _CATALOG["fr"], _CATALOG["en"]
+    assert set(fr) == set(en)
+    for key in fr:
+        if isinstance(fr[key], dict):
+            assert set(fr[key]) == set(en[key]), key
+    for catalog in (fr, en):
+        assert {t.value for t in IncidentType} <= set(catalog["types"])  # chaque type d'incident a un libellé dans chaque langue
+        assert {s.value for s in Severity} <= set(catalog["severity"])
+        assert {"opened", "updated", "reopened", "closed", "stale", "escalated"} <= set(catalog["verb"])
+    assert all(en["types"][k] != fr["types"][k] for k in fr["types"] if k != "congestion")  # vraiment traduits, pas recopiés
+
+
+def test_english_messages_for_every_kind_of_alert():
+    tz = ZoneInfo("Africa/Douala")
+    opened = format_text([_d(_alert("opened", started_at=T0, impacted_outputs=["OUT_002", "OUT_003"]))], tz, lang="en")
+    assert opened.splitlines() == [
+        "🔴 INCIDENT — OUT_001: traffic drop (critical)",
+        "Started: 13:00 (confirmed 13:00)",
+        "Traffic: 100 Mbps (expected 250, -60%)",
+        "Packet loss: 0.40%",
+        "Also explains: OUT_002, OUT_003",
+    ]
+    closed = format_text([_d(_alert("closed", started_at=T0, ended_at=T0 + timedelta(minutes=35), duration_seconds=2100.0))], tz, lang="en")
+    assert closed.splitlines() == ["🟢 RESOLVED — OUT_001: traffic drop", "Duration: 35 min (13:00 → 13:35)"]
+    escalated = format_text([_d(_alert("escalated", started_at=T0, duration_seconds=1500.0))], tz, lang="en")
+    assert escalated.splitlines() == ["🔺 ESCALATION — OUT_001: traffic drop (critical)", "Not acknowledged: incident ongoing for 25 min (started 13:00)"]
+    assert format_text([_d(_alert("stale"))], tz, lang="en").startswith("⚪ DATA MISSING — OUT_001")
+    assert format_text([_d(_alert("reopened"))], tz, lang="en").startswith("🔴 INCIDENT REOPENED —")
+    group = format_text([_d(_alert("opened", minute=i, ident=f"i{i}")) for i in range(14)], tz, lang="en").splitlines()
+    assert group[0] == "14 alerts" and group[-1] == "… and 2 more" and "OUT_001 open — traffic drop" in group[1]
+    assert "alerts" not in format_text([_d(_alert())], tz, lang="en") and "Début" not in opened  # aucun reste de français
+
+
+def test_english_sms_fits_one_segment_and_stays_ascii():
+    tz = ZoneInfo("UTC")
+    assert format_sms([_d(_alert("opened", started_at=T0))], tz, lang="en") == "CRIT OUT_001 traffic drop since 12:00 (-60%)"
+    assert format_sms([_d(_alert("closed", duration_seconds=7500.0))], tz, lang="en") == "RESOLVED OUT_001 traffic drop, lasted 2 h 05"
+    assert format_sms([_d(_alert("escalated", started_at=T0))], tz, lang="en") == "ESCALATION CRIT OUT_001 traffic drop since 12:00, not acknowledged"
+    many = format_sms([_d(_alert("opened", ident="a")), _d(_alert("closed", ident="b", output="OUT_002"))], tz, lang="en")
+    assert many == "NM: 2 alerts (1 ongoing, 1 resolved) OUT_001,OUT_002"
+    for event in ("opened", "closed", "escalated", "stale", "updated"):
+        sms = format_sms([_d(_alert(event, impacted_outputs=["OUT_002"]))], tz, lang="en")
+        assert sms.isascii() and len(sms) <= 160
+
+
+def test_templates_replace_only_the_events_they_name_and_leave_the_rest_alone():
+    tz = ZoneInfo("Africa/Douala")
+    templates = {"opened": "ALERTE {output} — {type} ({severity}) depuis {start}, trafic {traffic} pour {expected} attendus ({deviation}), pertes {loss}"}
+    out = format_text([_d(_alert("opened", started_at=T0))], tz, templates=templates)
+    assert out == "ALERTE OUT_001 — chute de trafic (critique) depuis 13:00, trafic 100 Mbps pour 250 Mbps attendus (-60 %), pertes 0.40 %"
+    closed = _d(_alert("closed", started_at=T0, ended_at=T0 + timedelta(minutes=35), duration_seconds=2100.0))
+    assert format_text([closed], tz, templates=templates) == format_text([closed], tz)  # sans modèle pour « closed » : message intégré
+    group = format_text([_d(_alert("opened", ident="a")), _d(_alert("closed", ident="b"))], tz, templates=templates).splitlines()
+    assert group[0] == "2 alertes" and group[1].startswith("ALERTE OUT_001 — chute de trafic") and "résolu" in group[2]  # modèle par alerte, intégré pour les autres
+    en = format_text([_d(_alert("opened", started_at=T0))], tz, lang="en", templates={"opened": "{output}: {type} ({severity}), {deviation}"})
+    assert en == "OUT_001: traffic drop (critical), -60%"  # le modèle reçoit les valeurs dans la langue du canal
+
+
+def test_templates_show_a_question_mark_for_missing_values_and_support_escaped_braces():
+    tz = ZoneInfo("UTC")
+    bare = _d(_alert("opened", traffic_mbps=None, expected_traffic_mbps=None, traffic_deviation_percent=None, loss_percent=None, started_at=None))
+    out = format_text([bare], tz, templates={"opened": "{{{output}}} t={traffic} e={expected} d={deviation} l={loss} i=[{impacted}] s={start}"})
+    assert out == "{OUT_001} t=? e=? d=? l=? i=[] s=12:00"  # `{{` et `}}` : des accolades littérales ; début inconnu → heure de l'alerte
+
+
+def test_a_custom_sms_template_is_still_ascii_and_one_segment():
+    out = format_sms([_d(_alert("opened"))], ZoneInfo("UTC"), templates={"opened": "Panne é à ç {output} " + "x" * 300})
+    assert out.isascii() and len(out) == 160 and out.startswith("Panne e a c OUT_001")
+
+
+@pytest.mark.parametrize(
+    "template,fragment",
+    [
+        ("{output.__class__}", "non autorisé"),  # accès à un attribut : refusé
+        ("{output[0]}", "non autorisé"),
+        ("{output!r}", "non autorisé"),  # conversion
+        ("{output:>20}", "non autorisé"),  # format
+        ("{inconnu}", "non autorisé"),
+        ("{output", "}"),  # accolade mal fermée
+        ("x" * 601, "trop long"),
+    ],
+)
+def test_templates_are_validated_when_the_configuration_loads(template, fragment):
+    with pytest.raises(ValueError, match=fragment):
+        NotificationsConfig.model_validate({"enabled": True, "channels": [{**TG, "templates": {"opened": template}}]})
+
+
+def test_template_and_language_configuration_errors_are_clear():
+    with pytest.raises(ValueError, match="événements inconnus dans `templates`"):
+        NotificationsConfig.model_validate({"enabled": True, "channels": [{**TG, "templates": {"ouvert": "x"}}]})
+    with pytest.raises(ValueError, match="language"):
+        NotificationsConfig.model_validate({"enabled": True, "channels": [{**TG, "language": "de"}]})
+    ok = NotificationsConfig.model_validate({"enabled": True, "channels": [{**TG, "language": "en", "templates": {"opened": "{output} {type}"}}]})
+    assert ok.channels[0].language == "en" and NotificationsConfig.model_validate({"enabled": True, "channels": [TG]}).channels[0].language == "fr"
+
+
+def test_each_channel_sends_in_its_own_language_with_its_own_templates(env, repo):
+    fr = {**TG, "name": "noc"}
+    en = {"name": "partner", "type": "telegram", "chat_id": "-2", "language": "en", "templates": {"opened": "{output}: {type} since {start}"}}
+    sms = {**SMS, "language": "en"}
+    d, servers, clock = _dispatcher(repo, [fr, en, sms])
+    _enqueue(repo, d, [_alert("opened", started_at=T0)])
+    clock.advance(seconds=21)
+    d.run_once()
+    sent = {}
+    for r in servers.requests:
+        body = json.loads(r.content)
+        if r.url.host == "api.telegram.org":
+            sent[body["chat_id"]] = body["text"]
+        elif r.url.host == "gateway.local":
+            sent["sms"] = body["message"] if "message" in body else body.get("textMessage", {}).get("text", str(body))
+    assert sent["-1001234"].startswith("🔴 INCIDENT — OUT_001 : chute de trafic")  # français par défaut
+    assert sent["-2"] == "OUT_001: traffic drop since 13:00"  # anglais, avec son modèle, à l'heure d'affichage de Douala
+    assert "CRIT OUT_001 traffic drop" in sent["sms"]  # le SMS suit la langue de son canal
+
+
+def test_the_webhook_text_follows_the_channel_language_and_the_structured_alerts_do_not_change(env, repo, monkeypatch):
+    monkeypatch.setenv("NM_WEBHOOK_URL", "http://hooks.local/x")
+    hook = {"name": "hook", "type": "webhook", "language": "en", "secret_env": None}
+    d, servers, clock = _dispatcher(repo, [hook])
+    _enqueue(repo, d, [_alert("opened", started_at=T0)])
+    clock.advance(seconds=21)
+    d.run_once()
+    body = json.loads(servers.requests[0].content)
+    assert body["text"].startswith("🔴 INCIDENT — OUT_001: traffic drop") and body["alerts"][0]["incident_type"] == "traffic_drop"  # machine : jamais traduit

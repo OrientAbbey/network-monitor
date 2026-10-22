@@ -11,6 +11,7 @@ changer un comportement qui ne bougera pas) et n'est pas conservé ici.
 from __future__ import annotations
 
 import re
+import string
 from datetime import timedelta
 from pathlib import Path
 from typing import Annotated, Literal
@@ -263,6 +264,26 @@ class SourceConfig(BaseModel):
 _ALERT_EVENTS = frozenset({"opened", "updated", "reopened", "closed", "stale", "escalated"})
 
 
+TEMPLATE_FIELDS = (
+    "output", "event", "type", "severity", "start", "end", "at", "duration", "traffic", "expected", "deviation", "loss", "impacted", "message",
+)
+"""Champs qu'un modèle de message peut insérer, déjà mis en forme (voir `notify._fields`) ; « ? » quand la valeur manque."""
+_MAX_TEMPLATE_LENGTH = 600
+
+
+def _check_template(template: str) -> str:
+    """Un modèle est du texte avec des `{champ}` simples. Rien d'autre : ni attribut (`{output.x}`), ni indice, ni conversion, ni format,
+    qui permettraient d'atteindre autre chose que les champs prévus."""
+    if len(template) > _MAX_TEMPLATE_LENGTH:
+        raise ValueError(f"modèle trop long ({len(template)} > {_MAX_TEMPLATE_LENGTH} caractères)")
+    for _, field, spec, conversion in string.Formatter().parse(template):  # lève ValueError sur des accolades mal fermées
+        if field is None:
+            continue
+        if field not in TEMPLATE_FIELDS or spec or conversion:
+            raise ValueError(f"champ « {{{field}{':' + spec if spec else ''}{'!' + conversion if conversion else ''}}} » non autorisé (champs valides : {', '.join(TEMPLATE_FIELDS)})")
+    return template
+
+
 class _ChannelBase(BaseModel):
     name: str = Field(pattern=r"^[A-Za-z0-9_-]{1,40}$")
     min_severity: Severity = Severity.WARNING
@@ -274,6 +295,25 @@ class _ChannelBase(BaseModel):
     """Plafond de messages (pas d'alertes) : au-delà, les alertes s'accumulent et partent
     regroupées dans un seul message dès que la fenêtre se libère — rien n'est perdu, mais le
     coût (SMS) et le bruit sont bornés."""
+
+    language: Literal["fr", "en"] = "fr"
+    """Langue des messages de ce canal (le groupe d'astreinte peut recevoir de l'anglais, le NOC du français)."""
+    templates: dict[str, str] = Field(default_factory=dict)
+    """Modèles de message par événement (`{"opened": "{output} : {type} depuis {start}"}`) ; sans modèle, le message intégré s'applique.
+    Champs : voir `TEMPLATE_FIELDS`. Pour un SMS, le texte est de toute façon dépouillé de ses accents et coupé à 160 caractères."""
+
+    @field_validator("templates")
+    @classmethod
+    def _valid_templates(cls, v: dict[str, str]) -> dict[str, str]:
+        unknown = set(v) - _ALERT_EVENTS
+        if unknown:
+            raise ValueError(f"événements inconnus dans `templates` : {sorted(unknown)} (valides : {sorted(_ALERT_EVENTS)})")
+        for event, template in v.items():
+            try:
+                _check_template(template)
+            except ValueError as exc:
+                raise ValueError(f"modèle de « {event} » : {exc}") from None
+        return v
 
     @field_validator("events")
     @classmethod

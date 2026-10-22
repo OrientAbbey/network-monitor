@@ -127,6 +127,9 @@ corrigé et mesuré). Rien n'y est caché derrière un « à peu près » : quan
 
 ### 2.8 Maintenance, cause amont, verdicts, supervision
 
+- **Messages** : seuls le français et l'anglais existent, et seuls les messages mis en forme pour Telegram, SMS et le champ `text` du webhook sont traduits. Les textes du moteur (`message`
+  des alertes, descriptions d'incident, y compris dans le JSON structuré du webhook) et toute l'interface restent en français. L'anglais n'a pas été relu par un locuteur natif ; un modèle
+  d'un SMS est coupé à 160 caractères sans avertissement. Un modèle ne peut pas contenir de logique (condition, boucle) : seulement des champs.
 - **Escalade** : un seul niveau et une seule alerte par incident (pas de rappel si le second groupe ne réagit pas non plus). La prise en charge est une
   déclaration d'intention, pas un verrou : n'importe quel compte connecté peut en remplacer un autre (le dernier gagne), et elle ne coupe ni les alertes
   suivantes ni la résolution. Le délai se compte depuis l'ouverture. L'état « en retour à la normale » n'existe qu'en mémoire : après un redémarrage il est
@@ -145,7 +148,7 @@ corrigé et mesuré). Rien n'y est caché derrière un « à peu près » : quan
 
 ## 3. Fonctionnalités proposées mais non réalisées
 
-**Réalisées depuis** (voir §1 et §2.8) : fenêtres de maintenance et inhibition amont/aval, retour « faux/vrai positif » et re-balayage des seuils, `/metrics` et signal de vie externe, l'acquittement et l'escalade à un niveau, les trois rôles (lecteur, opérateur, administrateur), et le point d'accès « mesure la plus proche d'un instant » (`GET /outputs/nearest` : le tableau comparatif passe de 24 requêtes par rafraîchissement à 1, mesuré dans un vrai navigateur). Les numéros ci-dessous sont conservés.
+**Réalisées depuis** (voir §1 et §2.8) : fenêtres de maintenance et inhibition amont/aval, retour « faux/vrai positif » et re-balayage des seuils, `/metrics` et signal de vie externe, l'acquittement et l'escalade à un niveau, les trois rôles (lecteur, opérateur, administrateur), les messages d'alerte par langue (français, anglais) et par modèle, et le point d'accès « mesure la plus proche d'un instant » (`GET /outputs/nearest` : le tableau comparatif passe de 24 requêtes par rafraîchissement à 1, mesuré dans un vrai navigateur). Les numéros ci-dessous sont conservés.
 
 Chaque ligne : le besoin, d'où il vient, l'effort estimé (S ≈ 1 jour, M ≈ 2–4 jours, L > 4 jours) et comment savoir que c'est réussi.
 Les recherches datent du 1er octobre 2026 et **sont à refaire avant de s'y fier** (URLs non conservées).
@@ -158,7 +161,6 @@ Les recherches datent du 1er octobre 2026 et **sont à refaire avant de s'y fier
 | 8 | **SSO** (annuaire de l'entreprise) | Les trois rôles existent ; les comptes se déclarent encore à la main dans `NM_USERS`. | M–L | Connexion par l'annuaire de l'entreprise (les rôles viendraient de ses groupes). |
 | 9 | **Corrélation entre sorties** (topologie) | L'inhibition amont/aval existe (topologie déclarée à la main) ; il reste, plus largement, remonter à la cause (liens partageant un équipement ou une alimentation). Les coupures d'électricité et de fibre sont citées par le régulateur comme principaux facteurs de disponibilité. | L | Un scénario de panne d'alimentation multi-sorties produit un seul incident « cause commune ». |
 | 10 | **WhatsApp** | Très utilisé dans la région, mais l'API entreprise n'est pas gratuite et n'a pas été évaluée. | ? | — |
-| 12 | **Messages d'alerte configurables et multilingues** | Aujourd'hui fixes, en français. | S | Modèles de messages dans la configuration. |
 
 ## 4. Décisions reportées
 

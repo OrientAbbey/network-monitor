@@ -531,6 +531,19 @@ def test_an_unacknowledged_incident_escalates_once_to_the_second_group_only(tmp_
         repo.dispose()
 
 
+def test_the_second_group_can_be_in_another_language_than_the_first(tmp_path, monkeypatch):
+    chats: list[tuple[str, str]] = []
+    english = {**ESC_CHANNEL, "language": "en"}
+    repo, _, _ = _run(tmp_path, monkeypatch, [_drop("OUT_001", 6, 40)], notifications={"escalate_after": "15m", "channels": [TG, english]}, chats=chats)
+    try:
+        [(_, second)] = [(c, t) for c, t in chats if c == "-2"]
+        assert second.startswith("🔺 ESCALATION — OUT_001: traffic drop") and "Not acknowledged" in second
+        primary = [t for c, t in chats if c == "-1"]
+        assert primary and all("ESCALATION" not in t for t in primary) and any(t.startswith("🔴 INCIDENT — OUT_001 : chute de trafic") for t in primary)
+    finally:
+        repo.dispose()
+
+
 def test_escalation_is_opt_in(tmp_path, monkeypatch):
     repo, _, _ = _run(tmp_path, monkeypatch, [_drop("OUT_001", 6, 40)])
     try:

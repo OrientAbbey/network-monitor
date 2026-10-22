@@ -151,6 +151,9 @@ Un thread relit les envois dus toutes les 2 s :
 - **Canaux** : Telegram (groupe), webhook (JSON signé HMAC-SHA256, identifiant de livraison stable pour dédupliquer),
   SMS (passerelle Android en un appel pour tout le groupe, ou API Orange un appel par numéro, jeton OAuth mis en cache).
   Un SMS tient en un segment de 160 caractères sans accents.
+- **Langue et modèles** (`app/notify.py`) : un catalogue par langue (`_CATALOG`, `fr` et `en`, mêmes clés : un test casse si un type d'incident, une sévérité ou un événement n'est pas traduit),
+  choisi **par canal** (`language`). `templates` (événement → modèle) remplace le message intégré d'un événement ; les modèles sont validés au chargement (champs simples de
+  `TEMPLATE_FIELDS` seulement). Dans un message regroupé, chaque alerte utilise son modèle s'il existe, sinon la ligne intégrée. Le `message` du moteur et l'interface ne sont pas traduits.
 - **Escalade** (`escalated`) : voir §4. Un canal « second groupe » se configure par `events: [escalated]`, sans autre mécanisme de routage.
 - **Alertes retenues** (maintenance, cause amont) : enregistrées et consultables (`GET /alerts?all=true`), jamais mises en file d'envoi.
 - **Garantie** : au moins une fois. **Un secret absent refuse le démarrage** (mieux vaut échouer au lancement que

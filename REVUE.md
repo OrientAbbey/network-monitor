@@ -66,6 +66,7 @@ protocole détaillé dans « Mesures »). Évaluation : `python -m network_monit
 | Une alerte sans réponse ne montait jamais : personne ne pouvait dire « je m'en occupe » | prise en charge (`PUT/DELETE /incidents/{id}/ack`) et escalade à un niveau (`notifications.escalate_after`) vers un second groupe | `tests/test_feedback_maintenance.py` (vraie boucle sur le Mock, 4 scénarios + table de conditions), `tests/test_incidents.py`, e2e |
 | Tout utilisateur connecté pouvait tout faire, y compris modifier les seuils | trois rôles (lecteur, opérateur, administrateur) ; ancien format de `NM_USERS` conservé (= administrateur), nouveau format à rôle obligatoire, démarrage refusé si invalide | `tests/test_auth.py` (matrice rôle × endpoint, compatibilité, erreurs), Vitest, e2e à trois comptes |
 | Avis de sécurité apparu pendant ce lot sur `vite` 8.3.0–8.3.2 (3 failles de `launch-editor`, serveur de développement ; deux concernent Windows) | `vite` 8.3.1 → 8.3.5 dans le lockfile (correctifs seulement) ; audit complet informatif ajouté à la CI | `npm audit` : 0 vulnérabilité ; typage, 61 Vitest et build revalidés |
+| Messages d'alerte fixes, en français, sans possibilité de les adapter | langue par canal (fr, en) et modèles par événement, validés au chargement | `tests/test_notify.py` (catalogues, anglais, modèles, validation, envoi par canal), `tests/test_feedback_maintenance.py` (vraie boucle) |
 | Aucune intégration continue | `.github/workflows/ci.yml` | ❓ jamais exécutée ; `actionlint` propre ; mêmes commandes reproduites en local |
 
 ## Mesures (Mock ; à refaire sur données réelles)
@@ -152,6 +153,15 @@ Backend : matrice complète rôle × endpoint (4 comptes × 10 endpoints protég
 | Test de mutation (navigateur, vrai serveur) | rôles non vérifiés → les scénarios lecteur et opérateur échouent (200 reçu au lieu de 403) ; celui du compte historique passe, à raison |
 | **Erreur de ma part, corrigée** | mon script de modification avait remplacé la signature de la dépendance `require_role` au lieu de celle de `start_monitoring` (chaîne présente deux fois) : récursion infinie à l'import, et `stop_monitoring` resté non protégé. Détecté par les tests, et par une vérification stricte de chaque signature ajoutée ensuite |
 | **Formulation corrigée** | j'avais écrit qu'un changement de rôle « prend effet tout de suite » : vrai dans un test qui modifie l'environnement du processus, faux en exploitation, où il faut redémarrer. Docstrings et documentation corrigées |
+
+### Mesure des messages multilingues
+
+Refactorisation du formatage **sans changer le français** : la sortie de l'ancienne et de la nouvelle implémentation a été comparée sur une matrice exhaustive (8 événements × 3 sévérités × 7 types plus un type inconnu × 4 jeux de champs × 4 durées × présence des heures, en message isolé et regroupé, texte et SMS, 2 fuseaux) : **21 524 sorties, 0 différence**.
+
+| Vérification | Résultat |
+|---|---|
+| Tests de mutation | canal qui ignore sa langue, modèles ignorés, validation des champs affaiblie, traduction oubliée, SMS non dépouillé de ses accents : chacun fait échouer au moins un test |
+| Sécurité des modèles | `{output.__class__}`, `{output[0]}`, `{output!r}`, `{output:>20}`, champ inconnu, accolade mal fermée, modèle de plus de 600 caractères : tous refusés au chargement |
 
 Image : sans Docker dans cet environnement, j'ai reproduit les étapes du `Dockerfile` à la main : build du front avec `VITE_API_BASE_URL=""` (le bundle ne contient plus l'adresse par défaut : même origine), environnement vierge avec le seul `requirements.txt` (aucun outil de dev, fuseau `Africa/Douala` disponible), démarrage en production sous un utilisateur sans privilèges. Constaté : `/` sert l'interface, le JS passe de 253 à 78 Ko en gzip, `/docs` et `/openapi.json` répondent 404, `PUT /config` répond 401 sans session et 200 avec, une seconde instance sur la même base est refusée avec un message explicite. Non vérifié : la construction de l'image elle-même, `HEALTHCHECK`, `read_only` et `cap_drop` du compose.
 

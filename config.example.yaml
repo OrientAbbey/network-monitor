@@ -37,6 +37,13 @@ notifications:
   #      events: [opened, closed], max_messages_per_hour: 20}
   #   - {name: ticketing, type: webhook}                                                # POST JSON signé
   #   - {name: astreinte, type: telegram, chat_id: "-1009876543210", events: [escalated]}  # second groupe : n'est prévenu qu'en cas d'escalade
+  #   - name: partenaire                      # langue et modèles PAR CANAL (language : fr par défaut, ou en)
+  #     type: telegram
+  #     chat_id: "-1001111111111"
+  #     language: en
+  #     templates:                            # facultatif : remplace le message intégré des événements nommés
+  #       opened: "{output}: {type} ({severity}) since {start}, traffic {traffic} for {expected} expected"
+  #       # champs : output event type severity start end at duration traffic expected deviation loss impacted message
 monitoring:
   interval: 5m
 history:

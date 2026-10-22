@@ -169,6 +169,25 @@ notifications:
   ```
 - **Re-balayage des seuils** sur ces verdicts : `python -m network_monitor.analysis.evaluation --from-db sqlite:///network_monitor.db --days 30 --sweep` (`--end` pour une base à horloge simulée).
 
+## Langue et modèles des messages
+
+Chaque canal a sa **langue** (`language: fr` par défaut, ou `en`) : le groupe d'astreinte peut recevoir de l'anglais pendant que le NOC reste en français. Le français par défaut est strictement inchangé.
+Un canal peut aussi remplacer le message intégré de certains événements par un **modèle** (`templates`, événement → texte) :
+
+```yaml
+channels:
+  - name: partenaire
+    type: telegram
+    chat_id: "-1001111111111"
+    language: en
+    templates:
+      opened: "{output}: {type} ({severity}) since {start}, traffic {traffic} for {expected} expected"
+```
+
+Champs : `output`, `event`, `type`, `severity`, `start`, `end`, `at`, `duration`, `traffic`, `expected`, `deviation`, `loss`, `impacted`, `message`. Une valeur manquante s'affiche « ? ».
+Les modèles sont validés au chargement : tout autre champ, accès à un attribut, indice, format ou conversion est refusé, et l'accolade littérale s'écrit `{{`. Un SMS reste dépouillé de ses accents et coupé à 160 caractères, modèle ou non.
+Ne sont traduits que les messages mis en forme pour Telegram, SMS et le champ `text` du webhook : les textes produits par le moteur (`message` des alertes, descriptions d'incident) et l'interface restent en français.
+
 ## Supervision
 
 - `GET /health` : le processus répond. `GET /health/ready` : 200, ou 503 avec les raisons (boucle arrêtée ou bloquée, données périmées, base inaccessible).

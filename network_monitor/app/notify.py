@@ -26,7 +26,7 @@ import os
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -54,17 +54,72 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 _RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
 _MAX_BACKOFF = timedelta(minutes=15)
 
-_TYPE_LABEL = {
-    "traffic_drop": "chute de trafic",
-    "traffic_spike": "pic de trafic",
-    "high_loss": "pertes élevées",
-    "traffic_drop_with_high_loss": "chute de trafic avec pertes",
-    "congestion": "congestion",
-    "progressive_degradation": "dégradation progressive",
-    "intermittent_degradation": "dégradation intermittente",
-}
-_SEVERITY_LABEL = {"info": "info", "warning": "avertissement", "critical": "critique"}
 _SEVERITY_ICON = {"info": "🔵", "warning": "🟠", "critical": "🔴"}
+
+# Catalogues de messages. Le français est le texte d'origine, inchangé ; chaque langue fournit les mêmes clés. Les gabarits d'un
+# catalogue sont internes (ils peuvent porter des formats numériques) ; ceux de l'utilisateur (`templates`) n'acceptent que des champs.
+_CATALOG: dict[str, dict[str, Any]] = {
+    "fr": {
+        "types": {
+            "traffic_drop": "chute de trafic", "traffic_spike": "pic de trafic", "high_loss": "pertes élevées",
+            "traffic_drop_with_high_loss": "chute de trafic avec pertes", "congestion": "congestion",
+            "progressive_degradation": "dégradation progressive", "intermittent_degradation": "dégradation intermittente",
+        },
+        "severity": {"info": "info", "warning": "avertissement", "critical": "critique"},
+        "verb": {"opened": "ouvert", "updated": "mis à jour", "reopened": "rouvert", "closed": "résolu", "stale": "données manquantes", "escalated": "ESCALADE"},
+        "head": {"opened": "INCIDENT", "reopened": "INCIDENT ROUVERT", "updated": "MISE À JOUR"},
+        "resolved": "🟢 RÉSOLU — {output} : {type}",
+        "resolved_detail": "Durée : {duration} ({start} → {end})",
+        "escalated": "🔺 ESCALADE — {output} : {type} ({severity})",
+        "escalated_detail": "Aucun accusé de réception : incident en cours depuis {duration} (début {start})",
+        "stale": "⚪ DONNÉES MANQUANTES — {output}",
+        "stale_detail": "L'incident en cours ne peut plus être suivi : plus de mesures reçues.",
+        "open": "{icon} {head} — {output} : {type} ({severity})",
+        "open_detail": "Début : {start} (confirmé {at})",
+        "traffic_line": "Trafic : {traffic:.0f} Mbps (attendu {expected:.0f}{deviation}",
+        "loss_line": "Pertes : {loss:.2f} %",
+        "also": "Explique aussi : {outputs}",
+        "signed_pct": "{value:+.0f} %",
+        "many": "{n} alertes",
+        "more": "… et {n} autres",
+        "sms_resolved": "RESOLU {output} {type}, duree {duration}",
+        "sms_crit": "CRIT", "sms_alert": "ALERTE",
+        "sms_escalated": "ESCALADE {sev} {output} {type} depuis {start}, sans accuse de reception",
+        "sms_open": "{sev} {output} {type} depuis {start}",
+        "sms_links": " +{n} liens",
+        "sms_many": "NM: {n} alertes ({opened} en cours, {closed} resolues) {outputs}",
+    },
+    "en": {
+        "types": {
+            "traffic_drop": "traffic drop", "traffic_spike": "traffic spike", "high_loss": "high packet loss",
+            "traffic_drop_with_high_loss": "traffic drop with packet loss", "congestion": "congestion",
+            "progressive_degradation": "progressive degradation", "intermittent_degradation": "intermittent degradation",
+        },
+        "severity": {"info": "info", "warning": "warning", "critical": "critical"},
+        "verb": {"opened": "open", "updated": "updated", "reopened": "reopened", "closed": "resolved", "stale": "data missing", "escalated": "ESCALATION"},
+        "head": {"opened": "INCIDENT", "reopened": "INCIDENT REOPENED", "updated": "UPDATE"},
+        "resolved": "🟢 RESOLVED — {output}: {type}",
+        "resolved_detail": "Duration: {duration} ({start} → {end})",
+        "escalated": "🔺 ESCALATION — {output}: {type} ({severity})",
+        "escalated_detail": "Not acknowledged: incident ongoing for {duration} (started {start})",
+        "stale": "⚪ DATA MISSING — {output}",
+        "stale_detail": "The ongoing incident can no longer be followed: no measurements received.",
+        "open": "{icon} {head} — {output}: {type} ({severity})",
+        "open_detail": "Started: {start} (confirmed {at})",
+        "traffic_line": "Traffic: {traffic:.0f} Mbps (expected {expected:.0f}{deviation}",
+        "loss_line": "Packet loss: {loss:.2f}%",
+        "also": "Also explains: {outputs}",
+        "signed_pct": "{value:+.0f}%",
+        "many": "{n} alerts",
+        "more": "… and {n} more",
+        "sms_resolved": "RESOLVED {output} {type}, lasted {duration}",
+        "sms_crit": "CRIT", "sms_alert": "ALERT",
+        "sms_escalated": "ESCALATION {sev} {output} {type} since {start}, not acknowledged",
+        "sms_open": "{sev} {output} {type} since {start}",
+        "sms_links": " +{n} links",
+        "sms_many": "NM: {n} alerts ({opened} ongoing, {closed} resolved) {outputs}",
+    },
+}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -100,51 +155,80 @@ def _duration(seconds: float | None) -> str:
     return f"{hours} h {rest:02d}" if rest else f"{hours} h"
 
 
-def _label(alert: dict[str, Any]) -> str:
-    return _TYPE_LABEL.get(alert["incident_type"], alert["incident_type"])
+def _label(alert: dict[str, Any], cat: dict[str, Any]) -> str:
+    return cat["types"].get(alert["incident_type"], alert["incident_type"])
 
 
-def _line(alert: dict[str, Any], tz: ZoneInfo) -> str:
+def _catalog(lang: str) -> dict[str, Any]:
+    return _CATALOG.get(lang, _CATALOG["fr"])
+
+
+def _fields(a: dict[str, Any], tz: ZoneInfo, cat: dict[str, Any]) -> dict[str, str]:
+    """Les valeurs qu'un modèle de l'utilisateur peut insérer (`TEMPLATE_FIELDS`), déjà mises en forme ; « ? » quand elles manquent."""
+    started = _dt(a.get("started_at")) or _dt(a["timestamp"])
+    ended = _dt(a.get("ended_at")) or _dt(a["timestamp"])
+    dev = a.get("traffic_deviation_percent")
+    return {
+        "output": a["output_id"], "event": cat["verb"].get(a["event"], a["event"]), "type": _label(a, cat),
+        "severity": cat["severity"].get(a["severity"], a["severity"]), "start": _hm(started, tz), "end": _hm(ended, tz),
+        "at": _hm(_dt(a["timestamp"]), tz), "duration": _duration(a.get("duration_seconds")),
+        "traffic": f"{a['traffic_mbps']:.0f} Mbps" if a.get("traffic_mbps") is not None else "?",
+        "expected": f"{a['expected_traffic_mbps']:.0f} Mbps" if a.get("expected_traffic_mbps") is not None else "?",
+        "deviation": cat["signed_pct"].format(value=dev) if dev is not None else "?",
+        "loss": f"{a['loss_percent']:.2f} %" if a.get("loss_percent") is not None else "?",
+        "impacted": ", ".join(a.get("impacted_outputs") or []), "message": a.get("message", ""),
+    }
+
+
+def _custom(a: dict[str, Any], tz: ZoneInfo, cat: dict[str, Any], templates: Mapping[str, str] | None) -> str | None:
+    """Le modèle de l'utilisateur pour cet événement, rendu, ou None s'il n'en a pas défini (le message intégré s'applique)."""
+    template = (templates or {}).get(a["event"])
+    return template.format(**_fields(a, tz, cat)) if template is not None else None
+
+
+def _line(alert: dict[str, Any], tz: ZoneInfo, cat: dict[str, Any]) -> str:
     icon = "🟢" if alert["event"] == "closed" else _SEVERITY_ICON.get(alert["severity"], "")
-    verb = {"opened": "ouvert", "updated": "mis à jour", "reopened": "rouvert", "closed": "résolu", "stale": "données manquantes", "escalated": "ESCALADE"}
-    return f"{_hm(_dt(alert['timestamp']), tz)} {icon} {alert['output_id']} {verb.get(alert['event'], alert['event'])} — {_label(alert)}"
+    return f"{_hm(_dt(alert['timestamp']), tz)} {icon} {alert['output_id']} {cat['verb'].get(alert['event'], alert['event'])} — {_label(alert, cat)}"
 
 
-def format_text(alerts: list[dict[str, Any]], tz: ZoneInfo, limit: int = 4000) -> str:
-    """Message lisible sans connaître le fonctionnement du modèle (§28) : quoi, où, depuis quand, combien."""
+def format_text(alerts: list[dict[str, Any]], tz: ZoneInfo, limit: int = 4000, lang: str = "fr", templates: Mapping[str, str] | None = None) -> str:
+    """Message lisible sans connaître le fonctionnement du modèle (§28) : quoi, où, depuis quand, combien.
+    `lang` choisit le catalogue ; `templates` (événement → modèle) remplace le message intégré des événements qu'il nomme."""
+    cat = _catalog(lang)
     if len(alerts) == 1:
         a = alerts[0]
-        started = _dt(a.get("started_at")) or _dt(a["timestamp"])
+        custom = _custom(a, tz, cat, templates)
+        if custom is not None:
+            return custom[:limit]
+        f = _fields(a, tz, cat)
         if a["event"] == "closed":
-            ended = _dt(a.get("ended_at")) or _dt(a["timestamp"])
-            lines = [f"🟢 RÉSOLU — {a['output_id']} : {_label(a)}",
-                     f"Durée : {_duration(a.get('duration_seconds'))} ({_hm(started, tz)} → {_hm(ended, tz)})"]
+            lines = [cat["resolved"].format(**f), cat["resolved_detail"].format(**f)]
         elif a["event"] == "escalated":
-            lines = [f"🔺 ESCALADE — {a['output_id']} : {_label(a)} ({_SEVERITY_LABEL.get(a['severity'], a['severity'])})",
-                     f"Aucun accusé de réception : incident en cours depuis {_duration(a.get('duration_seconds'))} (début {_hm(started, tz)})"]
+            lines = [cat["escalated"].format(**f), cat["escalated_detail"].format(**f)]
         elif a["event"] == "stale":
-            lines = [f"⚪ DONNÉES MANQUANTES — {a['output_id']}", "L'incident en cours ne peut plus être suivi : plus de mesures reçues."]
+            lines = [cat["stale"].format(**f), cat["stale_detail"]]
         else:
-            head = {"opened": "INCIDENT", "reopened": "INCIDENT ROUVERT", "updated": "MISE À JOUR"}.get(a["event"], a["event"].upper())
-            lines = [f"{_SEVERITY_ICON.get(a['severity'], '')} {head} — {a['output_id']} : {_label(a)} ({_SEVERITY_LABEL.get(a['severity'], a['severity'])})",
-                     f"Début : {_hm(started, tz)} (confirmé {_hm(_dt(a['timestamp']), tz)})"]
+            head = cat["head"].get(a["event"], a["event"].upper())
+            lines = [cat["open"].format(icon=_SEVERITY_ICON.get(a["severity"], ""), head=head, **f), cat["open_detail"].format(**f)]
             if a.get("traffic_mbps") is not None and a.get("expected_traffic_mbps"):
                 dev = a.get("traffic_deviation_percent")
-                lines.append(f"Trafic : {a['traffic_mbps']:.0f} Mbps (attendu {a['expected_traffic_mbps']:.0f}" + (f", {dev:+.0f} %)" if dev is not None else ")"))
+                closing = ", " + cat["signed_pct"].format(value=dev) + ")" if dev is not None else ")"
+                lines.append(cat["traffic_line"].format(traffic=a["traffic_mbps"], expected=a["expected_traffic_mbps"], deviation=closing))
             if a.get("loss_percent") is not None:
-                lines.append(f"Pertes : {a['loss_percent']:.2f} %")
+                lines.append(cat["loss_line"].format(loss=a["loss_percent"]))
             if a.get("impacted_outputs"):
-                lines.append(f"Explique aussi : {', '.join(a['impacted_outputs'])}")
+                lines.append(cat["also"].format(outputs=", ".join(a["impacted_outputs"])))
         return "\n".join(lines)[:limit]
-    shown = [_line(a, tz) for a in alerts[:12]]
+    shown = [_custom(a, tz, cat, templates) or _line(a, tz, cat) for a in alerts[:12]]
     if len(alerts) > 12:
-        shown.append(f"… et {len(alerts) - 12} autres")
-    return (f"{len(alerts)} alertes\n" + "\n".join(shown))[:limit]
+        shown.append(cat["more"].format(n=len(alerts) - 12))
+    return (cat["many"].format(n=len(alerts)) + "\n" + "\n".join(shown))[:limit]
 
 
-def format_sms(alerts: list[dict[str, Any]], tz: ZoneInfo) -> str:
+def format_sms(alerts: list[dict[str, Any]], tz: ZoneInfo, lang: str = "fr", templates: Mapping[str, str] | None = None) -> str:
     """Un seul segment SMS (≤ 160 caractères, alphabet GSM : sans accents ni émojis) : un message
-    plus long ou accentué est facturé en plusieurs segments."""
+    plus long ou accentué est facturé en plusieurs segments. Un modèle de l'utilisateur est lui aussi dépouillé de ses accents."""
+    cat = _catalog(lang)
 
     def ascii_(text: str) -> str:
         import unicodedata
@@ -152,22 +236,25 @@ def format_sms(alerts: list[dict[str, Any]], tz: ZoneInfo) -> str:
         return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
 
     def one(a: dict[str, Any]) -> str:
-        label = ascii_(_label(a))
+        custom = _custom(a, tz, cat, templates)
+        if custom is not None:
+            return ascii_(custom)
+        f = _fields(a, tz, cat)
+        f["type"] = ascii_(f["type"])
         if a["event"] == "closed":
-            return f"RESOLU {a['output_id']} {label}, duree {_duration(a.get('duration_seconds'))}"
-        sev = "CRIT" if a["severity"] == "critical" else "ALERTE"
-        started = _hm(_dt(a.get("started_at")) or _dt(a["timestamp"]), tz)
+            return cat["sms_resolved"].format(**f)
+        sev = cat["sms_crit"] if a["severity"] == "critical" else cat["sms_alert"]
         if a["event"] == "escalated":
-            return f"ESCALADE {sev} {a['output_id']} {label} depuis {started}, sans accuse de reception"
+            return cat["sms_escalated"].format(sev=sev, **f)
         dev = a.get("traffic_deviation_percent")
-        extra = f" +{len(a['impacted_outputs'])} liens" if a.get("impacted_outputs") else ""
-        return f"{sev} {a['output_id']} {label} depuis {started}" + (f" ({dev:+.0f}%)" if dev is not None else "") + extra
+        extra = cat["sms_links"].format(n=len(a["impacted_outputs"])) if a.get("impacted_outputs") else ""
+        return cat["sms_open"].format(sev=sev, **f) + (f" ({dev:+.0f}%)" if dev is not None else "") + extra
 
     if len(alerts) == 1:
         return one(alerts[0])[:160]
     opened = sum(a["event"] != "closed" for a in alerts)
     outputs = ",".join(dict.fromkeys(a["output_id"] for a in alerts))
-    return f"NM: {len(alerts)} alertes ({opened} en cours, {len(alerts) - opened} resolues) {outputs}"[:160]
+    return cat["sms_many"].format(n=len(alerts), opened=opened, closed=len(alerts) - opened, outputs=outputs)[:160]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -235,7 +322,7 @@ class TelegramNotifier(Channel):
         def go() -> DeliveryError | None:
             res = self._client.post(
                 f"https://api.telegram.org/bot{self._token}/sendMessage",
-                json={"chat_id": self.cfg.chat_id, "text": format_text(alerts, self._tz), "disable_web_page_preview": True},
+                json={"chat_id": self.cfg.chat_id, "text": format_text(alerts, self._tz, lang=self.cfg.language, templates=self.cfg.templates), "disable_web_page_preview": True},
             )
             if res.status_code == 200 and res.json().get("ok"):
                 return None
@@ -257,7 +344,7 @@ class WebhookNotifier(Channel):
 
     def send(self, alerts, targets):
         sent_at = datetime.now(timezone.utc).isoformat()
-        body = json.dumps({"version": 1, "sent_at": sent_at, "alerts": alerts, "text": format_text(alerts, self._tz)},
+        body = json.dumps({"version": 1, "sent_at": sent_at, "alerts": alerts, "text": format_text(alerts, self._tz, lang=self.cfg.language, templates=self.cfg.templates)},
                           ensure_ascii=False, separators=(",", ":")).encode()
         # Identifiant stable : le même lot rejoué (nouvelle tentative) garde le même identifiant.
         delivery = hashlib.sha256("|".join(sorted(a["incident_id"] + a["event"] + a["timestamp"] for a in alerts)).encode()).hexdigest()[:32]
@@ -295,7 +382,7 @@ class SmsNotifier(Channel):
         return list(self.cfg.recipients)
 
     def send(self, alerts, targets):
-        text = format_sms(alerts, self._tz)
+        text = format_sms(alerts, self._tz, lang=self.cfg.language, templates=self.cfg.templates)
         if self.cfg.provider == "android_gateway":
             # Un seul appel pour tout le groupe : la passerelle envoie un SMS par numéro.
             def go() -> DeliveryError | None:
