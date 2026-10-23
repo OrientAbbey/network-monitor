@@ -28,6 +28,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from statistics import mean
+from typing import NamedTuple
 
 from network_monitor.app.config import AppConfig, HistoryConfig, IncidentConfig
 from network_monitor.app.main import MonitoringLoop
@@ -95,62 +96,83 @@ def standard_scenarios(
     return scenarios
 
 
+class _Detection(NamedTuple):
+    """Ce que la détection d'un scénario réel permet de mesurer, à partir du premier incident qui l'a recoupé."""
+
+    first_incident: Incident
+    delay_minutes: float
+    onset_error_minutes: float
+    duration_error_minutes: float
+    """Avant rétro-datage : de l'ouverture à la fermeture."""
+    reported_duration_error_minutes: float
+    """Après rétro-datage : du début à la fin rapportés."""
+
+
+def _incidents_overlapping(scenario: AnomalyScenario, confirmed: list[tuple[Incident, datetime]]) -> list[tuple[Incident, datetime]]:
+    """Les incidents confirmés (avec leur ouverture) de la même sortie qui chevauchent le scénario."""
+    return [
+        (incident, opened_at)
+        for incident, opened_at in confirmed
+        if incident.output_id == scenario.output_id
+        and opened_at <= scenario.end_time
+        and (incident.closed_at or incident.last_seen_at) >= scenario.start_time
+    ]
+
+
+def _measure_detection(scenario: AnomalyScenario, hits: list[tuple[Incident, datetime]]) -> _Detection:
+    first_incident, first_opened_at = min(hits, key=lambda hit: hit[1])
+    real_duration = scenario.end_time - scenario.start_time
+    closed_end = max(incident.closed_at or incident.last_seen_at for incident, _ in hits)
+    reported_start = first_incident.started_at or first_opened_at
+    reported_end = max(incident.ended_at or incident.closed_at or incident.last_seen_at for incident, _ in hits)
+    return _Detection(
+        first_incident=first_incident,
+        delay_minutes=max(0.0, (first_opened_at - scenario.start_time).total_seconds() / 60),
+        onset_error_minutes=abs(reported_start - scenario.start_time).total_seconds() / 60,
+        duration_error_minutes=abs((closed_end - first_opened_at) - real_duration).total_seconds() / 60,
+        reported_duration_error_minutes=abs((reported_end - reported_start) - real_duration).total_seconds() / 60,
+    )
+
+
+def _rounded_mean(values: list[float], digits: int) -> float | None:
+    return round(mean(values), digits) if values else None
+
+
 def evaluate(scenarios: list[AnomalyScenario], incidents: list[Incident], observed_days: float) -> dict:
     """Métriques de détection pour un jeu de scénarios réels et d'incidents détectés."""
     # (incident, ouverture) : `opened_at` est garanti non nul pour les incidents confirmés.
-    confirmed = [(i, i.opened_at) for i in incidents if i.opened_at is not None]
-    matched: set[str] = set()
-    delays: list[float] = []
-    onset_errors: list[float] = []
-    duration_errors: list[float] = []
-    reported_duration_errors: list[float] = []
-    detected = 0
-    typed = 0
-    typed_ok = 0
-    confusion: list[tuple[str, str]] = []
+    confirmed = [(incident, incident.opened_at) for incident in incidents if incident.opened_at is not None]
+    matched_incident_ids: set[str] = set()
+    detections: list[tuple[AnomalyScenario, _Detection]] = []
+    for scenario in scenarios:
+        hits = _incidents_overlapping(scenario, confirmed)
+        if hits:
+            matched_incident_ids.update(incident.id for incident, _ in hits)
+            detections.append((scenario, _measure_detection(scenario, hits)))
 
-    for sc in scenarios:
-        hits = [
-            (i, opened) for i, opened in confirmed
-            if i.output_id == sc.output_id and opened <= sc.end_time and (i.closed_at or i.last_seen_at) >= sc.start_time
-        ]
-        if not hits:
-            continue
-        detected += 1
-        matched.update(i.id for i, _ in hits)
-        first, first_open = min(hits, key=lambda h: h[1])
-        delays.append(max(0.0, (first_open - sc.start_time).total_seconds() / 60))
-        real = sc.end_time - sc.start_time
-        # Avant rétro-datage : de l'ouverture à la fermeture. Après : du début à la fin rétro-datés.
-        closed_end = max((i.closed_at or i.last_seen_at) for i, _ in hits)
-        duration_errors.append(abs((closed_end - first_open) - real).total_seconds() / 60)
-        start = first.started_at or first_open
-        end = max((i.ended_at or i.closed_at or i.last_seen_at) for i, _ in hits)
-        onset_errors.append(abs(start - sc.start_time).total_seconds() / 60)
-        reported_duration_errors.append(abs((end - start) - real).total_seconds() / 60)
-        expected = EXPECTED_TYPES.get(sc.type)
-        if expected is not None:
-            typed += 1
-            typed_ok += first.incident_type in expected
-            if first.incident_type not in expected:
-                confusion.append((sc.type.value, first.incident_type.value))
+    typed = [(scenario, detection) for scenario, detection in detections if EXPECTED_TYPES.get(scenario.type) is not None]
+    type_errors = [
+        (scenario.type.value, detection.first_incident.incident_type.value)
+        for scenario, detection in typed
+        if detection.first_incident.incident_type not in EXPECTED_TYPES[scenario.type]
+    ]
 
-    false_positives = len(confirmed) - len(matched)
-    true_positives = len(matched)
+    true_positives = len(matched_incident_ids)
+    false_positives = len(confirmed) - true_positives
     precision = true_positives / (true_positives + false_positives) if confirmed else 1.0
-    recall = detected / len(scenarios) if scenarios else 1.0
+    recall = len(detections) / len(scenarios) if scenarios else 1.0
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
     return {
-        "scenarios": len(scenarios), "detected": detected, "confirmed_incidents": len(confirmed),
+        "scenarios": len(scenarios), "detected": len(detections), "confirmed_incidents": len(confirmed),
         "false_positives": false_positives,
         "false_positives_per_day": false_positives / observed_days if observed_days else 0.0,
         "precision": round(precision, 3), "recall": round(recall, 3), "f1": round(f1, 3),
-        "mean_detection_delay_min": round(mean(delays), 1) if delays else None,
-        "mean_duration_error_min": round(mean(duration_errors), 1) if duration_errors else None,
-        "mean_onset_error_min": round(mean(onset_errors), 1) if onset_errors else None,
-        "mean_reported_duration_error_min": round(mean(reported_duration_errors), 1) if reported_duration_errors else None,
-        "type_accuracy": round(typed_ok / typed, 3) if typed else None,
-        "typed": typed, "type_errors": confusion,
+        "mean_detection_delay_min": _rounded_mean([d.delay_minutes for _, d in detections], 1),
+        "mean_duration_error_min": _rounded_mean([d.duration_error_minutes for _, d in detections], 1),
+        "mean_onset_error_min": _rounded_mean([d.onset_error_minutes for _, d in detections], 1),
+        "mean_reported_duration_error_min": _rounded_mean([d.reported_duration_error_minutes for _, d in detections], 1),
+        "type_accuracy": round((len(typed) - len(type_errors)) / len(typed), 3) if typed else None,
+        "typed": len(typed), "type_errors": type_errors,
     }
 
 
