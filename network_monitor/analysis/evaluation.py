@@ -81,12 +81,12 @@ def standard_scenarios(
     scenarios = []
     outputs = ["OUT_001", "OUT_002", "OUT_003"]
     slots = [0.4, 1.9, 3.6, 5.2]  # jours après le début
-    for o, output in enumerate(outputs):
+    for output_index, output in enumerate(outputs):
         for k, day in enumerate(slots):
             if day + 0.3 > days:
                 continue
-            kind, minutes = _STANDARD[(seed * 5 + o * 3 + k) % len(_STANDARD)]
-            start = START + timedelta(days=day, hours=(o * 2 + seed) % 5)
+            kind, minutes = _STANDARD[(seed * 5 + output_index * 3 + k) % len(_STANDARD)]
+            start = START + timedelta(days=day, hours=(output_index * 2 + seed) % 5)
             scenarios.append(AnomalyScenario(
                 scenario_id=f"{output}-{k}", output_id=output, start_time=start,
                 end_time=start + timedelta(minutes=minutes), type=kind, severity=Severity.CRITICAL,
@@ -189,8 +189,8 @@ def capture(seed: int, days: float, scenarios: list[AnomalyScenario] | None = No
     """Calibre sur l'historique (40 j), puis observe `days` jours *après* la calibration."""
     config = AppConfig(history=HistoryConfig(minimum=timedelta(days=30), preferred=timedelta(days=40)))
     source = MockDataSource(seed=seed)
-    for sc in scenarios or []:
-        source.add_scenario(sc)
+    for scenario in scenarios or []:
+        source.add_scenario(scenario)
     records: list[tuple[AnomalyResult, float | None, float | None, float | None]] = []
     with tempfile.TemporaryDirectory() as tmp:
         repo = SqlAlchemyRepository(f"sqlite:///{tmp}/eval.db")

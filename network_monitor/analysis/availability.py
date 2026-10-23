@@ -80,8 +80,8 @@ class AvailabilityReport:
         writer = csv.writer(buf, lineterminator="\n")
         columns = [f for f in OutputAvailability.__dataclass_fields__]
         writer.writerow(columns)
-        for o in self.outputs:
-            row = asdict(o)
+        for output in self.outputs:
+            row = asdict(output)
             writer.writerow(["" if row[c] is None else (row[c].isoformat() if isinstance(row[c], datetime) else row[c]) for c in columns])
         return buf.getvalue()
 

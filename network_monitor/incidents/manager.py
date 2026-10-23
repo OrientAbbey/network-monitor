@@ -99,34 +99,34 @@ def _pattern_type(evidence: list[IncidentEvidence]) -> IncidentType | None:
     détectée avec une hystérésis (actif au-dessus de 60 % du pic, inactif
     sous 30 %) pour que le bruit autour d'un seuil unique ne l'imite pas.
     """
-    m = [
-        max(abs(e.traffic_deviation_percent or 0.0), _LOSS_TO_DEVIATION * (e.loss_percent or 0.0))
-        for e in evidence
-        if not e.data_gap
+    magnitudes = [
+        max(abs(step.traffic_deviation_percent or 0.0), _LOSS_TO_DEVIATION * (step.loss_percent or 0.0))
+        for step in evidence
+        if not step.data_gap
     ]
-    if len(m) < _PATTERN_MIN_POINTS:
+    if len(magnitudes) < _PATTERN_MIN_POINTS:
         return None
-    peak = float(np.percentile(m, 90))
+    peak = float(np.percentile(magnitudes, 90))
     if peak < _PATTERN_MIN_PEAK:
         return None
 
     state: bool | None = None
     switches = 0
-    for v in m:
-        if v >= _HIGH_FRACTION * peak and state is not True:
+    for magnitude in magnitudes:
+        if magnitude >= _HIGH_FRACTION * peak and state is not True:
             switches += state is False
             state = True
-        elif v <= _LOW_FRACTION * peak and state is not False:
+        elif magnitude <= _LOW_FRACTION * peak and state is not False:
             switches += state is True
             state = False
     if switches >= _MIN_SWITCHES:
         return IncidentType.INTERMITTENT_DEGRADATION
 
-    x = np.arange(len(m), dtype=float)
-    if np.std(m) > 0:
-        slope = float(np.polyfit(x, m, 1)[0])
-        corr = float(np.corrcoef(x, m)[0, 1])
-        if corr >= _MIN_RAMP_CORRELATION and slope * (len(m) - 1) >= _MIN_RAMP_RISE * peak:
+    positions = np.arange(len(magnitudes), dtype=float)
+    if np.std(magnitudes) > 0:
+        slope = float(np.polyfit(positions, magnitudes, 1)[0])
+        corr = float(np.corrcoef(positions, magnitudes)[0, 1])
+        if corr >= _MIN_RAMP_CORRELATION and slope * (len(magnitudes) - 1) >= _MIN_RAMP_RISE * peak:
             return IncidentType.PROGRESSIVE_DEGRADATION
     return None
 

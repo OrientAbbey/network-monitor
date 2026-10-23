@@ -127,56 +127,56 @@ def _scenario_effect(scenario: AnomalyScenario, elapsed: np.ndarray) -> tuple[np
     Mock, pas une spécification du cahier des charges au-delà de la
     liste des dix types attendus.
     """
-    e = np.clip(elapsed, 0.0, 1.0)
-    t = scenario.type
+    progress = np.clip(elapsed, 0.0, 1.0)
+    scenario_type = scenario.type
 
-    if t == ScenarioType.TRAFFIC_DROP:
-        return np.full_like(e, 1.0 - scenario.traffic_drop_fraction), np.zeros_like(e)
+    if scenario_type == ScenarioType.TRAFFIC_DROP:
+        return np.full_like(progress, 1.0 - scenario.traffic_drop_fraction), np.zeros_like(progress)
 
-    if t == ScenarioType.TRAFFIC_SPIKE:
-        return np.full_like(e, scenario.traffic_spike_multiplier), np.zeros_like(e)
+    if scenario_type == ScenarioType.TRAFFIC_SPIKE:
+        return np.full_like(progress, scenario.traffic_spike_multiplier), np.zeros_like(progress)
 
-    if t == ScenarioType.HIGH_LOSS:
-        return np.ones_like(e), np.full_like(e, scenario.loss_offset_points)
+    if scenario_type == ScenarioType.HIGH_LOSS:
+        return np.ones_like(progress), np.full_like(progress, scenario.loss_offset_points)
 
-    if t in (ScenarioType.TRAFFIC_DROP_HIGH_LOSS, ScenarioType.SHORT_INCIDENT, ScenarioType.LONG_INCIDENT):
+    if scenario_type in (ScenarioType.TRAFFIC_DROP_HIGH_LOSS, ScenarioType.SHORT_INCIDENT, ScenarioType.LONG_INCIDENT):
         # SHORT_INCIDENT / LONG_INCIDENT ont le même effet numérique que
         # TRAFFIC_DROP_HIGH_LOSS : ce qui les distingue est la durée de
         # l'instance (start_time -> end_time), pas la forme de l'effet.
         return (
-            np.full_like(e, 1.0 - scenario.traffic_drop_fraction),
-            np.full_like(e, scenario.loss_offset_points),
+            np.full_like(progress, 1.0 - scenario.traffic_drop_fraction),
+            np.full_like(progress, scenario.loss_offset_points),
         )
 
-    if t == ScenarioType.PROGRESSIVE_DEGRADATION:
-        return 1.0 - scenario.traffic_drop_fraction * e, scenario.loss_offset_points * e
+    if scenario_type == ScenarioType.PROGRESSIVE_DEGRADATION:
+        return 1.0 - scenario.traffic_drop_fraction * progress, scenario.loss_offset_points * progress
 
-    if t == ScenarioType.PROGRESSIVE_RECOVERY:
+    if scenario_type == ScenarioType.PROGRESSIVE_RECOVERY:
         # Démarre totalement dégradé, revient linéairement à la normale.
         return (
-            1.0 - scenario.traffic_drop_fraction * (1.0 - e),
-            scenario.loss_offset_points * (1.0 - e),
+            1.0 - scenario.traffic_drop_fraction * (1.0 - progress),
+            scenario.loss_offset_points * (1.0 - progress),
         )
 
-    if t == ScenarioType.INTERMITTENT_INCIDENT:
+    if scenario_type == ScenarioType.INTERMITTENT_INCIDENT:
         total_duration = (scenario.end_time - scenario.start_time).total_seconds()
         period_fraction = scenario.intermittent_period.total_seconds() / total_duration
-        phase = np.mod(e / period_fraction, 1.0)
+        phase = np.mod(progress / period_fraction, 1.0)
         on = phase < scenario.intermittent_duty_cycle
         traffic_factor = np.where(on, 1.0 - scenario.traffic_drop_fraction, 1.0)
         loss_offset = np.where(on, scenario.loss_offset_points, 0.0)
         return traffic_factor, loss_offset
 
-    if t == ScenarioType.COMBINED:
+    if scenario_type == ScenarioType.COMBINED:
         # Choix d'implémentation : dégradation progressive du trafic
         # combinée à des pics de pertes intermittents, pour représenter
         # un scénario multi-anomalies réaliste.
-        traffic_factor = 1.0 - scenario.traffic_drop_fraction * e
-        phase = np.mod(e * 4.0, 1.0)
+        traffic_factor = 1.0 - scenario.traffic_drop_fraction * progress
+        phase = np.mod(progress * 4.0, 1.0)
         loss_offset = np.where(phase < 0.3, scenario.loss_offset_points, 0.0)
         return traffic_factor, loss_offset
 
-    return np.ones_like(e), np.zeros_like(e)
+    return np.ones_like(progress), np.zeros_like(progress)
 
 
 # --- MockDataSource ---
@@ -259,13 +259,13 @@ class MockDataSource(DataSource):
             if output_id is not None and profile.output_id != output_id:
                 continue
             traffic, loss = self._simulate_output(profile, timestamps)
-            for ts, tr, lo in zip(timestamps, traffic, loss):
+            for ts, traffic_value, loss_value in zip(timestamps, traffic, loss):
                 all_samples.append(
                     TrafficSample(
                         timestamp=ts,
                         output_id=profile.output_id,
-                        traffic_mbps=float(tr),
-                        loss_percent=float(lo),
+                        traffic_mbps=float(traffic_value),
+                        loss_percent=float(loss_value),
                     )
                 )
 

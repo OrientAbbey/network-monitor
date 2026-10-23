@@ -140,7 +140,7 @@ class MonitoringLoop:
         self._storage.purge_older_than(now - self._config.history.preferred)
 
     def _under_maintenance(self, output_id: str, at: datetime) -> bool:
-        return any(w.covers(output_id, at) for w in self._maintenance)
+        return any(window.covers(output_id, at) for window in self._maintenance)
 
     def _active_incident_ranges(self, now: datetime | None = None) -> dict[str, list[tuple[datetime, datetime]]]:
         """Plages à exclure de la recalibration : incidents en cours et maintenances (un comportement
@@ -148,9 +148,9 @@ class MonitoringLoop:
         ranges: dict[str, list[tuple[datetime, datetime]]] = {}
         if now is not None:
             window_start = now - self._config.history.preferred
-            for w in self._storage.list_maintenance(window_start, now):
-                for output_id in [w.output_id] if w.output_id else self._source.list_outputs():
-                    ranges.setdefault(output_id, []).append((w.start, w.end))
+            for window in self._storage.list_maintenance(window_start, now):
+                for output_id in [window.output_id] if window.output_id else self._source.list_outputs():
+                    ranges.setdefault(output_id, []).append((window.start, window.end))
         for incident in self._incident_manager.active_incidents():
             start = incident.opened_at or incident.suspected_at
             if start is None:
@@ -218,9 +218,11 @@ class MonitoringLoop:
             validated += self._validator.missing_slots(output_id, now)
 
         tick = _TickResults()
-        tick.samples = [v.sample for v in validated if v.is_usable and v.sample is not None]
-        for v in validated:
-            self._process_validated_sample(v, tick)
+        tick.samples = [
+            validated_sample.sample for validated_sample in validated if validated_sample.is_usable and validated_sample.sample is not None
+        ]
+        for validated_sample in validated:
+            self._process_validated_sample(validated_sample, tick)
 
         # 11. persister tout le tick en une transaction. Un incident jamais
         # confirmé (jamais passé par OPEN) n'est pas écrit : ce n'est que du

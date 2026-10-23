@@ -157,44 +157,49 @@ class AuthSettings:
 _fallback_secret = secrets.token_bytes(32)
 
 
-def load_settings() -> AuthSettings:
-    """Lit l'environnement à chaque appel : la configuration change sans redémarrer les tests."""
+def _read_users_declaration() -> dict[str, object]:
     try:
         declared = json.loads(os.environ.get("NM_USERS") or "{}")
     except json.JSONDecodeError as exc:
         raise AuthConfigError(f"NM_USERS n'est pas un JSON valide ({exc.msg})") from None
     if not isinstance(declared, dict):
         raise AuthConfigError('NM_USERS doit être un objet JSON : {"alice": "<hash>"} ou {"bob": {"hash": "<hash>", "role": "operator"}}')
-    hashes: dict[str, str] = {}
-    roles: dict[str, Role] = {}
-    legacy: list[str] = []
-    for name, entry in declared.items():
-        if name == STATIC_SUBJECT:
-            raise AuthConfigError(f"NM_USERS : le nom « {STATIC_SUBJECT} » est réservé au jeton machine")
-        if isinstance(entry, str):  # ancien format : aucun rôle déclaré, donc les droits qu'il avait toujours eus
-            hashes[name], roles[name] = entry, Role.ADMIN
-            legacy.append(name)
-        elif isinstance(entry, dict) and isinstance(entry.get("hash"), str) and "role" in entry and set(entry) <= {"hash", "role"}:
-            try:
-                roles[name] = Role.parse(entry["role"])
-            except AuthConfigError as exc:
-                raise AuthConfigError(f"NM_USERS : utilisateur « {name} » : {exc}") from None
-            hashes[name] = entry["hash"]
-        else:
-            raise AuthConfigError(f'NM_USERS : l\'entrée de « {name} » doit être un hachage, ou {{"hash": "...", "role": "viewer|operator|admin"}} (rôle obligatoire)')
-    secret = os.environ.get("NM_AUTH_SECRET")
+    return declared
+
+
+def _parse_user(name: str, entry: object) -> tuple[str, Role, bool]:
+    """(hachage, rôle, déclaré dans l'ancien format) d'un utilisateur de `NM_USERS`."""
+    if name == STATIC_SUBJECT:
+        raise AuthConfigError(f"NM_USERS : le nom « {STATIC_SUBJECT} » est réservé au jeton machine")
+    if isinstance(entry, str):  # ancien format : aucun rôle déclaré, donc les droits qu'il avait toujours eus
+        return entry, Role.ADMIN, True
+    if isinstance(entry, dict) and isinstance(entry.get("hash"), str) and "role" in entry and set(entry) <= {"hash", "role"}:
+        try:
+            return entry["hash"], Role.parse(entry["role"]), False
+        except AuthConfigError as exc:
+            raise AuthConfigError(f"NM_USERS : utilisateur « {name} » : {exc}") from None
+    raise AuthConfigError(f'NM_USERS : l\'entrée de « {name} » doit être un hachage, ou {{"hash": "...", "role": "viewer|operator|admin"}} (rôle obligatoire)')
+
+
+def _parse_machine_role() -> Role:
     try:
-        static_role = Role.parse(os.environ.get("NM_API_TOKEN_ROLE") or "admin")
+        return Role.parse(os.environ.get("NM_API_TOKEN_ROLE") or "admin")
     except AuthConfigError as exc:
         raise AuthConfigError(f"NM_API_TOKEN_ROLE : {exc}") from None
+
+
+def load_settings() -> AuthSettings:
+    """Lit l'environnement à chaque appel : la configuration change sans redémarrer les tests."""
+    users = {name: _parse_user(name, entry) for name, entry in _read_users_declaration().items()}
+    secret = os.environ.get("NM_AUTH_SECRET")
     return AuthSettings(
-        users=hashes,
+        users={name: password_hash for name, (password_hash, _, _) in users.items()},
         secret=secret.encode() if secret else _fallback_secret,
         ttl=timedelta(minutes=float(os.environ.get("NM_TOKEN_TTL_MINUTES", "60"))),
         static_token=os.environ.get("NM_API_TOKEN") or None,
-        roles=roles,
-        static_role=static_role,
-        legacy_users=tuple(legacy),
+        roles={name: role for name, (_, role, _) in users.items()},
+        static_role=_parse_machine_role(),
+        legacy_users=tuple(name for name, (_, _, legacy) in users.items() if legacy),
     )
 
 

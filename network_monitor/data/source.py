@@ -158,18 +158,18 @@ class DataValidator:
 
         cursor = max(last, self._missing_emitted_until.get(output_id, last))
         missing: list[ValidatedSample] = []
-        t = cursor + self._expected_interval
-        while t <= up_to:
+        slot_time = cursor + self._expected_interval
+        while slot_time <= up_to:
             missing.append(
                 ValidatedSample(
                     output_id=output_id,
-                    timestamp=t,
+                    timestamp=slot_time,
                     sample=None,
                     quality_flags=[DataQualityFlag.MISSING],
                 )
             )
-            self._missing_emitted_until[output_id] = t
-            t += self._expected_interval
+            self._missing_emitted_until[output_id] = slot_time
+            slot_time += self._expected_interval
         return missing
 
     def known_outputs(self) -> set[str]:

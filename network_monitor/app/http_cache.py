@@ -63,9 +63,9 @@ class ETagMiddleware:
             headers["etag"] = etag
             headers["cache-control"] = "no-cache"
             if etag in candidates or "*" in candidates:
-                for h in ("content-length", "content-type", "content-encoding"):
-                    if h in headers:
-                        del headers[h]
+                for header in ("content-length", "content-type", "content-encoding"):
+                    if header in headers:
+                        del headers[header]
                 await send({"type": "http.response.start", "status": 304, "headers": start["headers"]})
                 await send({"type": "http.response.body", "body": b""})
                 return

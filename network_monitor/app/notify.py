@@ -487,13 +487,13 @@ class NotificationDispatcher:
         for channel in self.channels.values():
             due = self._storage.due_notifications(channel.name, now)
             groups: dict[tuple[str, ...], list[Notification]] = defaultdict(list)
-            for n in due:
-                groups[tuple(n.pending_targets or channel.targets())].append(n)
+            for notification in due:
+                groups[tuple(notification.pending_targets or channel.targets())].append(notification)
             for targets, batch in groups.items():
                 wait_until = self._allowed(channel, now)
                 if wait_until is not None:  # plafond atteint : les alertes s'accumulent, un seul message groupé partira plus tard
-                    for n in batch:
-                        n.next_attempt_at = wait_until
+                    for notification in batch:
+                        notification.next_attempt_at = wait_until
                     self._storage.update_notifications(batch)
                     continue
                 self._deliver(channel, list(targets), batch, now)
