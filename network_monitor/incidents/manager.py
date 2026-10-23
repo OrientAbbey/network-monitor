@@ -24,6 +24,16 @@ from network_monitor.app.models import (
 )
 
 
+@dataclass(frozen=True)
+class _Observation:
+    """Valeurs attendues et observées à un pas (None quand la source ne les fournit pas) : elles voyagent toujours ensemble."""
+
+    expected_traffic_mbps: float | None = None
+    expected_loss_percent: float | None = None
+    observed_traffic_mbps: float | None = None
+    observed_loss_percent: float | None = None
+
+
 @dataclass
 class _OutputState:
     """État interne suivi par sortie (durées écoulées, incident en cours)."""
@@ -238,40 +248,39 @@ class IncidentManager:
             return self._finalize(result, state.incident, alerts), state.incident
 
         state.last_valid_timestamp = result.timestamp
-        min_duration = self._config.minimum_duration_for(result.output_id)
-        recovery_duration = self._config.recovery_duration_for(result.output_id)
+        observation = _Observation(expected_traffic_mbps, expected_loss_percent, observed_traffic_mbps, observed_loss_percent)
 
         touched_incident = state.incident
         if state.incident is None:
-            alerts = self._process_no_incident(result, state, min_duration, expected_traffic_mbps, expected_loss_percent, observed_traffic_mbps, observed_loss_percent)
+            alerts = self._process_no_incident(result, state, observation)
             touched_incident = state.incident
         else:
             # `touched_incident` référence déjà l'objet muté en place, y compris
             # si state.incident a été remis à None (fermeture) pendant l'appel.
-            alerts = self._process_active_incident(result, state, min_duration, recovery_duration, expected_traffic_mbps, expected_loss_percent, observed_traffic_mbps, observed_loss_percent)
+            alerts = self._process_active_incident(result, state, observation)
 
         return self._finalize(result, touched_incident, alerts), touched_incident
 
     # -- Maintenance et dépendances entre sorties -------------------------------------
 
     def _descendants(self, output_id: str) -> list[str]:
-        out, frontier = [], [output_id]
+        descendants, frontier = [], [output_id]
         while frontier:
             node = frontier.pop()
-            kids = [c for c, p in self._parents.items() if p == node]
-            out += kids
-            frontier += kids
-        return out
+            children = [child for child, parent in self._parents.items() if parent == node]
+            descendants += children
+            frontier += children
+        return descendants
 
-    def _active(self, output_id: str) -> Incident | None:
+    def _open_incident_of(self, output_id: str) -> Incident | None:
         state = self._states.get(output_id)
-        inc = state.incident if state else None
-        return inc if inc is not None and inc.status == IncidentStatus.OPEN else None
+        incident = state.incident if state else None
+        return incident if incident is not None and incident.status == IncidentStatus.OPEN else None
 
-    def _related(self, a: Incident, b: Incident) -> bool:
+    def _started_together(self, first: Incident, second: Incident) -> bool:
         """Débuts réels assez proches pour être une seule cause (`correlation_window`)."""
-        start_a, start_b = a.started_at or a.opened_at, b.started_at or b.opened_at
-        return start_a is not None and start_b is not None and abs(start_a - start_b) <= self._correlation_window
+        first_start, second_start = first.started_at or first.opened_at, second.started_at or second.opened_at
+        return first_start is not None and second_start is not None and abs(first_start - second_start) <= self._correlation_window
 
     def _correlate(self, incident: Incident, at: datetime) -> tuple[str | None, list[str]]:
         """À la confirmation d'un incident : retenu par une maintenance ? rattaché à une cause amont ?
@@ -281,18 +290,18 @@ class IncidentManager:
             incident.maintenance, silenced = True, "maintenance"
         ancestor = self._parents.get(incident.output_id)
         while ancestor is not None:
-            root = self._active(ancestor)
-            if root is not None and root.id != incident.id and self._related(root, incident):
-                incident.root_cause_incident_id = root.id
+            root_cause = self._open_incident_of(ancestor)
+            if root_cause is not None and root_cause.id != incident.id and self._started_together(root_cause, incident):
+                incident.root_cause_incident_id = root_cause.id
                 if silenced is None:
                     incident.inhibited, silenced = True, "inhibited"
                 break
             ancestor = self._parents.get(ancestor)
         impacted = []
         for child in self._descendants(incident.output_id):
-            other = self._active(child)
-            if other is not None and other.root_cause_incident_id is None and self._related(incident, other):
-                other.root_cause_incident_id = incident.id
+            downstream = self._open_incident_of(child)
+            if downstream is not None and downstream.root_cause_incident_id is None and self._started_together(incident, downstream):
+                downstream.root_cause_incident_id = incident.id
                 impacted.append(child)
         return silenced, impacted
 
@@ -300,66 +309,72 @@ class IncidentManager:
         """Applique aux alertes du pas la maintenance et l'inhibition (retenir, jamais supprimer : une
         alerte retenue reste enregistrée et visible, elle n'est simplement pas envoyée), et libère
         ce qui doit l'être (maintenance terminée, cause amont résolue)."""
-        extra: list[Alert] = []
-        for alert in alerts:  # suivi des incidents confirmés encore actifs, toutes sorties confondues
+        self._track_open_incident_ids(alerts)
+        if incident is None or incident.opened_at is None:
+            return alerts
+        self._correlate_on_opening(result, incident, alerts)
+        released = self._release_held_incident(result, incident)
+        all_alerts = alerts + ([released] if released else [])
+        incident_alerts = [alert for alert in all_alerts if alert.incident_id == incident.id]
+        for alert in incident_alerts:
+            alert.suppressed = self._silenced.get(incident.id)
+            alert.root_cause_incident_id = incident.root_cause_incident_id
+        if any(alert.event == "closed" and alert.confirmed for alert in incident_alerts):
+            self._silenced.pop(incident.id, None)
+        return all_alerts
+
+    def _track_open_incident_ids(self, alerts: list[Alert]) -> None:
+        """Suivi des incidents confirmés encore actifs, toutes sorties confondues."""
+        for alert in alerts:
             if alert.confirmed and alert.event in ("opened", "reopened"):
                 self._open_ids.add(alert.incident_id)
             elif alert.confirmed and alert.event == "closed":
                 self._open_ids.discard(alert.incident_id)
-        if incident is not None and incident.opened_at is not None:
-            for alert in alerts:
-                if alert.incident_id == incident.id and alert.event in ("opened", "reopened"):
-                    silenced, impacted = self._correlate(incident, result.timestamp)
-                    if silenced:
-                        self._silenced[incident.id] = silenced
-                    alert.impacted_outputs = impacted
-                    break
-            held = self._silenced.get(incident.id)
-            state = self._states.get(incident.output_id)
-            still_open = incident.status == IncidentStatus.OPEN
-            if held == "maintenance" and still_open and not self._in_maintenance(incident.output_id, result.timestamp):
-                # La maintenance est terminée et l'incident dure : c'est maintenant une vraie alerte.
-                del self._silenced[incident.id]
-                extra.append(
-                    self._alert(incident, "opened", result.timestamp, f"Incident persistant après la fin de la maintenance sur {incident.output_id}")
-                )
-            elif (
-                held == "inhibited" and still_open
-                and incident.root_cause_incident_id not in self._open_ids
-                and state is not None and state.below_close_since is None  # pas en cours de retour à la normale
-            ):
-                # La cause amont est résolue et cette sortie est toujours en panne : elle n'est plus « expliquée ».
-                del self._silenced[incident.id]
-                extra.append(self._alert(incident, "opened", result.timestamp, "Incident persistant après la résolution de la cause amont"))
-            alerts_for_incident = [a for a in alerts + extra if a.incident_id == incident.id]
-            for alert in alerts_for_incident:
-                alert.suppressed = self._silenced.get(incident.id)
-                alert.root_cause_incident_id = incident.root_cause_incident_id
-            if any(a.event == "closed" and a.confirmed for a in alerts_for_incident):
-                self._silenced.pop(incident.id, None)
-        return alerts + extra
+
+    def _correlate_on_opening(self, result: AnomalyResult, incident: Incident, alerts: list[Alert]) -> None:
+        """À l'ouverture : l'incident est-il retenu (maintenance, cause amont), et quelles sorties aval explique-t-il ?"""
+        opening = next((a for a in alerts if a.incident_id == incident.id and a.event in ("opened", "reopened")), None)
+        if opening is None:
+            return
+        silenced, impacted = self._correlate(incident, result.timestamp)
+        if silenced:
+            self._silenced[incident.id] = silenced
+        opening.impacted_outputs = impacted
+
+    def _release_held_incident(self, result: AnomalyResult, incident: Incident) -> Alert | None:
+        """Une alerte « opened » si la raison qui retenait l'incident a disparu alors qu'il dure : maintenance
+        terminée, ou cause amont résolue pendant que cette sortie reste en panne (et non en retour à la normale)."""
+        if incident.status != IncidentStatus.OPEN:
+            return None
+        held = self._silenced.get(incident.id)
+        state = self._states.get(incident.output_id)
+        if held == "maintenance" and not self._in_maintenance(incident.output_id, result.timestamp):
+            message = f"Incident persistant après la fin de la maintenance sur {incident.output_id}"
+        elif (
+            held == "inhibited"
+            and incident.root_cause_incident_id not in self._open_ids
+            and state is not None and state.below_close_since is None  # pas en cours de retour à la normale
+        ):
+            message = "Incident persistant après la résolution de la cause amont"
+        else:
+            return None
+        del self._silenced[incident.id]
+        return self._build_alert(incident, "opened", result.timestamp, message)
 
     # -- Pas d'incident en cours ------------------------------------------------
 
-    def _process_no_incident(
-        self, result, state: _OutputState, min_duration, expected_traffic, expected_loss, observed_traffic, observed_loss
-    ) -> list[Alert]:
-        """Aucun incident en cours : entrée en SUSPECT, ou réouverture."""
-        alerts: list[Alert] = []
-        score = result.joint_anomaly_score
-
-        if score < self._config.warning_score:
-            return alerts
-
+    def _process_no_incident(self, result: AnomalyResult, state: _OutputState, observation: _Observation) -> list[Alert]:
+        """Aucun incident en cours : entrée en SUSPECT (le premier signal faible), sinon rien."""
+        if result.joint_anomaly_score < self._config.warning_score:
+            return []
         state.suspect_since = result.timestamp
         state.suspect_steps_above = 1
         state.below_warning_since = None
-        incident = self._new_incident(result, expected_traffic, expected_loss, observed_traffic, observed_loss)
+        incident = self._new_incident(result, observation)
         incident.status = IncidentStatus.SUSPECT
         incident.suspected_at = result.timestamp
         state.incident = incident
-        alerts.append(self._alert(incident, "suspect", result.timestamp, f"Signal faible détecté sur {result.output_id}"))
-        return alerts
+        return [self._build_alert(incident, "suspect", result.timestamp, f"Signal faible détecté sur {result.output_id}")]
 
     def _try_reopen(self, state: _OutputState, episode_start: datetime) -> Incident | None:
         """Rouvre le dernier incident confirmé de cette sortie si le nouvel épisode a commencé
@@ -376,87 +391,93 @@ class IncidentManager:
         closed.ended_at = None
         return closed
 
-    # -- Incident actif (SUSPECT ou OPEN) ------------------------------------------
+    # -- Incident actif (SUSPECT, OPEN ou STALE) ---------------------------------------
 
-    def _process_active_incident(
-        self, result, state: _OutputState, min_duration, recovery_duration, expected_traffic, expected_loss, observed_traffic, observed_loss
-    ) -> list[Alert]:
-        alerts: list[Alert] = []
+    def _process_active_incident(self, result: AnomalyResult, state: _OutputState, observation: _Observation) -> list[Alert]:
         incident = state.incident
         assert incident is not None
-        score = result.joint_anomaly_score
-
         if incident.status == IncidentStatus.STALE:
             # Une mesure valide reprend après un trou prolongé :
             # l'incident redevient OPEN, il n'est jamais resté "résolu".
             incident.status = IncidentStatus.OPEN
-
-        self._append_evidence(incident, result, expected_traffic, expected_loss, observed_traffic, observed_loss)
-        incident.last_seen_at = result.timestamp
-        incident.score = max(incident.score, score)
-        if result.traffic_deviation_percent is not None:
-            incident.peak_traffic_deviation_percent = _peak(incident.peak_traffic_deviation_percent, result.traffic_deviation_percent)
-        if observed_loss is not None:
-            incident.peak_loss_percent = max(incident.peak_loss_percent, observed_loss)
-
+        self._record_observation(incident, result, observation)
         if incident.status == IncidentStatus.SUSPECT:
-            if score < self._config.warning_score:
-                # Un creux isolé ne referme pas le SUSPECT : un incident intermittent
-                # retombe sous le seuil à chaque période et doit rester un seul
-                # incident. Le SUSPECT ne se referme qu'après `recovery_duration` de calme.
-                if state.below_warning_since is None:
-                    state.below_warning_since = result.timestamp
-                # Un pic isolé (moins de `min_suspect_steps` pas au-dessus du seuil) ne
-                # bénéficie d'aucune tolérance : c'est le bruit ordinaire de la mesure.
-                if (
-                    state.suspect_steps_above < self._config.min_suspect_steps
-                    or result.timestamp - state.below_warning_since >= recovery_duration
-                ):
-                    incident.status = IncidentStatus.CLOSED
-                    incident.closed_at = result.timestamp
-                    alerts.append(self._alert(incident, "closed", result.timestamp, "Signal faible résorbé sans confirmation"))
-                    self._reset(state, incident)
-                return alerts
+            return self._process_suspect(result, state, incident)
+        return self._process_open(result, state, incident)
 
-            state.below_warning_since = None
-            state.suspect_steps_above += 1
-            if score >= self._config.open_score:
-                elapsed = result.timestamp - state.suspect_since
-                if elapsed >= min_duration:
-                    previous = self._try_reopen(state, incident.suspected_at or result.timestamp)
-                    if previous is not None:
-                        # Le nouvel épisode confirmé prolonge l'incident précédent (même identité,
-                        # début d'origine conservé) : on lui verse les preuves du SUSPECT abandonné.
-                        previous.evidence.extend(incident.evidence)
-                        self._trim_evidence(previous)
-                        previous.last_seen_at = result.timestamp
-                        previous.score = max(previous.score, incident.score)
-                        previous.peak_traffic_deviation_percent = _peak(
-                            previous.peak_traffic_deviation_percent, incident.peak_traffic_deviation_percent
-                        )
-                        previous.peak_loss_percent = max(previous.peak_loss_percent, incident.peak_loss_percent)
-                        previous.incident_type = _incident_type(previous.evidence)
-                        state.incident, state.open_since = previous, result.timestamp
-                        alerts.append(
-                            self._alert(
-                                previous, "reopened", result.timestamp,
-                                f"Incident ré-ouvert sur {result.output_id} (nouvel épisode confirmé dans la fenêtre de fusion)",
-                            )
-                        )
-                        return alerts
-                    incident.status = IncidentStatus.OPEN
-                    incident.opened_at = result.timestamp
-                    # Rétro-daté : l'incident a commencé au premier signal faible de l'épisode.
-                    incident.started_at = incident.suspected_at
-                    state.open_since = result.timestamp
-                    incident.severity = self._severity_for(score)
-                    incident.incident_type = _incident_type(incident.evidence)
-                    alerts.append(self._alert(incident, "opened", result.timestamp, self._describe(incident)))
-            # Entre warning_score et open_score, ou open_score pas encore
-            # tenu assez longtemps : reste en SUSPECT sans alerte supplémentaire.
-            return alerts
+    def _record_observation(self, incident: Incident, result: AnomalyResult, observation: _Observation) -> None:
+        """Verse ce pas au dossier de l'incident : preuve, dernier instant vu, score et pics."""
+        self._append_evidence(incident, result, observation)
+        incident.last_seen_at = result.timestamp
+        incident.score = max(incident.score, result.joint_anomaly_score)
+        if result.traffic_deviation_percent is not None:
+            incident.peak_traffic_deviation_percent = _largest_magnitude(incident.peak_traffic_deviation_percent, result.traffic_deviation_percent)
+        if observation.observed_loss_percent is not None:
+            incident.peak_loss_percent = max(incident.peak_loss_percent, observation.observed_loss_percent)
 
-        # status == OPEN (ou STALE traité séparément dans _handle_data_gap)
+    def _process_suspect(self, result: AnomalyResult, state: _OutputState, incident: Incident) -> list[Alert]:
+        score = result.joint_anomaly_score
+        if score < self._config.warning_score:
+            return self._on_quiet_step_while_suspect(result, state, incident)
+        state.below_warning_since = None
+        state.suspect_steps_above += 1
+        assert state.suspect_since is not None  # toujours posé à l'entrée en SUSPECT
+        if score >= self._config.open_score and result.timestamp - state.suspect_since >= self._config.minimum_duration_for(result.output_id):
+            return [self._confirm_episode(result, state, incident)]
+        # Entre warning_score et open_score, ou open_score pas encore
+        # tenu assez longtemps : reste en SUSPECT sans alerte supplémentaire.
+        return []
+
+    def _on_quiet_step_while_suspect(self, result: AnomalyResult, state: _OutputState, incident: Incident) -> list[Alert]:
+        # Un creux isolé ne referme pas le SUSPECT : un incident intermittent
+        # retombe sous le seuil à chaque période et doit rester un seul
+        # incident. Le SUSPECT ne se referme qu'après `recovery_duration` de calme.
+        if state.below_warning_since is None:
+            state.below_warning_since = result.timestamp
+        # Un pic isolé (moins de `min_suspect_steps` pas au-dessus du seuil) ne
+        # bénéficie d'aucune tolérance : c'est le bruit ordinaire de la mesure.
+        recovery_duration = self._config.recovery_duration_for(result.output_id)
+        if state.suspect_steps_above >= self._config.min_suspect_steps and result.timestamp - state.below_warning_since < recovery_duration:
+            return []
+        incident.status = IncidentStatus.CLOSED
+        incident.closed_at = result.timestamp
+        alert = self._build_alert(incident, "closed", result.timestamp, "Signal faible résorbé sans confirmation")
+        self._reset(state, incident)
+        return [alert]
+
+    def _confirm_episode(self, result: AnomalyResult, state: _OutputState, suspect: Incident) -> Alert:
+        """Le signal faible tient assez longtemps avec un score élevé : ouvre un incident, ou rouvre le précédent."""
+        previous = self._try_reopen(state, suspect.suspected_at or result.timestamp)
+        if previous is not None:
+            self._merge_into_previous(previous, suspect, state, result)
+            return self._build_alert(
+                previous, "reopened", result.timestamp,
+                f"Incident ré-ouvert sur {result.output_id} (nouvel épisode confirmé dans la fenêtre de fusion)",
+            )
+        suspect.status = IncidentStatus.OPEN
+        suspect.opened_at = result.timestamp
+        # Rétro-daté : l'incident a commencé au premier signal faible de l'épisode.
+        suspect.started_at = suspect.suspected_at
+        state.open_since = result.timestamp
+        suspect.severity = self._severity_for(result.joint_anomaly_score)
+        suspect.incident_type = _incident_type(suspect.evidence)
+        return self._build_alert(suspect, "opened", result.timestamp, self._describe(suspect))
+
+    def _merge_into_previous(self, previous: Incident, suspect: Incident, state: _OutputState, result: AnomalyResult) -> None:
+        """Le nouvel épisode confirmé prolonge l'incident précédent (même identité,
+        début d'origine conservé) : on lui verse les preuves du SUSPECT abandonné."""
+        previous.evidence.extend(suspect.evidence)
+        self._trim_evidence(previous)
+        previous.last_seen_at = result.timestamp
+        previous.score = max(previous.score, suspect.score)
+        previous.peak_traffic_deviation_percent = _largest_magnitude(previous.peak_traffic_deviation_percent, suspect.peak_traffic_deviation_percent)
+        previous.peak_loss_percent = max(previous.peak_loss_percent, suspect.peak_loss_percent)
+        previous.incident_type = _incident_type(previous.evidence)
+        state.incident, state.open_since = previous, result.timestamp
+
+    def _process_open(self, result: AnomalyResult, state: _OutputState, incident: Incident) -> list[Alert]:
+        """Incident OPEN (le STALE est traité à part dans `_handle_data_gap`)."""
+        score = result.joint_anomaly_score
         # Le motif (progressif, intermittent) ne se voit qu'avec du recul : le
         # type est réévalué à chaque pas sur l'ensemble des preuves.
         # Figé pendant le retour à la normale : les pas de récupération ne décrivent
@@ -465,32 +486,37 @@ class IncidentManager:
         type_changed = new_type != incident.incident_type
         incident.incident_type = new_type
         if score >= self._config.open_score:
-            state.below_close_since = None
-            new_severity = self._severity_for(score)
-            severity_changed = new_severity != incident.severity
-            incident.severity = new_severity
-            # Anti-spam : une alerte par événement du moteur, pas une par
-            # tick — seul un changement de sévérité ou de type justifie une mise à jour.
-            if severity_changed or type_changed:
-                alerts.append(self._alert(incident, "updated", result.timestamp, self._describe(incident)))
-            return alerts
-
+            return self._on_strong_score(result, state, incident, type_changed)
         if score < self._config.close_score:
-            if state.below_close_since is None:
-                state.below_close_since = result.timestamp
-                alerts.append(self._alert(incident, "recovering", result.timestamp, "Retour progressif à la normale"))
-            elif result.timestamp - state.below_close_since >= recovery_duration:
-                incident.status = IncidentStatus.CLOSED
-                incident.closed_at = result.timestamp
-                # Rétro-daté : la fin est le premier pas sous close_score, pas la décision de fermer.
-                incident.ended_at = state.below_close_since
-                alerts.append(self._alert(incident, "closed", result.timestamp, self._describe(incident)))
-                self._reset(state, incident)
-            return alerts
-
+            return self._on_recovery_step(result, state, incident)
         # Entre close_score et open_score : incident maintenu tel quel (hystérésis).
         state.below_close_since = None
-        return alerts
+        return []
+
+    def _on_strong_score(self, result: AnomalyResult, state: _OutputState, incident: Incident, type_changed: bool) -> list[Alert]:
+        state.below_close_since = None
+        new_severity = self._severity_for(result.joint_anomaly_score)
+        severity_changed = new_severity != incident.severity
+        incident.severity = new_severity
+        # Anti-spam : une alerte par événement du moteur, pas une par
+        # tick — seul un changement de sévérité ou de type justifie une mise à jour.
+        if severity_changed or type_changed:
+            return [self._build_alert(incident, "updated", result.timestamp, self._describe(incident))]
+        return []
+
+    def _on_recovery_step(self, result: AnomalyResult, state: _OutputState, incident: Incident) -> list[Alert]:
+        if state.below_close_since is None:
+            state.below_close_since = result.timestamp
+            return [self._build_alert(incident, "recovering", result.timestamp, "Retour progressif à la normale")]
+        if result.timestamp - state.below_close_since < self._config.recovery_duration_for(result.output_id):
+            return []
+        incident.status = IncidentStatus.CLOSED
+        incident.closed_at = result.timestamp
+        # Rétro-daté : la fin est le premier pas sous close_score, pas la décision de fermer.
+        incident.ended_at = state.below_close_since
+        alert = self._build_alert(incident, "closed", result.timestamp, self._describe(incident))
+        self._reset(state, incident)
+        return [alert]
 
     # -- Trous de données --------------------------------------------------
 
@@ -517,12 +543,12 @@ class IncidentManager:
         gap_start = incident.last_seen_at
         if result.timestamp - gap_start > self._config.stale_after and incident.status != IncidentStatus.STALE:
             incident.status = IncidentStatus.STALE
-            return [self._alert(incident, "stale", result.timestamp, "Trou de données prolongé : incident marqué STALE")]
+            return [self._build_alert(incident, "stale", result.timestamp, "Trou de données prolongé : incident marqué STALE")]
         return []
 
     # -- Aides internes ----------------------------------------------------------
 
-    def _new_incident(self, result, expected_traffic, expected_loss, observed_traffic, observed_loss) -> Incident:
+    def _new_incident(self, result: AnomalyResult, observation: _Observation) -> Incident:
         incident = Incident(
             id=str(uuid.uuid4()),
             output_id=result.output_id,
@@ -532,24 +558,24 @@ class IncidentManager:
             last_seen_at=result.timestamp,
             score=result.joint_anomaly_score,
         )
-        self._append_evidence(incident, result, expected_traffic, expected_loss, observed_traffic, observed_loss)
+        self._append_evidence(incident, result, observation)
         return incident
 
     _MAX_EVIDENCE = 200
-    """Plafond du nombre de preuves conservées par incident (Perf-6) : un
-    incident qui reste OPEN pendant des jours ne doit pas faire croître le
-    blob `evidence` sans limite. Au-delà, on garde le début (contexte
-    d'ouverture) et la fin (état récent), pas le milieu."""
+    """Plafond du nombre de preuves conservées par incident : un incident qui reste OPEN pendant
+    des jours ne doit pas faire croître le blob `evidence` sans limite. Au-delà, on garde le
+    début (contexte d'ouverture) et la fin (état récent), pas le milieu."""
+    _KEPT_AT_START = 20
 
-    def _append_evidence(self, incident: Incident, result, expected_traffic, expected_loss, observed_traffic, observed_loss) -> None:
+    def _append_evidence(self, incident: Incident, result: AnomalyResult, observation: _Observation) -> None:
         incident.evidence.append(
             IncidentEvidence(
                 timestamp=result.timestamp,
-                traffic_mbps=observed_traffic,
-                expected_traffic_mbps=expected_traffic,
+                traffic_mbps=observation.observed_traffic_mbps,
+                expected_traffic_mbps=observation.expected_traffic_mbps,
                 traffic_deviation_percent=result.traffic_deviation_percent,
-                loss_percent=observed_loss,
-                expected_loss_percent=expected_loss,
+                loss_percent=observation.observed_loss_percent,
+                expected_loss_percent=observation.expected_loss_percent,
                 traffic_anomaly_score=result.traffic_anomaly_score,
                 loss_anomaly_score=result.loss_anomaly_score,
                 isolation_score=result.isolation_score,
@@ -560,13 +586,10 @@ class IncidentManager:
 
     def _trim_evidence(self, incident: Incident) -> None:
         if len(incident.evidence) > self._MAX_EVIDENCE:
-            head = 20
-            incident.evidence = incident.evidence[:head] + incident.evidence[-(self._MAX_EVIDENCE - head):]
+            incident.evidence = incident.evidence[: self._KEPT_AT_START] + incident.evidence[-(self._MAX_EVIDENCE - self._KEPT_AT_START):]
 
     def _severity_for(self, score: float) -> Severity:
-        if score >= self._critical_score:
-            return Severity.CRITICAL
-        return Severity.WARNING
+        return Severity.CRITICAL if score >= self._critical_score else Severity.WARNING
 
     def _describe(self, incident: Incident) -> str:
         text = (
@@ -578,9 +601,9 @@ class IncidentManager:
             text += f", confirmé par Isolation Forest ({peak:.2f})"
         return text
 
-    def _alert(self, incident: Incident, event: str, timestamp: datetime, message: str) -> Alert:
+    def _build_alert(self, incident: Incident, event: str, timestamp: datetime, message: str) -> Alert:
         severity = Severity.INFO if event in ("suspect", "recovering") else incident.severity
-        ev = incident.evidence[-1] if incident.evidence else None
+        latest = incident.evidence[-1] if incident.evidence else None
         start = incident.started_at or incident.opened_at or incident.suspected_at
         # Une alerte de fermeture rapporte la durée réelle (début → fin rétro-datés), pas le moment de la décision.
         end = incident.ended_at if event == "closed" and incident.ended_at else timestamp
@@ -593,11 +616,11 @@ class IncidentManager:
             message=message,
             incident_type=incident.incident_type,
             duration_seconds=(end - start).total_seconds() if start else None,
-            traffic_mbps=ev.traffic_mbps if ev else None,
-            expected_traffic_mbps=ev.expected_traffic_mbps if ev else None,
-            traffic_deviation_percent=ev.traffic_deviation_percent if ev else None,
-            loss_percent=ev.loss_percent if ev else None,
-            expected_loss_percent=ev.expected_loss_percent if ev else None,
+            traffic_mbps=latest.traffic_mbps if latest else None,
+            expected_traffic_mbps=latest.expected_traffic_mbps if latest else None,
+            traffic_deviation_percent=latest.traffic_deviation_percent if latest else None,
+            loss_percent=latest.loss_percent if latest else None,
+            expected_loss_percent=latest.expected_loss_percent if latest else None,
             started_at=incident.started_at,
             ended_at=incident.ended_at,
             confirmed=incident.opened_at is not None,
@@ -623,10 +646,11 @@ class IncidentManager:
         return state is not None and state.incident is not None and state.below_close_since is not None
 
     def active_incidents(self) -> list[Incident]:
-        return [s.incident for s in self._states.values() if s.incident is not None and s.incident.is_active]
+        return [state.incident for state in self._states.values() if state.incident is not None and state.incident.is_active]
 
 
-def _peak(current: float, candidate: float | None) -> float:
+def _largest_magnitude(current: float, candidate: float | None) -> float:
+    """Le plus grand écart en valeur absolue (une chute de -80 % l'emporte sur une hausse de +30 %)."""
     if candidate is None:
         return current
     return candidate if abs(candidate) > abs(current) else current
