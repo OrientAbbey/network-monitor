@@ -502,30 +502,40 @@ class NotificationDispatcher:
         return messages
 
     def _deliver(self, channel: Channel, targets: list[str], batch: list[Notification], now: datetime) -> None:
-        batch.sort(key=lambda n: n.alert["timestamp"])
+        batch.sort(key=lambda notification: notification.alert["timestamp"])
+        failures = self._send(channel, targets, batch)  # destinataire -> échec, pour ceux qui n'ont pas reçu
+        retryable_targets = [target for target, failure in failures.items() if failure.retryable]
+        errors = "; ".join(sorted({str(failure) for failure in failures.values()}))[:500] if failures else None
+        retry_after = max((failures[target].retry_after or 0 for target in retryable_targets), default=0)
+        for notification in batch:
+            notification.attempts += 1
+            notification.last_error = errors
+            if not failures:
+                notification.status, notification.sent_at, notification.pending_targets = "sent", now, None
+            elif not retryable_targets or notification.attempts >= self._cfg.max_attempts:
+                notification.status, notification.pending_targets = "failed", list(failures)
+                logger.error("Canal %s : abandon après %d tentative(s) : %s", channel.name, notification.attempts, errors)
+            else:
+                self._schedule_retry(channel, notification, retryable_targets, retry_after, now, errors)
+        self._storage.update_notifications(batch)
+
+    @staticmethod
+    def _send(channel: Channel, targets: list[str], batch: list[Notification]) -> dict[str, DeliveryError]:
+        """Envoie le lot ; renvoie, par destinataire, l'échec (absent du résultat = bien reçu). Une exception inattendue du canal compte comme un échec à reprendre."""
         try:
-            results = channel.send([n.alert for n in batch], targets)
+            results = channel.send([notification.alert for notification in batch], targets)
         except Exception as exc:
             logger.exception("Canal %s : erreur inattendue", channel.name)
             results = dict.fromkeys(targets, DeliveryError(f"{type(exc).__name__}: {exc}", retryable=True))
-        remaining = [t for t in targets if results.get(t) is not None]
-        retryable = [t for t in remaining if results[t] and results[t].retryable]  # type: ignore[union-attr]
-        errors = "; ".join(sorted({str(results[t]) for t in remaining}))[:500] if remaining else None
-        retry_after = max((results[t].retry_after or 0 for t in retryable), default=0)  # type: ignore[union-attr]
-        for n in batch:
-            n.attempts += 1
-            n.last_error = errors
-            if not remaining:
-                n.status, n.sent_at, n.pending_targets = "sent", now, None
-            elif not retryable or n.attempts >= self._cfg.max_attempts:
-                n.status, n.pending_targets = "failed", remaining
-                logger.error("Canal %s : abandon après %d tentative(s) : %s", channel.name, n.attempts, errors)
-            else:
-                delay = min(self._cfg.retry_base * 2 ** (n.attempts - 1), _MAX_BACKOFF)
-                n.next_attempt_at = now + max(delay, timedelta(seconds=retry_after))
-                n.pending_targets = retryable
-                logger.warning("Canal %s : tentative %d échouée, nouvelle tentative %s : %s", channel.name, n.attempts, n.next_attempt_at, errors)
-        self._storage.update_notifications(batch)
+        return {target: failure for target in targets if (failure := results.get(target)) is not None}
+
+    def _schedule_retry(
+        self, channel: Channel, notification: Notification, retryable_targets: list[str], retry_after: float, now: datetime, errors: str | None
+    ) -> None:
+        delay = min(self._cfg.retry_base * 2 ** (notification.attempts - 1), _MAX_BACKOFF)
+        notification.next_attempt_at = now + max(delay, timedelta(seconds=retry_after))
+        notification.pending_targets = retryable_targets
+        logger.warning("Canal %s : tentative %d échouée, nouvelle tentative %s : %s", channel.name, notification.attempts, notification.next_attempt_at, errors)
 
     def send_test(self, channel_name: str) -> dict[str, str | None]:
         """Message d'essai immédiat (hors file) : pour vérifier un identifiant de groupe ou un numéro."""

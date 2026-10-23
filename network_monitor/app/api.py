@@ -468,41 +468,61 @@ _ACTIVE_STATUSES = ("suspect", "open", "stale")
 _NOTIFICATION_STATUSES = ("pending", "sent", "failed")
 
 
-@app.get("/metrics")
-def metrics(authorization: Annotated[str | None, Header()] = None) -> Response:
-    """Métriques au format texte Prometheus. Ouvert comme les autres lectures, sauf si `NM_METRICS_TOKEN` est défini
-    (jeton porteur)."""
+def _check_metrics_token(authorization: str | None) -> None:
+    """Sans `NM_METRICS_TOKEN`, `/metrics` est ouvert comme les autres lectures ; avec, il exige ce jeton porteur."""
     token = os.environ.get("NM_METRICS_TOKEN")
     if token and not (authorization and hmac.compare_digest(authorization.encode(), f"Bearer {token}".encode())):
         raise HTTPException(status_code=401, detail="Jeton de métriques invalide ou absent", headers={"WWW-Authenticate": "Bearer"})
-    t, outputs = state.telemetry, state.source.list_outputs()
-    db_ok = state.storage.ping()
+
+
+def _service_metric_families(outputs: list[str], database_ok: bool) -> list[Family]:
+    """Ce que le service sait de lui-même sans interroger la base."""
+    telemetry = state.telemetry
     families: list[Family] = [
         _gauge("nm_up", "Le processus répond.", 1),
         ("nm_build_info", "Version du logiciel.", "gauge", [({"version": app.version}, 1)]),
         _gauge("nm_monitoring_running", "1 si la boucle de surveillance tourne.", state.running),
         _gauge("nm_interval_seconds", "Intervalle entre deux mesures.", state.source.get_interval().total_seconds()),
         _gauge("nm_simulated_clock_timestamp_seconds", "Horloge du serveur (simulée avec le Mock), en secondes epoch.", state.now.timestamp()),
-        ("nm_ticks_total", "Pas de surveillance exécutés.", "counter", [({}, t.ticks)]),
-        ("nm_tick_errors_total", "Pas de surveillance terminés par une erreur.", "counter", [({}, t.errors)]),
-        ("nm_output_calibrated", "1 si la sortie a un modèle calibré.", "gauge", [({"output": o}, state.loop.is_calibrated(o)) for o in outputs]),
+        ("nm_ticks_total", "Pas de surveillance exécutés.", "counter", [({}, telemetry.ticks)]),
+        ("nm_tick_errors_total", "Pas de surveillance terminés par une erreur.", "counter", [({}, telemetry.errors)]),
+        ("nm_output_calibrated", "1 si la sortie a un modèle calibré.", "gauge",
+         [({"output": output_id}, state.loop.is_calibrated(output_id)) for output_id in outputs]),
         ("nm_output_last_sample_timestamp_seconds", "Horodatage de la dernière mesure reçue, par sortie.", "gauge",
-         [({"output": o}, state.loop.last_sample_at[o].timestamp()) for o in outputs if o in state.loop.last_sample_at]),
-        _gauge("nm_database_ok", "1 si la base répond.", db_ok),
+         [({"output": output_id}, state.loop.last_sample_at[output_id].timestamp()) for output_id in outputs if output_id in state.loop.last_sample_at]),
+        _gauge("nm_database_ok", "1 si la base répond.", database_ok),
     ]
-    if t.last_tick_at is not None and t.last_tick_seconds is not None:
+    if telemetry.last_tick_at is not None and telemetry.last_tick_seconds is not None:
         families += [
-            _gauge("nm_last_tick_timestamp_seconds", "Heure réelle de la fin du dernier pas, en secondes epoch.", t.last_tick_at),
-            _gauge("nm_last_tick_duration_seconds", "Durée du dernier pas.", t.last_tick_seconds),
+            _gauge("nm_last_tick_timestamp_seconds", "Heure réelle de la fin du dernier pas, en secondes epoch.", telemetry.last_tick_at),
+            _gauge("nm_last_tick_duration_seconds", "Durée du dernier pas.", telemetry.last_tick_seconds),
         ]
-    if db_ok:
-        active = Counter((i.output_id, i.status.value) for i in state.storage.list_active_incidents())
-        families.append(("nm_active_incidents", "Incidents en cours, par sortie et statut.", "gauge",
-                         [({"output": o, "status": s}, active[(o, s)]) for o in outputs for s in _ACTIVE_STATUSES]))
-        sent = state.storage.count_notifications()
-        channels = [c.name for c in state.config.notifications.channels]
-        families.append(("nm_notifications", "Notifications par canal et statut (comptes en base).", "gauge",
-                         [({"channel": c, "status": s}, sent.get((c, s), 0)) for c in channels for s in _NOTIFICATION_STATUSES]))
+    return families
+
+
+def _database_metric_families(outputs: list[str]) -> list[Family]:
+    """Ce qui exige la base (incidents actifs, notifications), avec des zéros explicites : une règle d'alerte ne doit pas dépendre d'une série absente."""
+    active_counts = Counter((incident.output_id, incident.status.value) for incident in state.storage.list_active_incidents())
+    notification_counts = state.storage.count_notifications()
+    channels = [channel.name for channel in state.config.notifications.channels]
+    return [
+        ("nm_active_incidents", "Incidents en cours, par sortie et statut.", "gauge",
+         [({"output": output_id, "status": status}, active_counts[(output_id, status)]) for output_id in outputs for status in _ACTIVE_STATUSES]),
+        ("nm_notifications", "Notifications par canal et statut (comptes en base).", "gauge",
+         [({"channel": channel, "status": status}, notification_counts.get((channel, status), 0)) for channel in channels for status in _NOTIFICATION_STATUSES]),
+    ]
+
+
+@app.get("/metrics")
+def metrics(authorization: Annotated[str | None, Header()] = None) -> Response:
+    """Métriques au format texte Prometheus. Ouvert comme les autres lectures, sauf si `NM_METRICS_TOKEN` est défini
+    (jeton porteur)."""
+    _check_metrics_token(authorization)
+    outputs = state.source.list_outputs()
+    database_ok = state.storage.ping()
+    families = _service_metric_families(outputs, database_ok)
+    if database_ok:
+        families += _database_metric_families(outputs)
     return Response(render(families), media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
@@ -796,16 +816,17 @@ def list_maintenance(days: Annotated[float, Query(gt=0, le=366)] = 7) -> list[Ma
     return [_maintenance_out(w, now) for w in windows]
 
 
-@app.post("/maintenance", response_model=MaintenanceOut, status_code=201)
-def create_maintenance(body: MaintenanceIn, subject: OperatorSubject) -> MaintenanceOut:
-    """Planifie une maintenance : pendant la fenêtre, les incidents de la sortie sont enregistrés mais ne
-    notifient personne ; son temps est exclu de la disponibilité ; la recalibration l'ignore."""
+_MAX_MAINTENANCE_DURATION = timedelta(days=14)
+
+
+def _resolve_maintenance_period(body: MaintenanceIn, now: datetime) -> tuple[datetime, datetime]:
+    """Début et fin d'une fenêtre, soit absolus (`start`, `end`), soit relatifs à l'horloge du serveur
+    (`starts_in_minutes`, `duration_minutes`) ; 422 si la demande est incohérente."""
     _require_aware(body.start, body.end)
     absolute = body.start is not None or body.end is not None
     relative = body.starts_in_minutes is not None or body.duration_minutes is not None
     if absolute == relative:
         raise HTTPException(status_code=422, detail="Donner soit `start` et `end`, soit `starts_in_minutes` et `duration_minutes`")
-    now = state.now
     if absolute:
         if body.start is None or body.end is None:
             raise HTTPException(status_code=422, detail="`start` et `end` vont ensemble")
@@ -817,10 +838,19 @@ def create_maintenance(body: MaintenanceIn, subject: OperatorSubject) -> Mainten
         end = start + timedelta(minutes=body.duration_minutes)
     if end <= start:
         raise HTTPException(status_code=422, detail="la fin doit suivre le début")
-    if end - start > timedelta(days=14):
+    if end - start > _MAX_MAINTENANCE_DURATION:
         raise HTTPException(status_code=422, detail="une fenêtre ne dépasse pas 14 jours (en planifier plusieurs)")
     if end <= now:
         raise HTTPException(status_code=422, detail="cette fenêtre est déjà terminée")
+    return start, end
+
+
+@app.post("/maintenance", response_model=MaintenanceOut, status_code=201)
+def create_maintenance(body: MaintenanceIn, subject: OperatorSubject) -> MaintenanceOut:
+    """Planifie une maintenance : pendant la fenêtre, les incidents de la sortie sont enregistrés mais ne
+    notifient personne ; son temps est exclu de la disponibilité ; la recalibration l'ignore."""
+    now = state.now
+    start, end = _resolve_maintenance_period(body, now)
     if body.output_id is not None:
         _ensure_known_output(body.output_id)
     window = MaintenanceWindow(
