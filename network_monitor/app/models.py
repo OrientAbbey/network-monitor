@@ -68,6 +68,11 @@ class Severity(str, Enum):
     WARNING = "warning"
     CRITICAL = "critical"
 
+    @property
+    def rank(self) -> int:
+        """0 pour INFO, 1 pour WARNING, 2 pour CRITICAL : de quoi comparer deux sévérités."""
+        return (Severity.INFO, Severity.WARNING, Severity.CRITICAL).index(self)
+
 
 class IncidentType(str, Enum):
     """Types d'incidents initiaux V1."""

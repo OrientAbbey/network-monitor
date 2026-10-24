@@ -41,7 +41,6 @@ from network_monitor.app.config import (
     TelegramChannel,
     WebhookChannel,
 )
-from network_monitor.app.models import Severity
 from network_monitor.incidents.manager import Alert
 from network_monitor.storage.repository import Notification, Repository
 
@@ -51,7 +50,6 @@ logger = logging.getLogger(__name__)
 # signal de vie) : un simple `logging.basicConfig(level=INFO)` côté exploitation suffirait à la divulguer.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-_RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
 _MAX_BACKOFF = timedelta(minutes=15)
 
 _SEVERITY_ICON = {"info": "🔵", "warning": "🟠", "critical": "🔴"}
@@ -294,7 +292,7 @@ class Channel:
         return (
             alert.confirmed
             and alert.event in self.cfg.events
-            and _RANK[alert.severity] >= _RANK[self.cfg.min_severity]
+            and alert.severity.rank >= self.cfg.min_severity.rank
         )
 
     def send(self, alerts: list[dict[str, Any]], targets: list[str]) -> dict[str, DeliveryError | None]:

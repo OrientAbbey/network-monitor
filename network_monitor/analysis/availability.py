@@ -37,8 +37,6 @@ from network_monitor.app.models import (
     Severity,
 )
 
-_SEVERITY_RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
-
 Interval = tuple[datetime, datetime]
 
 
@@ -201,7 +199,7 @@ def _output_availability(
 
     maintenance_intervals = _maintenance_intervals(maintenance, output_id, observed)
     downtime_intervals = _subtract(
-        _union([(span.start, span.end) for span in spans if _SEVERITY_RANK[span.incident.severity] >= _SEVERITY_RANK[downtime_severity]]),
+        _union([(span.start, span.end) for span in spans if span.incident.severity.rank >= downtime_severity.rank]),
         maintenance_intervals,
     )
     degraded_intervals = _subtract(_subtract(_union([(span.start, span.end) for span in spans]), downtime_intervals), maintenance_intervals)

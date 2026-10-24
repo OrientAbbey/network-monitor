@@ -135,7 +135,7 @@ class MonitoringLoop:
             return
         self._recompute_models(now, exclude_ranges=self._active_incident_ranges(now))
         self._last_calibrated_at = now
-        # Rétention (Perf-5) : réutilise ce même rythme périodique plutôt que
+        # Rétention : réutilise ce même rythme périodique plutôt que
         # d'ajouter un second ordonnanceur pour une seule tâche de ménage.
         self._storage.purge_older_than(now - self._config.history.preferred)
 

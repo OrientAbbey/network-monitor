@@ -331,8 +331,8 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
     # /docs et /openapi.json exposent la structure complète de l'API : utile
-    # en développement, à ne pas laisser accessible sans réflexion ailleurs
-    # (S-5). NM_ENV=production (ou toute valeur ≠ "development") les masque.
+    # en développement, à ne pas laisser accessible sans réflexion ailleurs.
+    # NM_ENV=production (ou toute valeur ≠ "development") les masque.
     docs_url="/docs" if _is_development else None,
     redoc_url="/redoc" if _is_development else None,
     openapi_url="/openapi.json" if _is_development else None,
