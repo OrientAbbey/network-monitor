@@ -42,7 +42,9 @@ frontend/                Dashboard React + TypeScript strict (Vite), branché su
   src/
     api.ts, types.ts     Client HTTP typé vers le backend — aucune génération de données
     chart.ts             Décimation et recherche du point le plus proche (fonctions pures)
-    Dashboard.tsx        Interface "Signal Room"
+    Dashboard.tsx        Interface "Signal Room" : assemblage des panneaux et interrogations périodiques
+    *Panel.tsx, DetailChart.tsx, SummaryTable.tsx   Un composant par panneau (détail docs/ARCHITECTURE.md §9)
+    format.ts, theme.ts, styles.ts, operatorActions.ts   Mise en forme, palette, feuille de style, refus lisibles
     main.tsx             Point d'entrée, polices auto-hébergées (@fontsource)
     *.test.ts(x)         Tests Vitest + Testing Library
   e2e/                   Tests Playwright (navigateur réel) et serveur de test déterministe

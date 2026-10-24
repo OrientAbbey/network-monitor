@@ -164,6 +164,36 @@ Refactorisation du formatage **sans changer le français** : la sortie de l'anci
 | Tests de mutation | canal qui ignore sa langue, modèles ignorés, validation des champs affaiblie, traduction oubliée, SMS non dépouillé de ses accents : chacun fait échouer au moins un test |
 | Sécurité des modèles | `{output.__class__}`, `{output[0]}`, `{output!r}`, `{output:>20}`, champ inconnu, accolade mal fermée, modèle de plus de 600 caractères : tous refusés au chargement |
 
+### Mesure du nettoyage et de la simplification
+
+Mesures faites avec le même outil (`radon`) sur le commit de départ et sur le résultat, hors tests.
+
+| Mesure | Avant | Après |
+|---|---|---|
+| Complexité moyenne | 3,39 | 3,25 |
+| Complexité maximale | 35 (`build_report`) | 19 (`evaluate`) |
+| Fonctions de complexité ≥ 21 | 4 (`build_report`, `evaluate`, `_finalize`, `_process_active_incident`) | 0 |
+| Fonctions de complexité ≥ 11 | 23 | 20 |
+| Lignes de code Python (hors tests, vides et commentaires) | 5 792 | 5 902 (**+110**) |
+| `Dashboard.tsx` | 1 159 lignes | 236 lignes, plus 10 modules |
+| Références au cahier des charges dans le code | 159 | 0 (relevé conservé dans `docs/ARCHITECTURE.md` §14) |
+| Bannières de séparation de trois lignes | 16 | 0 |
+
+Le code n'est **pas plus court** : des fonctions longues sont devenues plusieurs fonctions nommées. Le gain est la lisibilité et le risque de modification, pas le volume.
+
+| Ce qui a été simplifié | Comment on sait que rien n'a changé |
+|---|---|
+| Rapport de disponibilité (`build_report`) | 5 000 scénarios aléatoires comparés à l'ancienne implémentation : 0 différence |
+| Moteur d'incidents (`_finalize`, `_process_active_incident`) | 1 500 flux aléatoires (37 424 alertes : réouvertures, maintenance, inhibition, trous de données, libérations) comparés à l'ancienne implémentation : 0 différence |
+| Évaluation (`evaluate`) | 6 000 jeux aléatoires comparés : 0 différence |
+| Messages d'alerte (lot précédent) | 21 524 sorties comparées : 0 différence |
+| `Dashboard.tsx` | comparaison des lignes de code avant et après : aucune ligne de logique ajoutée, perdue ou modifiée |
+| `/metrics`, `create_maintenance`, `_deliver` (reprise des envois), `load_settings` | **tests existants et mutations seulement** (pas de comparaison aléatoire) : 3 mutations de la reprise des envois sont détectées |
+
+Retirés : `run_evaluation` (aucun appelant), un attribut jamais lu, un import inutile, deux tables identiques de l'ordre des sévérités (remplacées par `Severity.rank`), deux restes de numérotation du plan de revue.
+
+Non fait : les fonctions restantes de complexité 11 à 16 (`_pattern_type`, `select_model`, `_escalations`…) n'ont pas été touchées, faute de comparaison fiable à construire pour un gain faible ; les tests n'ont pas été nettoyés ; les abréviations de métier ou d'algorithme (`tp`/`fp`, `df`/`lf`, `n`/`p`/`r` de scrypt) sont conservées volontairement.
+
 Image : sans Docker dans cet environnement, j'ai reproduit les étapes du `Dockerfile` à la main : build du front avec `VITE_API_BASE_URL=""` (le bundle ne contient plus l'adresse par défaut : même origine), environnement vierge avec le seul `requirements.txt` (aucun outil de dev, fuseau `Africa/Douala` disponible), démarrage en production sous un utilisateur sans privilèges. Constaté : `/` sert l'interface, le JS passe de 253 à 78 Ko en gzip, `/docs` et `/openapi.json` répondent 404, `PUT /config` répond 401 sans session et 200 avec, une seconde instance sur la même base est refusée avec un message explicite. Non vérifié : la construction de l'image elle-même, `HEALTHCHECK`, `read_only` et `cap_drop` du compose.
 
 ## Rectifications de la revue initiale

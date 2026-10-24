@@ -190,7 +190,12 @@ mesures purgées vont dans `archive_dir/<sortie encodée>/<jour>.parquet`.
 | `api.ts`, `types.ts` | Client HTTP typé ; `VITE_API_BASE_URL` (chaîne vide = même origine, cas de l'image Docker) ; session en mémoire (jamais dans le stockage du navigateur) |
 | `chart.ts` | Fonctions pures : décimation min/max (les pics ne sont jamais lissés), point le plus proche, pointeur → temps, fusion incrémentale |
 | `polling.ts` | `usePolling` : appelle tout de suite puis à chaque période, **sauf onglet masqué** |
-| `Dashboard.tsx` | Interface « Signal Room » : sorties, graphe détaillé (souris et clavier), tableau comparatif, rapport de disponibilité (maintenance et faux positifs exclus), alertes (retenues marquées), incidents (cause amont, verdicts, précision mesurée sur 30 j), maintenance planifiée, configuration et connexion |
+| `Dashboard.tsx` | Assemblage : état global, interrogations périodiques et mise en page de l'interface « Signal Room » (sorties, graphe détaillé (souris et clavier), tableau comparatif, rapport de disponibilité (maintenance et faux positifs exclus), alertes (retenues marquées), incidents (cause amont, verdicts, précision mesurée sur 30 j), maintenance planifiée, configuration et connexion) |
+| `DetailChart.tsx` | Graphe détaillé d'une sortie (souris et clavier), sélecteur de période, légende |
+| `SummaryTable.tsx` | Tableau comparatif temporel (une requête `GET /outputs/nearest` par rafraîchissement) |
+| `AvailabilityPanel.tsx`, `IncidentsPanel.tsx`, `MaintenancePanel.tsx`, `SettingsPanel.tsx` | Un panneau chacun : disponibilité, incidents (verdicts, prise en charge), maintenance planifiée, configuration et connexion |
+| `operatorActions.ts` | Ce que partagent les actions réservées aux comptes connectés : message de refus lisible, libellés des rôles, infobulle d'un bouton interdit |
+| `format.ts`, `theme.ts`, `styles.ts` | Mise en forme des valeurs, palette et états, feuille de style |
 
 Cadence : sorties/incidents/état toutes les 4 s, graphe déplié toutes les 5 s (incrémental : seulement les
 points postérieurs au dernier connu, invalidation des réponses en vol quand la fenêtre change), tableau comparatif
@@ -253,3 +258,28 @@ d'autant. Le message explicite du graphe (« pas encore assez d'historique ») e
   (informatif), `frontend` (typage, Vitest, build, `npm audit`), `e2e` (Playwright), `docker` (construction + test de fumée :
   `/health`, interface en HTML, `/docs` en 404, seconde instance refusée), `audit` (`pip-audit`, informatif). Le Prometheus
   réel est volontairement omis (ses tests exigent un node_exporter scruté toutes les 5 s).
+
+## 14. Traçabilité vers le cahier des charges
+
+Le code ne cite plus les paragraphes du cahier des charges (`docs/CAHIER_DES_CHARGES_RESEAU.md`) : un commentaire doit se comprendre sans ouvrir un autre document. Voici, par module, les sections qu'il met en œuvre (relevé fait au moment de retirer ces références).
+
+| Module | Sections |
+|---|---|
+| `analysis/availability.py` | §33 |
+| `analysis/detection.py` | §13–§17, §21, §22, §25 |
+| `analysis/evaluation.py` | §33 |
+| `analysis/features.py` | §9.1 |
+| `analysis/features_extended.py` | §9.2, §17 |
+| `analysis/forecasting.py` | §3, §9.3, §10–§14, §35, §36 |
+| `app/api.py` | §3, §11, §13, §21, §27, §28, §35, §37 |
+| `app/auth.py` | §37 |
+| `app/config.py` | §6, §8, §17–§22, §27, §32, §35 |
+| `app/main.py` | §4, §8, §9, §13, §17, §19, §29–§32 |
+| `app/models.py` | §3–§5, §9, §10, §13–§17, §19–§26, §28, §31, §37 |
+| `app/notify.py` | §27, §28 |
+| `data/mock.py` | §7, §15, §33 |
+| `data/source.py` | §3, §4, §6, §8, §31 |
+| `data/sources.py` | §6, §31, §35 |
+| `incidents/manager.py` | §4, §19–§28, §31, §35 |
+| `storage/archive.py` | §29 |
+| `storage/repository.py` | §3, §9, §27, §29 |
