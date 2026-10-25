@@ -338,15 +338,24 @@ test("créer puis annuler une maintenance : horaires relatifs à l'horloge du se
 test("le comparatif charge ses valeurs en une requête par rafraîchissement, sans interroger l'historique par sortie et par instant", async ({ page }) => {
   const nearest: URLSearchParams[] = [];
   const boundedHistory: string[] = [];
+  const nearestResponse = page.waitForResponse((response) => new URL(response.url()).pathname === "/outputs/nearest");
   page.on("request", (r) => {
     const url = new URL(r.url());
     if (url.pathname === "/outputs/nearest") nearest.push(url.searchParams);
     if (/^\/outputs\/[^/]+\/history$/.test(url.pathname) && url.searchParams.has("until")) boundedHistory.push(r.url()); // l'ancienne méthode
   });
   await page.goto("/");
+  const nearestData = await (await nearestResponse).json() as Record<string, Record<string, { traffic_mbps: number } | null>>;
   const row = page.getByRole("region", { name: /comparatif temporel/i }).getByRole("row", { name: /OUT_001/ });
   await expect(row.getByRole("cell").nth(1)).toContainText(/\d+\.\d\d/, { timeout: 30_000 }); // une vraie valeur, issue du vrai backend
-  await expect(row.getByRole("cell").nth(3)).toHaveText("—"); // −1 j : le stockage ne remonte pas avant le démarrage, et le dit
+  const oneDayTraffic = nearestData.OUT_001?.["1440"]?.traffic_mbps;
+  if (oneDayTraffic == null) {
+    await expect(row.getByRole("cell").nth(3)).toHaveText("—");
+  } else {
+    // Selon la durée de la suite et l'historique déjà collecté, un point à J-1
+    // peut exister : vérifier la réponse réelle, pas une absence propre au démarrage.
+    await expect(row.getByRole("cell").nth(3)).toContainText((oneDayTraffic / 1000).toFixed(2));
+  }
   expect(nearest.length).toBeGreaterThanOrEqual(1);
   for (const params of nearest) expect(params.getAll("ago_minutes")).toEqual(["0", "5", "10", "1440", "1445", "10080", "10085"]);
   expect(boundedHistory).toEqual([]); // avant : 3 sorties × 4 fenêtres × 2 instants = 24 requêtes par rafraîchissement
@@ -364,6 +373,8 @@ test("sans prise en charge, un incident escalade une seule fois ; celui expliqu�
 });
 
 test("prendre en charge un incident en cours le dit dans l'interface, persiste côté serveur et se retire", async ({ page, request }) => {
+  const started = await page.request.post("/__e2e/start-late-incident", { headers: { "x-e2e-control": "playwright-local-only" } });
+  expect(started.ok()).toBe(true);
   await signIn(page);
   const panel = incidentsPanel(page);
   const take = panel.getByRole("button", { name: "Prendre en charge l'incident de OUT_003" });

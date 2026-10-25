@@ -259,7 +259,9 @@ def test_heartbeat_never_raises_nor_leaks_the_url_when_the_service_is_down(ping_
         assert hb.beat() is False  # puis il est injoignable
     hb._client.close()
     logged = caplog.text
-    assert "500" in logged and "ConnectError" in logged
+    # Le contrat est le signalement d'indisponibilité, pas la classe réseau
+    # choisie par l'OS (Windows peut expirer là où Linux renvoie ECONNREFUSED).
+    assert "500" in logged and "service injoignable" in logged
     assert SECRET not in logged  # l'URL est un secret : jamais dans les journaux, même quand httpx est bavard
 
 
