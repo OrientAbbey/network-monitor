@@ -335,6 +335,10 @@ def test_alerts_endpoint_hides_weak_signals_unless_asked(client):
     from network_monitor.app.models import IncidentType
     from network_monitor.incidents.manager import Alert
 
+    # Geler la boucle : sinon elle peut confirmer/persister ses propres alertes entre
+    # save_alerts et la requête, ce qui rend le décompte non déterministe.
+    api_module.state.stop()
+
     t = datetime(2026, 9, 1, tzinfo=timezone.utc)
 
     def alert(event, confirmed, minute):

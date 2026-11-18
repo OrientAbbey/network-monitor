@@ -82,10 +82,15 @@ def _freeze(state, **telemetry):
 
 
 def test_metrics_exposes_the_loop_state_in_prometheus_text(client):
+    # Geler la boucle : l'horloge simulée n'avance plus pendant les assertions,
+    # sinon nm_simulated_clock_timestamp_seconds dépend du moment exact du rendu.
+    # `running` est rétabli pour que /metrics rapporte toujours le monitoring actif.
+    state = api_module.state
+    state.stop()
+    state.running = True
     res = client.get("/metrics")
     assert res.status_code == 200 and res.headers["content-type"].startswith("text/plain; version=0.0.4")
     m = parse(res.text)
-    state = api_module.state
     assert m["nm_up"] == 1 and m["nm_monitoring_running"] == 1 and m["nm_database_ok"] == 1
     assert m["nm_ticks_total"] >= 3 and m["nm_tick_errors_total"] == 0
     assert m["nm_last_tick_duration_seconds"] >= 0 and abs(m["nm_last_tick_timestamp_seconds"] - time.time()) < 10
