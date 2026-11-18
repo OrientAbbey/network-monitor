@@ -8,14 +8,15 @@ backend, qui les génère (source Mock), les analyse et les stocke.
 ## ⚠️ État du projet
 
 Ce dépôt est publié à l'état de développement, **sans garantie de fonctionnement**.
-Une revue complète a été réalisée : voir **[`REVUE.md`](REVUE.md)**.
+La revue détaillée [`REVUE.md`](REVUE.md) date du 28 septembre 2026 ; certains constats
+sur l'installation et les tests sont historiques. Les validations en cours sont
+suivies dans [`PLAN_MISE_A_JOUR_ET_NETTOYAGE.md`](PLAN_MISE_A_JOUR_ET_NETTOYAGE.md).
 
-Points bloquants identifiés (détails, correctifs et priorisation dans `REVUE.md`) :
+Points d'attention :
 
-- `npm install` / `npm ci` **échouent** (`@vitejs/plugin-react` incompatible avec `vite@8`) — le frontend n'est pas installable à froid. Contournement : `npm install --legacy-peer-deps`.
-- La suite de tests n'est **pas verte** : sur 66 tests, 54 passent, 12 échouent et 5 erreurient (descripteur SQLite non libéré au teardown).
+- Le frontend est verrouillé sur Vite 6 et son plugin React compatible. L'installation reproductible se fait avec `npm ci` depuis `frontend/`.
 - L'API n'a **aucune authentification** et autorise CORS sur toutes les origines : ne l'exposez pas sur un réseau autre que `localhost`.
-- Un tick de monitoring prend ~1,5 s, à cause de `fsync` SQLite (corrigeable par `PRAGMA journal_mode=WAL` + `synchronous=NORMAL`, gain mesuré 23×).
+- Un tick de monitoring a été mesuré à ~1,5 s lors de la revue, en raison de `fsync` SQLite (piste d'optimisation : `PRAGMA journal_mode=WAL` + `synchronous=NORMAL`).
 
 ## Structure
 
@@ -30,7 +31,7 @@ network_monitor/        Backend Python (le paquet importable)
   analysis/              Forecasting + détection d'anomalies
   incidents/             Moteur d'incidents (machine à états, hystérésis)
   storage/               Persistance SQLite/SQLAlchemy
-  tests/                 66 tests (unitaires, scénarios, API)
+  tests/                 Tests unitaires, scénarios et API
 
 frontend/                Dashboard React (Vite), branché sur l'API
   src/
@@ -42,15 +43,33 @@ docs/
   CAHIER_DES_CHARGES_RESEAU.md   Spécifications du système de détection
   ARCHITECTURE.md                 Documentation technique du projet complet
 
-requirements.txt         Dépendances Python
+pyproject.toml            Dépendances Python et métadonnées du paquet
+uv.lock                   Verrou Python reproductible (généré avec uv)
+requirements.txt           Export verrouillé compatible avec pip
 ```
 
 ## Démarrage rapide
 
-**1. Backend :**
+**1. Backend (Python 3.12 dans un environnement virtuel) :**
+
+Windows PowerShell :
+
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+macOS/Linux :
 
 ```bash
-pip install -r requirements.txt --break-system-packages
+python3.12 -m venv .venv
+source .venv/bin/activate
+```
+
+Une fois l'environnement activé, sur toutes les plateformes :
+
+```bash
+python -m pip install -r requirements.txt
 python -m uvicorn network_monitor.app.api:app --reload
 ```
 
@@ -63,7 +82,9 @@ démarrage (compter quelques secondes). Documentation interactive sur
 ```bash
 cd frontend
 cp .env.example .env   # ajuster VITE_API_BASE_URL si besoin
-npm install
+npm ci
+# Si npm bloque le postinstall d'esbuild, inspecter le script avant approbation :
+npm install-scripts approve esbuild
 npm run dev
 ```
 

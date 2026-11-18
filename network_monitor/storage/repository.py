@@ -96,6 +96,10 @@ class IncidentRow(Base):
 class Repository(ABC):
     """Abstraction de stockage (§29), non couplée au Mock ni aux algorithmes."""
 
+    def close(self) -> None:
+        """Libère les ressources détenues par le backend de stockage, s'il y en a."""
+        return None
+
     @abstractmethod
     def save_samples(self, samples: list[TrafficSample]) -> None: ...
 
@@ -146,6 +150,10 @@ class SqlAlchemyRepository(Repository):
 
     def _session(self) -> Session:
         return self._session_factory()
+
+    def close(self) -> None:
+        """Ferme les connexions inactives du pool SQLAlchemy."""
+        self._engine.dispose()
 
     def save_samples(self, samples: list[TrafficSample]) -> None:
         with self._session() as session:

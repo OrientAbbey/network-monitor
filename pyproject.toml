@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "network-monitor"
+version = "1.0.0"
+description = "Système de détection d'anomalies réseau"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy==2.5.5",
+    "scipy==1.18.1",
+    "statsmodels==0.15.0",
+    "fastapi==0.163.2",
+    "uvicorn==0.54.0",
+    "pydantic==2.14.3",
+    "sqlalchemy==2.1.9",
+    "PyYAML==6.0.3",
+]
+
+[project.optional-dependencies]
+test = [
+    "httpx==0.28.1",
+    "pytest==9.2.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["network_monitor*"]
+
+[tool.uv]
+package = true

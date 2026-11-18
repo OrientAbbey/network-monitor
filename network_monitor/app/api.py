@@ -92,6 +92,14 @@ class MonitoringState:
     def stop(self) -> None:
         self._stop.set()
         self.running = False
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join()
+            self._thread = None
+
+    def close(self) -> None:
+        """Arrête le monitoring et libère les ressources du stockage."""
+        self.stop()
+        self.storage.close()
 
     def _run(self) -> None:
         interval = self.source.get_interval()
@@ -109,10 +117,13 @@ state = MonitoringState()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    state.calibrate()
-    state.start()
-    yield
-    state.stop()
+    current_state = state
+    try:
+        current_state.calibrate()
+        current_state.start()
+        yield
+    finally:
+        current_state.close()
 
 
 app = FastAPI(

@@ -5,7 +5,6 @@ comportement observable (un incident s'est ouvert ou non) sans jamais
 transmettre la vérité terrain du Mock au détecteur.
 """
 
-import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 
@@ -26,24 +25,26 @@ def _run(scenario: AnomalyScenario | None, ticks: int) -> list[IncidentRow]:
     suffisamment au-dessus du minimum de 30j pour un taux de faux positifs réaliste, cf. §11),
     injecte éventuellement un scénario, exécute `ticks` pas et renvoie les lignes
     d'incident enregistrées pour la sortie testée."""
-    path = tempfile.mktemp(suffix=".db")
-    storage = SqlAlchemyRepository(f"sqlite:///{path}")
-    config = AppConfig(history={"minimum": "30d", "preferred": "40d"})
+    with tempfile.TemporaryDirectory() as directory:
+        path = f"{directory}/monitor.db"
+        storage = SqlAlchemyRepository(f"sqlite:///{path}")
+        try:
+            config = AppConfig(history={"minimum": "30d", "preferred": "40d"})
 
-    src = MockDataSource(seed=3)
-    if scenario is not None:
-        src.add_scenario(scenario)
+            src = MockDataSource(seed=3)
+            if scenario is not None:
+                src.add_scenario(scenario)
 
-    loop = MonitoringLoop(src, storage, config)
-    loop.calibrate(NOW)
-    loop.run_forever(NOW, max_ticks=ticks)
+            loop = MonitoringLoop(src, storage, config)
+            loop.calibrate(NOW)
+            loop.run_forever(NOW, max_ticks=ticks)
 
-    with storage._session() as session:
-        rows = session.query(IncidentRow).filter(IncidentRow.output_id == OUTPUT).all()
-        session.expunge_all()
-
-    os.remove(path)
-    return rows
+            with storage._session() as session:
+                rows = session.query(IncidentRow).filter(IncidentRow.output_id == OUTPUT).all()
+                session.expunge_all()
+            return rows
+        finally:
+            storage.close()
 
 
 def _scenario(type_: ScenarioType, duration_minutes: int, **kwargs) -> AnomalyScenario:

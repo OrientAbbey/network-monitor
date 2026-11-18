@@ -1,7 +1,5 @@
 """Tests du stockage : round-trip et séparation des tables (§29, §34)."""
 
-import os
-import tempfile
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -23,11 +21,11 @@ T0 = datetime(2026, 8, 1, 18, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture
-def repo():
-    path = tempfile.mktemp(suffix=".db")
+def repo(tmp_path):
+    path = tmp_path / "repository.db"
     r = SqlAlchemyRepository(f"sqlite:///{path}")
     yield r
-    os.remove(path)
+    r.close()
 
 
 def test_samples_round_trip_preserves_timezone(repo):

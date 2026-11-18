@@ -1,6 +1,5 @@
 """Tests de l'API FastAPI (§37)."""
 
-import time
 from datetime import timedelta
 
 import pytest
@@ -10,6 +9,14 @@ import network_monitor.app.api as api_module
 from network_monitor.app.config import AppConfig
 from network_monitor.app.models import Severity
 from network_monitor.data.mock import AnomalyScenario, ScenarioType
+
+
+def _stop_and_tick(state: api_module.MonitoringState) -> None:
+    """Exécute un tick déterministe sans dépendre de l'ordonnancement du thread."""
+    state.stop()
+    interval = state.source.get_interval()
+    state.now += interval
+    state.loop.run_tick(state.now)
 
 
 @pytest.fixture
@@ -23,7 +30,7 @@ def client(tmp_path):
     api_module.state = state
     with TestClient(api_module.app) as c:
         yield c
-    state.stop()
+    state.close()
 
 
 def test_health(client):
@@ -41,7 +48,8 @@ def test_monitoring_starts_automatically_via_lifespan(client):
 
 
 def test_outputs_listing_reflects_live_data(client):
-    time.sleep(1.0)  # laisser tourner quelques ticks
+    _stop_and_tick(api_module.state)
+
     r = client.get("/outputs")
     assert r.status_code == 200
     body = r.json()
@@ -61,7 +69,8 @@ def test_history_window_validation(client):
 
 
 def test_history_and_anomalies_grow_over_time(client):
-    time.sleep(1.0)
+    _stop_and_tick(api_module.state)
+
     hist = client.get("/outputs/OUT_001/history").json()
     anomalies = client.get("/outputs/OUT_001/anomalies").json()
     assert len(hist) > 0
@@ -97,7 +106,9 @@ def test_stop_and_start_monitoring(client):
 def test_scripted_incident_is_visible_end_to_end(client):
     """Un scénario injecté doit être détecté et exposé via /incidents et /incidents/{id}."""
     state = api_module.state
-    start = state.now + timedelta(minutes=5)
+    _stop_and_tick(state)
+    interval = state.source.get_interval()
+    start = state.now
     end = start + timedelta(minutes=40)
     state.source.add_scenario(
         AnomalyScenario(
@@ -111,10 +122,16 @@ def test_scripted_incident_is_visible_end_to_end(client):
             loss_offset_points=10.0,
         )
     )
-    time.sleep(2.5)
+    for _ in range(4):
+        state.now += interval
+        state.loop.run_tick(state.now)
 
     incidents = client.get("/incidents", params={"limit": 200}).json()
-    matches = [i for i in incidents if i["output_id"] == "OUT_001" and i["incident_type"] == "traffic_drop_with_high_loss"]
+    matches = [
+        i
+        for i in incidents
+        if i["output_id"] == "OUT_001" and i["incident_type"] == "traffic_drop_with_high_loss"
+    ]
     assert matches, "le scénario scripté aurait dû produire au moins un incident traffic_drop_with_high_loss"
 
     detail = client.get(f"/incidents/{matches[0]['id']}").json()
@@ -127,7 +144,8 @@ def test_unknown_incident_returns_404(client):
 
 
 def test_forecast_ahead_returns_points_beyond_now(client):
-    time.sleep(0.5)
+    _stop_and_tick(api_module.state)
+
     r = client.get("/outputs/OUT_001/forecast/ahead", params={"horizon_minutes": 30})
     assert r.status_code == 200
     points = r.json()
