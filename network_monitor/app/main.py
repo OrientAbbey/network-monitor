@@ -114,7 +114,22 @@ class MonitoringLoop:
     def calibrate(self, now: datetime) -> None:
         """Calibration initiale : un modèle et une baseline de pertes par sortie."""
         self._recompute_models(now, exclude_ranges=None)
+        if self._last_calibrated_at is None:
+            self._restore_incidents()
         self._last_calibrated_at = now
+
+    def _restore_incidents(self) -> None:
+        active = self._storage.list_active_incidents()
+        if not active:
+            return
+        superseded = self._incident_manager.restore(active)
+        if superseded:
+            logger.warning(
+                "%d incident(s) actif(s) orphelin(s) fermé(s) : un seul incident actif est suivi par sortie",
+                len(superseded),
+            )
+            self._storage.save_tick([], [], [], superseded, [])
+        logger.info("%d incident(s) actif(s) repris après redémarrage", len(self._incident_manager.active_incidents()))
 
     def maybe_recalibrate(self, now: datetime) -> None:
         """

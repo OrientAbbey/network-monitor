@@ -259,7 +259,7 @@ class MockDataSource(DataSource):
             if output_id is not None and profile.output_id != output_id:
                 continue
             traffic, loss = self._simulate_output(profile, timestamps)
-            for ts, traffic_value, loss_value in zip(timestamps, traffic, loss):
+            for ts, traffic_value, loss_value in zip(timestamps, traffic, loss, strict=True):
                 all_samples.append(
                     TrafficSample(
                         timestamp=ts,

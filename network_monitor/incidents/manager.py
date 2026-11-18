@@ -648,6 +648,33 @@ class IncidentManager:
     def active_incidents(self) -> list[Incident]:
         return [state.incident for state in self._states.values() if state.incident is not None and state.incident.is_active]
 
+    def restore(self, incidents: list[Incident]) -> list[Incident]:
+        """Reprend les incidents actifs après redémarrage et ferme les anciens orphelins.
+
+        L'état de récupération n'est pas persisté : après restauration, le délai de fermeture
+        repart de zéro, ce qui peut prolonger un incident mais ne le ferme pas prématurément.
+        """
+        by_output: dict[str, list[Incident]] = {}
+        for incident in incidents:
+            if incident.is_active:
+                by_output.setdefault(incident.output_id, []).append(incident)
+
+        superseded: list[Incident] = []
+        for output_id, group in by_output.items():
+            group.sort(key=lambda incident: incident.last_seen_at)
+            *older, current = group
+            for orphan in older:
+                orphan.status = IncidentStatus.CLOSED
+                orphan.closed_at = orphan.last_seen_at
+                superseded.append(orphan)
+            self._states[output_id] = _OutputState(
+                suspect_since=current.suspected_at or current.last_seen_at,
+                open_since=current.opened_at,
+                incident=current,
+                last_valid_timestamp=current.last_seen_at,
+            )
+        return superseded
+
 
 def _largest_magnitude(current: float, candidate: float | None) -> float:
     """Le plus grand écart en valeur absolue (une chute de -80 % l'emporte sur une hausse de +30 %)."""

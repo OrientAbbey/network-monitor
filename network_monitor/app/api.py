@@ -48,6 +48,7 @@ from network_monitor.app.models import (
     ForecastResult,
     Incident,
     IncidentStatus,
+    IncidentType,
     IncidentVerdict,
     MaintenanceWindow,
     Severity,
@@ -147,6 +148,8 @@ class Telemetry:
     errors: int = 0
     last_tick_at: float | None = None
     """Heure réelle (epoch) de la fin du dernier pas, réussi ou non."""
+    last_successful_tick_at: float | None = None
+    consecutive_errors: int = 0
     last_tick_seconds: float | None = None
 
 
@@ -264,8 +267,11 @@ class MonitoringState:
             began = time.monotonic()
             try:
                 self.loop.run_tick(now)
+                self.telemetry.last_successful_tick_at = time.time()
+                self.telemetry.consecutive_errors = 0
             except Exception:  # ne jamais laisser une erreur ponctuelle tuer la boucle
                 self.telemetry.errors += 1
+                self.telemetry.consecutive_errors += 1
                 logger.exception("Erreur pendant run_tick à %s", now)
             self.telemetry.ticks += 1
             self.telemetry.last_tick_seconds = time.monotonic() - began
@@ -446,6 +452,30 @@ class AlertOut(BaseModel):
 # --- Endpoints ---
 
 
+# La sonde liveness reste compatible avec Docker : un arrêt volontaire du monitoring
+# ne doit pas redémarrer le processus. La readiness indique sa progression réelle.
+HEALTH_MAX_FAILURES = 3
+HEALTH_MIN_STALL_SECONDS = 60.0
+
+
+def _health_problems() -> list[str]:
+    """Problèmes que `MonitoringState.readiness()` ne voit pas : thread mort, échecs répétés, blocage.
+    L'état de la boucle et la fraîcheur des données restent du ressort de `readiness()`."""
+    problems: list[str] = []
+    if state.running:
+        if state._thread is not None and not state._thread.is_alive():
+            problems.append("thread de monitoring mort")
+        if state.telemetry.consecutive_errors >= HEALTH_MAX_FAILURES:
+            problems.append(f"{state.telemetry.consecutive_errors} erreurs de tick consécutives")
+        if state._thread is not None and state._thread.is_alive():
+            # Un tick qui ne rend jamais la main : le thread vit, l'âge du dernier pas ne bouge plus.
+            last_success = state.telemetry.last_successful_tick_at
+            age = time.time() - last_success if last_success is not None else time.time() - state._started_at
+            if age > max(3 * state.seconds_per_tick, HEALTH_MIN_STALL_SECONDS):
+                problems.append(f"aucun tick réussi depuis {age:.0f} s")
+    return problems
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
@@ -456,7 +486,8 @@ def health_ready() -> JSONResponse:
     """200 si le service fait son travail, 503 avec les raisons sinon (boucle arrêtée ou bloquée, données
     périmées, base inaccessible). `/health` reste la simple vivacité : c'est lui que sonde le HEALTHCHECK Docker,
     car un arrêt volontaire de la surveillance ne doit pas faire redémarrer le conteneur."""
-    reasons = state.readiness()
+    reasons = [*state.readiness(), *_health_problems()]
+    reasons = list(dict.fromkeys(reasons))
     return JSONResponse(status_code=503 if reasons else 200, content={"status": "unavailable" if reasons else "ok", "reasons": reasons})
 
 
@@ -669,12 +700,41 @@ def output_forecast_ahead(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@app.get("/incidents", response_model=list[Incident])
+class IncidentSummary(BaseModel):
+    """Résumé d'incident sans preuves : les données détaillées restent disponibles par ID."""
+
+    id: str
+    output_id: str
+    status: IncidentStatus
+    severity: Severity
+    incident_type: IncidentType
+    suspected_at: datetime | None
+    opened_at: datetime | None
+    last_seen_at: datetime
+    closed_at: datetime | None
+    score: float
+    peak_traffic_deviation_percent: float
+    peak_loss_percent: float
+    description: str
+    maintenance: bool = False
+    root_cause_incident_id: str | None = None
+    inhibited: bool = False
+    verdict: IncidentVerdict | None = None
+    verdict_by: str | None = None
+    verdict_at: datetime | None = None
+    verdict_note: str | None = None
+    acknowledged_by: str | None = None
+    acknowledged_at: datetime | None = None
+    escalated_at: datetime | None = None
+
+
+@app.get("/incidents", response_model=list[IncidentSummary])
 def list_incidents(
     status: Annotated[list[str] | None, Query(description="Filtrer par statut : suspect, open, stale, closed")] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
-) -> list[Incident]:
-    return state.storage.list_incidents(statuses=status, limit=limit)
+) -> list[IncidentSummary]:
+    incidents = state.storage.list_incidents(statuses=status, limit=limit, with_evidence=False)
+    return [IncidentSummary.model_validate(incident.model_dump(exclude={"evidence"})) for incident in incidents]
 
 
 @app.get("/incidents/{incident_id}", response_model=Incident)

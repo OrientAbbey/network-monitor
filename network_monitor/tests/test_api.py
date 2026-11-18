@@ -31,9 +31,31 @@ def client(tmp_path, monkeypatch):
 
 
 def test_health(client):
-    r = client.get("/health")
-    assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_readiness_reports_healthy_monitoring_and_rejects_stopped_loop(client):
+    healthy = client.get("/health/ready")
+    assert healthy.status_code == 200
+    assert healthy.json()["status"] == "ok"
+
+    api_module.state.stop()
+    stopped = client.get("/health/ready")
+    assert stopped.status_code == 503
+    assert "boucle de surveillance arrêtée" in stopped.json()["reasons"]
+
+
+def test_readiness_reports_consecutive_tick_failures(client, monkeypatch):
+    state = api_module.state
+    state.telemetry.consecutive_errors = api_module.HEALTH_MAX_FAILURES
+    state.telemetry.last_successful_tick_at = time.time()
+
+    response = client.get("/health/ready")
+
+    assert response.status_code == 503
+    assert any("erreurs de tick consécutives" in reason for reason in response.json()["reasons"])
 
 
 def test_monitoring_starts_automatically_via_lifespan(client):
@@ -149,6 +171,36 @@ def test_scripted_incident_is_visible_end_to_end(client):
     detail = client.get(f"/incidents/{matches[0]['id']}").json()
     assert detail["id"] == matches[0]["id"]
     assert len(detail["evidence"]) > 0
+
+
+def test_incidents_listing_is_a_summary_without_evidence(client):
+    """La liste ne transporte pas les preuves (volumineuses) : elles restent disponibles par identifiant."""
+    state = api_module.state
+    start = state.now + timedelta(minutes=5)
+    state.source.add_scenario(
+        AnomalyScenario(
+            scenario_id="SUMMARY",
+            output_id="OUT_002",
+            start_time=start,
+            end_time=start + timedelta(minutes=40),
+            type=ScenarioType.TRAFFIC_DROP_HIGH_LOSS,
+            severity=Severity.CRITICAL,
+            traffic_drop_fraction=0.7,
+            loss_offset_points=10.0,
+        )
+    )
+
+    def _matches():
+        return [
+            i
+            for i in client.get("/incidents", params={"limit": 200}).json()
+            if i["output_id"] == "OUT_002" and i["incident_type"] == "traffic_drop_with_high_loss"
+        ]
+
+    _wait_until(lambda: bool(_matches()), timeout=30.0)
+    (summary,) = _matches()[:1]
+    assert "evidence" not in summary
+    assert client.get(f"/incidents/{summary['id']}").json()["evidence"]
 
 
 def test_unknown_incident_returns_404(client):

@@ -48,6 +48,21 @@ def test_save_samples_is_idempotent_on_same_key(repo):
     assert len(history) == 1
 
 
+def test_list_incidents_can_skip_loading_evidence(repo):
+    incident = Incident(
+        id="without-evidence", output_id="OUT_001", status=IncidentStatus.OPEN, severity=Severity.WARNING,
+        incident_type=IncidentType.TRAFFIC_DROP, last_seen_at=T0, score=0.8,
+        description="test", evidence=[IncidentEvidence(timestamp=T0, traffic_anomaly_score=0.1, loss_anomaly_score=0.0)],
+    )
+    repo.upsert_incident(incident)
+
+    [summary] = repo.list_incidents(with_evidence=False)
+    [full] = repo.list_incidents()
+
+    assert summary.evidence == []
+    assert len(full.evidence) == 1
+
+
 def test_incident_round_trip_with_evidence(repo):
     incident = Incident(
         id="INC1",

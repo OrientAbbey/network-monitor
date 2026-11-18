@@ -28,7 +28,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, defer, mapped_column, sessionmaker
 
 from network_monitor.analysis.availability import SampleStats
 from network_monitor.app.models import (
@@ -290,10 +290,12 @@ class Repository(ABC):
     def get_forecasts(self, output_id: str, start: datetime, end: datetime) -> list[ForecastResult]: ...
 
     @abstractmethod
-    def list_active_incidents(self) -> list[Incident]: ...
+    def list_active_incidents(self, with_evidence: bool = True) -> list[Incident]: ...
 
     @abstractmethod
-    def list_incidents(self, statuses: list[str] | None = None, limit: int = 50) -> list[Incident]: ...
+    def list_incidents(
+        self, statuses: list[str] | None = None, limit: int = 50, with_evidence: bool = True
+    ) -> list[Incident]: ...
 
     @abstractmethod
     def get_incident(self, incident_id: str) -> Incident | None: ...
@@ -715,19 +717,28 @@ class SqlAlchemyRepository(Repository):
                 for r in rows
             ]
 
-    def list_active_incidents(self) -> list[Incident]:
+    def list_active_incidents(self, with_evidence: bool = True) -> list[Incident]:
         active_statuses = ["suspect", "open", "stale"]
         with self._session() as session:
-            rows = session.query(IncidentRow).filter(IncidentRow.status.in_(active_statuses)).all()
-            return self._with_operator_state(session, [_incident_from_row(r) for r in rows])
+            query = session.query(IncidentRow).filter(IncidentRow.status.in_(active_statuses))
+            if not with_evidence:
+                query = query.options(defer(IncidentRow.evidence))
+            rows = query.all()
+            incidents = [_incident_from_row(row, with_evidence) for row in rows]
+            return self._with_operator_state(session, incidents)
 
-    def list_incidents(self, statuses: list[str] | None = None, limit: int = 50) -> list[Incident]:
+    def list_incidents(
+        self, statuses: list[str] | None = None, limit: int = 50, with_evidence: bool = True
+    ) -> list[Incident]:
         with self._session() as session:
             query = session.query(IncidentRow)
             if statuses:
                 query = query.filter(IncidentRow.status.in_(statuses))
+            if not with_evidence:
+                query = query.options(defer(IncidentRow.evidence))
             rows = query.order_by(IncidentRow.last_seen_at.desc()).limit(limit).all()
-            return self._with_operator_state(session, [_incident_from_row(r) for r in rows])
+            incidents = [_incident_from_row(row, with_evidence) for row in rows]
+            return self._with_operator_state(session, incidents)
 
     def get_incident(self, incident_id: str) -> Incident | None:
         with self._session() as session:
@@ -882,7 +893,7 @@ class SqlAlchemyRepository(Repository):
                 session.commit()
 
 
-def _incident_from_row(row: IncidentRow) -> Incident:
+def _incident_from_row(row: IncidentRow, with_evidence: bool = True) -> Incident:
     return Incident(
         id=row.id,
         output_id=row.output_id,
@@ -904,5 +915,5 @@ def _incident_from_row(row: IncidentRow) -> Incident:
         inhibited=row.inhibited,
         # `model_dump(mode="json")` sérialise les timestamps en ISO 8601 UTC ;
         # Pydantic les re-parse directement en datetime timezone-aware.
-        evidence=[IncidentEvidence.model_validate(e) for e in row.evidence],
+        evidence=[IncidentEvidence.model_validate(e) for e in row.evidence] if with_evidence else [],
     )

@@ -36,8 +36,12 @@ _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2**14, 8, 1
 _MAXMEM = 64 * 1024 * 1024
 _MAX_FAILURES, _FAILURE_WINDOW = 5, timedelta(minutes=5)
 
-_b64 = lambda raw: base64.urlsafe_b64encode(raw).decode().rstrip("=")
-_unb64 = lambda text: base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+def _b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _unb64(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
 
 
 def utcnow() -> datetime:
