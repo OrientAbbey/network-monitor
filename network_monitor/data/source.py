@@ -1,5 +1,5 @@
 """
-Interface DataSource (§6) et validation des données (§4 "Data Validation", §31).
+Interface DataSource et validation des données.
 
 Le moteur d'analyse ne doit jamais dépendre directement de MockDataSource :
 il dépend uniquement du contrat abstrait `DataSource`. Toute source réelle
@@ -12,15 +12,25 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
 
-from network_monitor.app.models import DataQualityFlag, RawMeasurement, TrafficSample, ValidatedSample
+from network_monitor.app.models import (
+    DataQualityFlag,
+    RawMeasurement,
+    TrafficSample,
+    ValidatedSample,
+)
 
 
 class DataSource(ABC):
-    """Contrat commun à toute source de données, Mock ou réelle (§6)."""
+    """Contrat commun à toute source de données, Mock ou réelle."""
 
     @abstractmethod
-    def load_history(self, start: datetime, end: datetime) -> list[TrafficSample]:
-        """Retourne l'historique normalisé entre start (inclus) et end (exclu)."""
+    def load_history(self, start: datetime, end: datetime, output_id: str | None = None) -> list[TrafficSample]:
+        """Retourne l'historique normalisé entre start (inclus) et end (exclu).
+
+        `output_id` restreint le résultat à une sortie : la calibration charge
+        ainsi une sortie à la fois, au lieu de garder l'historique de toutes
+        les sorties en mémoire en même temps.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -30,18 +40,18 @@ class DataSource(ABC):
 
     @abstractmethod
     def get_interval(self) -> timedelta:
-        """Fréquence native de la source (§3)."""
+        """Fréquence native de la source."""
         raise NotImplementedError
 
     @abstractmethod
     def list_outputs(self) -> list[str]:
-        """Sorties connues de la source, nécessaire pour détecter une sortie inconnue (§31)."""
+        """Sorties connues de la source, nécessaire pour détecter une sortie inconnue."""
         raise NotImplementedError
 
 
 class DataValidator:
     """
-    Étape "Data Validation" du pipeline (§4).
+    Étape "Data Validation" du pipeline.
 
     Détecte, sans jamais planter sur une valeur invalide : sortie inconnue,
     doublon, valeur négative, perte hors bornes, données arrivant en retard.
@@ -61,6 +71,9 @@ class DataValidator:
         self._late_arrival_tolerance = late_arrival_tolerance or expected_interval
         self._seen_keys: set[tuple[str, datetime]] = set()
         self._last_valid_timestamp: dict[str, datetime] = {}
+        self._missing_emitted_until: dict[str, datetime] = {}
+        """Dernier créneau déjà signalé MISSING par `missing_slots`, pour ne
+        jamais réémettre deux fois le même trou (idempotence)."""
 
     def validate_batch(
         self, raw_measurements: list[RawMeasurement], now: datetime | None = None
@@ -132,6 +145,10 @@ class DataValidator:
         timestamp attendu (au pas `expected_interval`) entre le dernier
         timestamp valide connu pour cette sortie (exclu) et `up_to` (inclus).
 
+        Idempotent : un créneau déjà signalé MISSING lors d'un appel
+        précédent n'est jamais réémis, même si `up_to` recouvre une plage
+        déjà couverte (appelé à chaque tick avec un `up_to` croissant).
+
         Retourne une liste vide si la sortie n'a encore jamais été vue
         (pas de référence temporelle pour détecter un trou).
         """
@@ -139,18 +156,20 @@ class DataValidator:
         if last is None:
             return []
 
+        cursor = max(last, self._missing_emitted_until.get(output_id, last))
         missing: list[ValidatedSample] = []
-        t = last + self._expected_interval
-        while t <= up_to:
+        slot_time = cursor + self._expected_interval
+        while slot_time <= up_to:
             missing.append(
                 ValidatedSample(
                     output_id=output_id,
-                    timestamp=t,
+                    timestamp=slot_time,
                     sample=None,
                     quality_flags=[DataQualityFlag.MISSING],
                 )
             )
-            t += self._expected_interval
+            self._missing_emitted_until[output_id] = slot_time
+            slot_time += self._expected_interval
         return missing
 
     def known_outputs(self) -> set[str]:

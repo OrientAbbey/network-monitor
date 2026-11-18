@@ -1,4 +1,4 @@
-"""Tests unitaires du forecasting (§10-§13)."""
+"""Tests unitaires du forecasting."""
 
 from datetime import datetime, timedelta, timezone
 
@@ -39,13 +39,13 @@ def test_seasonal_baseline_rejects_empty_history():
 
 
 def test_holt_winters_rejects_insufficient_history():
-    """Moins de 2 cycles quotidiens ne doit pas produire un modèle silencieusement faux (§10.B)."""
+    """Moins de 2 cycles quotidiens ne doit pas produire un modèle silencieusement faux."""
     with pytest.raises(ValueError):
         HoltWintersModel("OUT_001").fit(_flat_history(days=1))
 
 
 def test_select_model_falls_back_to_baseline_below_minimum_history():
-    """En dessous du seuil configuré, pas de backtesting : repli automatique (§11)."""
+    """En dessous du seuil configuré, pas de backtesting : repli automatique."""
     history = _flat_history(days=20)
     model = select_model(
         "OUT_001", history,

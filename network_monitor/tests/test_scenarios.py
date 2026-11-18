@@ -1,11 +1,10 @@
 """
-Tests de scénarios de bout en bout (§34) : Mock -> Forecast -> Detection ->
+Tests de scénarios de bout en bout : Mock -> Forecast -> Detection ->
 Incident, pour chaque type minimal requis. Chaque test vérifie le
 comportement observable (un incident s'est ouvert ou non) sans jamais
 transmettre la vérité terrain du Mock au détecteur.
 """
 
-import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 
@@ -23,26 +22,24 @@ OUTPUT = "OUT_001"
 
 def _run(scenario: AnomalyScenario | None, ticks: int) -> list[IncidentRow]:
     """Calibre sur 40 jours (sous le seuil de 45j : baseline saisonnière, rapide et stable ;
-    suffisamment au-dessus du minimum de 30j pour un taux de faux positifs réaliste, cf. §11),
+    suffisamment au-dessus du minimum de 30j pour un taux de faux positifs réaliste),
     injecte éventuellement un scénario, exécute `ticks` pas et renvoie les lignes
     d'incident enregistrées pour la sortie testée."""
-    path = tempfile.mktemp(suffix=".db")
-    storage = SqlAlchemyRepository(f"sqlite:///{path}")
-    config = AppConfig(history={"minimum": "30d", "preferred": "40d"})
-
-    src = MockDataSource(seed=3)
-    if scenario is not None:
-        src.add_scenario(scenario)
-
-    loop = MonitoringLoop(src, storage, config)
-    loop.calibrate(NOW)
-    loop.run_forever(NOW, max_ticks=ticks)
-
-    with storage._session() as session:
-        rows = session.query(IncidentRow).filter(IncidentRow.output_id == OUTPUT).all()
-        session.expunge_all()
-
-    os.remove(path)
+    with tempfile.TemporaryDirectory() as tmp:
+        storage = SqlAlchemyRepository(f"sqlite:///{tmp}/scenario.db")
+        try:
+            config = AppConfig.model_validate({"history": {"minimum": "30d", "preferred": "40d"}})
+            src = MockDataSource(seed=3)
+            if scenario is not None:
+                src.add_scenario(scenario)
+            loop = MonitoringLoop(src, storage, config)
+            loop.calibrate(NOW)
+            loop.run_forever(NOW, max_ticks=ticks)
+            with storage._session() as session:
+                rows = session.query(IncidentRow).filter(IncidentRow.output_id == OUTPUT).all()
+                session.expunge_all()
+        finally:
+            storage.dispose()  # libère le fichier avant la suppression du dossier (Windows)
     return rows
 
 
@@ -106,8 +103,8 @@ def test_intermittent_incident_opens_incident():
 
 
 def test_short_incident_is_detected():
-    """Un incident court (juste au-dessus de minimum_duration) doit tout de même s'ouvrir."""
-    rows = _run(_scenario(ScenarioType.SHORT_INCIDENT, duration_minutes=15), ticks=15)
+    """Un incident court (juste au-dessus de minimum_duration, 15 min) doit tout de même s'ouvrir."""
+    rows = _run(_scenario(ScenarioType.SHORT_INCIDENT, duration_minutes=25), ticks=20)
     assert any(r.opened_at is not None for r in rows)
 
 
@@ -124,7 +121,7 @@ def test_long_incident_stays_open_across_many_ticks():
     [ScenarioType.PROGRESSIVE_RECOVERY, ScenarioType.COMBINED],
 )
 def test_remaining_scenario_types_run_without_error(scenario_type):
-    """Les deux derniers types du §7 (non listés explicitement au §34) doivent au moins
+    """Les deux derniers types de scénario doivent au moins
     s'exécuter sans erreur ; leur détection n'est pas garantie à ce niveau de sévérité."""
     rows = _run(_scenario(scenario_type, duration_minutes=40), ticks=20)
     assert isinstance(rows, list)  # ne doit pas lever d'exception

@@ -1,8 +1,8 @@
 """
-Implémentation Mock de DataSource (§7).
+Implémentation Mock de DataSource.
 
 Sert à la fois de source de données pour développer/tester le système sans
-source réelle, et d'environnement de validation (§33) grâce à sa vérité
+source réelle, et d'environnement de validation grâce à sa vérité
 terrain interne, jamais transmise au détecteur.
 """
 
@@ -17,15 +17,12 @@ from pydantic import BaseModel, Field
 from network_monitor.app.models import Severity, TrafficSample
 from network_monitor.data.source import DataSource
 
-
-# ---------------------------------------------------------------------------
-# Profils de sortie
-# ---------------------------------------------------------------------------
+# --- Profils de sortie ---
 
 
 class OutputProfile(BaseModel):
     """
-    Comportement "normal" d'une sortie réseau (§7 : saisonnalité quotidienne
+    Comportement "normal" d'une sortie réseau (saisonnalité quotidienne
     et hebdomadaire, bruit, heures de pointe/creuses, échelle propre).
     """
 
@@ -47,7 +44,7 @@ class OutputProfile(BaseModel):
 
     # Niveau et dispersion habituels des pertes. Certaines sorties ont une
     # dispersion volontairement quasi nulle pour exercer le plancher
-    # loss_std_floor (§15) côté détection.
+    # loss_std_floor côté détection.
     base_loss_percent: float = 0.15
     loss_noise_std: float = 0.05
 
@@ -78,13 +75,11 @@ DEFAULT_PROFILES: list[OutputProfile] = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Scénarios d'anomalie
-# ---------------------------------------------------------------------------
+# --- Scénarios d'anomalie ---
 
 
 class ScenarioType(str, Enum):
-    """Les dix scénarios d'anomalie requis par le §7."""
+    """Les dix scénarios d'anomalie de la démonstration."""
 
     TRAFFIC_DROP = "traffic_drop"
     TRAFFIC_SPIKE = "traffic_spike"
@@ -100,9 +95,9 @@ class ScenarioType(str, Enum):
 
 class AnomalyScenario(BaseModel):
     """
-    Vérité terrain interne d'un scénario injecté (§7). Ce modèle n'est
+    Vérité terrain interne d'un scénario injecté. Ce modèle n'est
     jamais transmis au détecteur : il sert uniquement à générer le signal
-    et, plus tard, à évaluer les performances du système (§33).
+    et, plus tard, à évaluer les performances du système.
     """
 
     scenario_id: str
@@ -130,68 +125,66 @@ def _scenario_effect(scenario: AnomalyScenario, elapsed: np.ndarray) -> tuple[np
 
     Le mapping type -> forme d'effet est un choix d'implémentation du
     Mock, pas une spécification du cahier des charges au-delà de la
-    liste des dix types attendus (§7).
+    liste des dix types attendus.
     """
-    e = np.clip(elapsed, 0.0, 1.0)
-    t = scenario.type
+    progress = np.clip(elapsed, 0.0, 1.0)
+    scenario_type = scenario.type
 
-    if t == ScenarioType.TRAFFIC_DROP:
-        return np.full_like(e, 1.0 - scenario.traffic_drop_fraction), np.zeros_like(e)
+    if scenario_type == ScenarioType.TRAFFIC_DROP:
+        return np.full_like(progress, 1.0 - scenario.traffic_drop_fraction), np.zeros_like(progress)
 
-    if t == ScenarioType.TRAFFIC_SPIKE:
-        return np.full_like(e, scenario.traffic_spike_multiplier), np.zeros_like(e)
+    if scenario_type == ScenarioType.TRAFFIC_SPIKE:
+        return np.full_like(progress, scenario.traffic_spike_multiplier), np.zeros_like(progress)
 
-    if t == ScenarioType.HIGH_LOSS:
-        return np.ones_like(e), np.full_like(e, scenario.loss_offset_points)
+    if scenario_type == ScenarioType.HIGH_LOSS:
+        return np.ones_like(progress), np.full_like(progress, scenario.loss_offset_points)
 
-    if t in (ScenarioType.TRAFFIC_DROP_HIGH_LOSS, ScenarioType.SHORT_INCIDENT, ScenarioType.LONG_INCIDENT):
+    if scenario_type in (ScenarioType.TRAFFIC_DROP_HIGH_LOSS, ScenarioType.SHORT_INCIDENT, ScenarioType.LONG_INCIDENT):
         # SHORT_INCIDENT / LONG_INCIDENT ont le même effet numérique que
         # TRAFFIC_DROP_HIGH_LOSS : ce qui les distingue est la durée de
         # l'instance (start_time -> end_time), pas la forme de l'effet.
         return (
-            np.full_like(e, 1.0 - scenario.traffic_drop_fraction),
-            np.full_like(e, scenario.loss_offset_points),
+            np.full_like(progress, 1.0 - scenario.traffic_drop_fraction),
+            np.full_like(progress, scenario.loss_offset_points),
         )
 
-    if t == ScenarioType.PROGRESSIVE_DEGRADATION:
-        return 1.0 - scenario.traffic_drop_fraction * e, scenario.loss_offset_points * e
+    if scenario_type == ScenarioType.PROGRESSIVE_DEGRADATION:
+        return 1.0 - scenario.traffic_drop_fraction * progress, scenario.loss_offset_points * progress
 
-    if t == ScenarioType.PROGRESSIVE_RECOVERY:
+    if scenario_type == ScenarioType.PROGRESSIVE_RECOVERY:
         # Démarre totalement dégradé, revient linéairement à la normale.
         return (
-            1.0 - scenario.traffic_drop_fraction * (1.0 - e),
-            scenario.loss_offset_points * (1.0 - e),
+            1.0 - scenario.traffic_drop_fraction * (1.0 - progress),
+            scenario.loss_offset_points * (1.0 - progress),
         )
 
-    if t == ScenarioType.INTERMITTENT_INCIDENT:
+    if scenario_type == ScenarioType.INTERMITTENT_INCIDENT:
         total_duration = (scenario.end_time - scenario.start_time).total_seconds()
         period_fraction = scenario.intermittent_period.total_seconds() / total_duration
-        phase = np.mod(e / period_fraction, 1.0)
+        phase = np.mod(progress / period_fraction, 1.0)
         on = phase < scenario.intermittent_duty_cycle
         traffic_factor = np.where(on, 1.0 - scenario.traffic_drop_fraction, 1.0)
         loss_offset = np.where(on, scenario.loss_offset_points, 0.0)
         return traffic_factor, loss_offset
 
-    if t == ScenarioType.COMBINED:
+    if scenario_type == ScenarioType.COMBINED:
         # Choix d'implémentation : dégradation progressive du trafic
         # combinée à des pics de pertes intermittents, pour représenter
-        # un scénario multi-anomalies réaliste (§7, point 10).
-        traffic_factor = 1.0 - scenario.traffic_drop_fraction * e
-        phase = np.mod(e * 4.0, 1.0)
+        # un scénario multi-anomalies réaliste.
+        traffic_factor = 1.0 - scenario.traffic_drop_fraction * progress
+        phase = np.mod(progress * 4.0, 1.0)
         loss_offset = np.where(phase < 0.3, scenario.loss_offset_points, 0.0)
         return traffic_factor, loss_offset
 
-    return np.ones_like(e), np.zeros_like(e)
+    return np.ones_like(progress), np.zeros_like(progress)
 
 
-# ---------------------------------------------------------------------------
-# MockDataSource
-# ---------------------------------------------------------------------------
+# --- MockDataSource ---
 
 
 class MockDataSource(DataSource):
     """
-    Générateur Mock (§7). Fonctionne immédiatement sans source réelle,
+    Générateur Mock. Fonctionne immédiatement sans source réelle,
     supporte génération historique (`load_history`) et continue
     (`get_latest`), et permet l'injection contrôlée de scénarios via
     `add_scenario`.
@@ -219,8 +212,8 @@ class MockDataSource(DataSource):
     def get_interval(self) -> timedelta:
         return self._interval
 
-    def load_history(self, start: datetime, end: datetime) -> list[TrafficSample]:
-        return self._generate_range(start, end)
+    def load_history(self, start: datetime, end: datetime, output_id: str | None = None) -> list[TrafficSample]:
+        return self._generate_range(start, end, output_id)
 
     def start_realtime(self, now: datetime) -> None:
         """Initialise le curseur temps réel utilisé par `get_latest`."""
@@ -245,15 +238,14 @@ class MockDataSource(DataSource):
 
     def ground_truth(self) -> list[AnomalyScenario]:
         """
-        Vérité terrain complète (§7). À usage exclusif de l'évaluation
-        (§33) — ne doit jamais être transmise au détecteur pendant son
+        Vérité terrain complète. À usage exclusif de l'évaluation — ne doit jamais être transmise au détecteur pendant son
         fonctionnement normal.
         """
         return list(self._scenarios)
 
     # -- Génération interne ---------------------------------------------------
 
-    def _generate_range(self, start: datetime, end: datetime) -> list[TrafficSample]:
+    def _generate_range(self, start: datetime, end: datetime, output_id: str | None = None) -> list[TrafficSample]:
         if end <= start:
             return []
 
@@ -264,14 +256,16 @@ class MockDataSource(DataSource):
 
         all_samples: list[TrafficSample] = []
         for profile in self._profiles.values():
+            if output_id is not None and profile.output_id != output_id:
+                continue
             traffic, loss = self._simulate_output(profile, timestamps)
-            for ts, tr, lo in zip(timestamps, traffic, loss):
+            for ts, traffic_value, loss_value in zip(timestamps, traffic, loss):
                 all_samples.append(
                     TrafficSample(
                         timestamp=ts,
                         output_id=profile.output_id,
-                        traffic_mbps=float(tr),
-                        loss_percent=float(lo),
+                        traffic_mbps=float(traffic_value),
+                        loss_percent=float(loss_value),
                     )
                 )
 
